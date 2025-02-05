@@ -234,6 +234,35 @@ class VideoWidget(QLabel):
             return text
         return None
 
+class MainWindow(QMainWindow):
+    def __init__(self, decoder_opts, rwidth, rheight, host_ip, password, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Remote Desktop Viewer")
+        self.remote_width  = rwidth
+        self.remote_height = rheight
+        self.control_addr  = (host_ip, CONTROL_PORT)
+        self.control_sock  = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.control_sock.setblocking(False)
+        self.password = password
+        self.video_widget = VideoWidget(self.send_control, rwidth, rheight)
+        self.setCentralWidget(self.video_widget)
+        self.video_widget.setFocus()
+        mcast_url = f"udp://@{MULTICAST_IP}:{DEFAULT_UDP_PORT}?fifo_size=5000000&overrun_nonfatal=1"
+        self.decoder_thread = DecoderThread(mcast_url, decoder_opts)
+        self.decoder_thread.frame_ready.connect(self.update_image, Qt.DirectConnection)
+        self.decoder_thread.start()
+
+    def update_image(self, qimg):
+        self.video_widget.setPixmap(QPixmap.fromImage(qimg))
+
+    def send_control(self, msg):
+        if self.password:
+            msg = f"PASSWORD:{self.password}:" + msg
+        try:
+            self.control_sock.sendto(msg.encode("utf-8"), self.control_addr)
+        except Exception as e:
+            logging.error(f"Error sending control message: {e}")
+
 def clipboard_listener_client():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("", UDP_CLIPBOARD_PORT))
@@ -264,41 +293,10 @@ def control_listener_client():
         except Exception as e:
             logging.error(f"Client control listener error: {e}")
 
-class MainWindow(QMainWindow):
-    def __init__(self, udp_port, decoder_opts, rwidth, rheight, host_ip, password, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Remote Desktop Viewer")
-        self.remote_width  = rwidth
-        self.remote_height = rheight
-        self.control_addr  = (host_ip, CONTROL_PORT)
-        self.control_sock  = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.control_sock.setblocking(False)
-        self.password = password
-        self.video_widget = VideoWidget(self.send_control, rwidth, rheight)
-        self.setCentralWidget(self.video_widget)
-        self.video_widget.setFocus()
-        mcast_url = f"udp://@{MULTICAST_IP}:{udp_port}?fifo_size=5000000&overrun_nonfatal=1"
-        self.decoder_thread = DecoderThread(mcast_url, decoder_opts)
-        self.decoder_thread.frame_ready.connect(self.update_image, Qt.DirectConnection)
-        self.decoder_thread.start()
-
-    def update_image(self, qimg):
-        self.video_widget.setPixmap(QPixmap.fromImage(qimg))
-
-    def send_control(self, msg):
-        if self.password:
-            msg = f"PASSWORD:{self.password}:" + msg
-        try:
-            self.control_sock.sendto(msg.encode("utf-8"), self.control_addr)
-        except Exception as e:
-            logging.error(f"Error sending control message: {e}")
-
 def main():
     parser = argparse.ArgumentParser(description="Remote Desktop Client (Production Ready)")
     parser.add_argument("--decoder", choices=["nvdec", "vaapi", "none"], default="none",
                         help="Choose hardware decoder: nvdec, vaapi, or none.")
-    parser.add_argument("--udp_port", type=int, default=DEFAULT_UDP_PORT,
-                        help="UDP port for video streaming.")
     parser.add_argument("--host_ip", required=True,
                         help="Host IP for control events and TCP handshake.")
     parser.add_argument("--remote_resolution", default=DEFAULT_RESOLUTION,
@@ -348,7 +346,7 @@ def main():
         logging.info("Starting audio playback...")
         audio_proc = subprocess.Popen(audio_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    window = MainWindow(args.udp_port, decoder_opts, w, h, args.host_ip, args.password)
+    window = MainWindow(decoder_opts, w, h, args.host_ip, args.password)
     window.show()
     ret = app.exec_()
 
