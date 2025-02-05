@@ -11,6 +11,7 @@ import urllib.request
 from PyQt5.QtWidgets import QApplication, QLabel, QMainWindow, QSizePolicy
 from PyQt5.QtGui import QImage, QPixmap, QIcon
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
+import atexit
 
 DEFAULT_UDP_PORT   = 5000
 DEFAULT_RESOLUTION = "1920x1080"
@@ -88,10 +89,11 @@ class VideoWidget(QLabel):
         self.clipboard = QApplication.clipboard()
         self.clipboard.dataChanged.connect(self.on_clipboard_change)
         self.last_clipboard = self.clipboard.text()
+        self.ignore_clipboard = False
 
     def on_clipboard_change(self):
         new_text = self.clipboard.text()
-        if new_text and new_text != self.last_clipboard:
+        if not self.ignore_clipboard and new_text and new_text != self.last_clipboard:
             self.last_clipboard = new_text
             msg = f"CLIPBOARD_UPDATE CLIENT {new_text}"
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -277,9 +279,11 @@ def clipboard_listener_client():
             if len(tokens) >= 3 and tokens[0] == "CLIPBOARD_UPDATE" and tokens[1] == "HOST":
                 new_content = tokens[2]
                 clipboard = QApplication.clipboard()
+                clipboard.blockSignals(True)
                 if new_content != clipboard.text():
                     clipboard.setText(new_content)
                     logging.info("Client clipboard updated from host.")
+                clipboard.blockSignals(False)
         except Exception as e:
             logging.error(f"Client clipboard listener error: {e}")
 
@@ -295,6 +299,14 @@ def control_listener_client():
                 logging.info(f"Client received control message: {msg}")
         except Exception as e:
             logging.error(f"Client control listener error: {e}")
+
+def cleanup():
+    try:
+        pass
+    except Exception:
+        pass
+
+atexit.register(cleanup)
 
 def main():
     parser = argparse.ArgumentParser(description="Remote Desktop Client (Production Ready)")
