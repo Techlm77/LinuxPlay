@@ -6,6 +6,7 @@ import logging
 import subprocess
 import socket
 import time
+import threading
 from PyQt5.QtWidgets import QApplication, QLabel, QMainWindow
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
@@ -15,6 +16,7 @@ DEFAULT_RESOLUTION = "1920x1080"
 MULTICAST_IP       = "239.0.0.1"
 CONTROL_PORT       = 7000
 TCP_HANDSHAKE_PORT = 7001
+UDP_CLIPBOARD_PORT = 7002
 MOUSE_MOVE_THROTTLE = 0.02
 
 logging.basicConfig(
@@ -80,6 +82,19 @@ class VideoWidget(QLabel):
         self.remote_width  = rwidth
         self.remote_height = rheight
         self.last_mouse_move = 0
+        self.clipboard = QApplication.clipboard()
+        self.clipboard.dataChanged.connect(self.on_clipboard_change)
+        self.last_clipboard = self.clipboard.text()
+
+    def on_clipboard_change(self):
+        new_text = self.clipboard.text()
+        if new_text and new_text != self.last_clipboard:
+            self.last_clipboard = new_text
+            msg = f"CLIPBOARD_UPDATE CLIENT {new_text}"
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+            sock.sendto(msg.encode("utf-8"), (MULTICAST_IP, UDP_CLIPBOARD_PORT))
+            logging.info("Client clipboard updated and broadcast.")
 
     def mouseMoveEvent(self, e):
         now = time.time()
@@ -219,6 +234,36 @@ class VideoWidget(QLabel):
             return text
         return None
 
+def clipboard_listener_client():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("", UDP_CLIPBOARD_PORT))
+    while True:
+        try:
+            data, addr = sock.recvfrom(65535)
+            msg = data.decode("utf-8", errors="replace")
+            tokens = msg.split(maxsplit=2)
+            if len(tokens) >= 3 and tokens[0] == "CLIPBOARD_UPDATE" and tokens[1] == "HOST":
+                new_content = tokens[2]
+                clipboard = QApplication.clipboard()
+                if new_content != clipboard.text():
+                    clipboard.setText(new_content)
+                    logging.info("Client clipboard updated from host.")
+        except Exception as e:
+            logging.error(f"Client clipboard listener error: {e}")
+
+def control_listener_client():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("", CONTROL_PORT))
+    logging.info(f"Client control listener active on UDP port {CONTROL_PORT}")
+    while True:
+        try:
+            data, addr = sock.recvfrom(2048)
+            msg = data.decode("utf-8", errors="replace").strip()
+            if msg:
+                logging.info(f"Client received control message: {msg}")
+        except Exception as e:
+            logging.error(f"Client control listener error: {e}")
+
 class MainWindow(QMainWindow):
     def __init__(self, udp_port, decoder_opts, rwidth, rheight, host_ip, password, parent=None):
         super().__init__(parent)
@@ -250,12 +295,18 @@ class MainWindow(QMainWindow):
 
 def main():
     parser = argparse.ArgumentParser(description="Remote Desktop Client (Production Ready)")
-    parser.add_argument("--decoder", choices=["nvdec", "vaapi", "none"], default="none", help="Choose hardware decoder: nvdec, vaapi, or none.")
-    parser.add_argument("--udp_port", type=int, default=DEFAULT_UDP_PORT, help="UDP port for video streaming.")
-    parser.add_argument("--host_ip", required=True, help="Host IP for control events and TCP handshake.")
-    parser.add_argument("--remote_resolution", default=DEFAULT_RESOLUTION, help="Remote screen resolution, e.g., 1920x1080.")
-    parser.add_argument("--audio", choices=["enable", "disable"], default="disable", help="Enable or disable audio playback.")
-    parser.add_argument("--password", default="", help="Optional password for control events and handshake.")
+    parser.add_argument("--decoder", choices=["nvdec", "vaapi", "none"], default="none",
+                        help="Choose hardware decoder: nvdec, vaapi, or none.")
+    parser.add_argument("--udp_port", type=int, default=DEFAULT_UDP_PORT,
+                        help="UDP port for video streaming.")
+    parser.add_argument("--host_ip", required=True,
+                        help="Host IP for control events and TCP handshake.")
+    parser.add_argument("--remote_resolution", default=DEFAULT_RESOLUTION,
+                        help="Remote screen resolution, e.g., 1920x1080.")
+    parser.add_argument("--audio", choices=["enable", "disable"], default="disable",
+                        help="Enable or disable audio playback.")
+    parser.add_argument("--password", default="",
+                        help="Optional password for control events and handshake.")
     args = parser.parse_args()
 
     try:
@@ -275,6 +326,12 @@ def main():
         sys.exit("TCP handshake failed. Exiting.")
 
     app = QApplication(sys.argv)
+
+    clipboard_thread = threading.Thread(target=clipboard_listener_client, daemon=True)
+    clipboard_thread.start()
+
+    control_thread = threading.Thread(target=control_listener_client, daemon=True)
+    control_thread.start()
 
     audio_proc = None
     if args.audio == "enable":
