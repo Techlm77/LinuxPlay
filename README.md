@@ -89,14 +89,10 @@ This project is licensed under the MIT License.
 
 Development is ongoing, and here are some planned features for future updates:
 
-- **Clipboard Sharing** – Allow users to copy and paste text between the client and host.
+- (Added) **Clipboard Sharing** – Allow users to copy and paste text between the client and host.
 - **H.265 and AV1 Support** – Improve compression and reduce bandwidth usage for better performance.
 - **Full Encryption** – Implement TLS encryption for control messages and video streaming to enhance security.
 - **Internet-Ready Security** – Enable secure connections over the internet with end-to-end encryption.
-- **Multi-Client Support** – Allow multiple clients to connect and view the same session.
-- **File Transfer** – Enable seamless file transfers between the host and client.
-- **Dynamic Encoding Adjustment** – Allow changing resolution, bitrate, and framerate on the fly.
-- **Wayland Support** – Extend compatibility beyond X11 for modern Linux desktops.
 
 ### Security Warning
 LinuxPlay can be used over the internet, but **it currently does not have encryption**. It is recommended to use a **VPN, SSH tunnel, or manually restrict access via firewall rules** if you plan to use it remotely. Future versions will include built-in encryption to enhance security.
