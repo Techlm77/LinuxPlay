@@ -47,7 +47,7 @@ python3 host.py --encoder vaapi --resolution 1600x900 --framerate 60 --audio ena
 Run this command on the local machine (the one used to control the remote PC):
 
 ```bash
-python3 client.py --decoder nvdec --udp_port 5000 --host_ip 192.168.1.123 --remote_resolution 1600x900 --audio enable --password password123
+python3 client.py --decoder nvdec --host_ip 192.168.1.123 --remote_resolution 1600x900 --audio enable --password password123
 ```
 
 #### Available Options:
