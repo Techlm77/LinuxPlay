@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 import subprocess
 import argparse
 import sys
@@ -10,6 +11,7 @@ import socket
 UDP_VIDEO_PORT = 5000
 UDP_AUDIO_PORT = 6001
 UDP_CONTROL_PORT = 7000
+UDP_CLIPBOARD_PORT = 7002
 TCP_HANDSHAKE_PORT = 7001
 MULTICAST_IP = "239.0.0.1"
 DEFAULT_RES = "1920x1080"
@@ -21,13 +23,33 @@ current_video_thread = None
 current_bitrate = DEFAULT_BITRATE
 host_password = None
 
+last_clipboard_content = ""
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S"
 )
 
+def get_display():
+    return os.environ.get("DISPLAY", ":0")
+
+def detect_pulse_monitor():
+    monitor = os.environ.get("PULSE_MONITOR")
+    if monitor:
+        return monitor
+    try:
+        output = subprocess.check_output(["pactl", "list", "short", "sources"], universal_newlines=True)
+        for line in output.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and ".monitor" in parts[1]:
+                return parts[1]
+    except Exception as e:
+        logging.error(f"Error detecting PulseAudio monitor: {e}")
+    return "default.monitor"
+
 def build_video_cmd(args, bitrate):
+    display = get_display()
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -36,7 +58,7 @@ def build_video_cmd(args, bitrate):
         "-f", "x11grab",
         "-framerate", args.framerate,
         "-video_size", args.resolution,
-        "-i", ":0.0"
+        "-i", display
     ]
     if args.encoder == "nvenc":
         encode = [
@@ -44,7 +66,8 @@ def build_video_cmd(args, bitrate):
             "-preset", "llhq",
             "-g", "30",
             "-bf", "0",
-            "-b:v", bitrate
+            "-b:v", bitrate,
+            "-pix_fmt", "yuv420p"
         ]
     elif args.encoder == "vaapi":
         encode = [
@@ -63,7 +86,8 @@ def build_video_cmd(args, bitrate):
             "-tune", "zerolatency",
             "-g", "30",
             "-bf", "0",
-            "-b:v", bitrate
+            "-b:v", bitrate,
+            "-pix_fmt", "yuv420p"
         ]
     out = [
         "-f", "mpegts",
@@ -72,6 +96,7 @@ def build_video_cmd(args, bitrate):
     return cmd + encode + out
 
 def build_audio_cmd():
+    monitor_source = detect_pulse_monitor()
     return [
         "ffmpeg",
         "-hide_banner",
@@ -79,7 +104,7 @@ def build_audio_cmd():
         "-fflags", "nobuffer",
         "-flags", "low_delay",
         "-f", "pulse",
-        "-i", "default.monitor",
+        "-i", monitor_source,
         "-c:a", "libopus",
         "-b:a", "128k",
         "-f", "mpegts",
@@ -96,10 +121,12 @@ class StreamThread(threading.Thread):
 
     def run(self):
         logging.info(f"Starting {self.name} stream: {' '.join(self.cmd)}")
-        self.process = subprocess.Popen(self.cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.process = subprocess.Popen(self.cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, universal_newlines=True)
         while self._running:
-            if self.process.poll() is not None:
-                logging.error(f"{self.name} process ended unexpectedly.")
+            ret = self.process.poll()
+            if ret is not None:
+                out, err = self.process.communicate()
+                logging.error(f"{self.name} process ended unexpectedly. Return code: {ret}. Error output:\n{err}")
                 break
             time.sleep(0.5)
 
@@ -174,33 +201,84 @@ def control_listener():
                 continue
             cmd = tokens[0]
             if cmd == "MOUSE_MOVE" and len(tokens) == 3:
-                subprocess.Popen(["xdotool", "mousemove", tokens[1], tokens[2]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.Popen(["xdotool", "mousemove", tokens[1], tokens[2]],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             elif cmd == "MOUSE_PRESS" and len(tokens) == 4:
-                subprocess.Popen(["xdotool", "mousemove", tokens[2], tokens[3]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                subprocess.Popen(["xdotool", "mousedown", tokens[1]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.Popen(["xdotool", "mousemove", tokens[2], tokens[3]],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.Popen(["xdotool", "mousedown", tokens[1]],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             elif cmd == "MOUSE_RELEASE" and len(tokens) == 2:
-                subprocess.Popen(["xdotool", "mouseup", tokens[1]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.Popen(["xdotool", "mouseup", tokens[1]],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             elif cmd == "MOUSE_SCROLL" and len(tokens) == 2:
-                subprocess.Popen(["xdotool", "click", tokens[1]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.Popen(["xdotool", "click", tokens[1]],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             elif cmd == "KEY_PRESS" and len(tokens) == 2:
-                subprocess.Popen(["xdotool", "keydown", tokens[1]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.Popen(["xdotool", "keydown", tokens[1]],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             elif cmd == "KEY_RELEASE" and len(tokens) == 2:
-                subprocess.Popen(["xdotool", "keyup", tokens[1]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.Popen(["xdotool", "keyup", tokens[1]],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
                 logging.warning(f"Ignored unsupported control message: {msg}")
         except Exception as e:
             logging.error(f"Control listener error: {e}")
 
+def clipboard_monitor_host():
+    global last_clipboard_content
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+    while True:
+        try:
+            proc = subprocess.run(["xclip", "-o", "-selection", "clipboard"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            current = proc.stdout.strip()
+        except Exception as e:
+            logging.error(f"Error reading clipboard: {e}")
+            current = ""
+        if current and current != last_clipboard_content:
+            last_clipboard_content = current
+            msg = f"CLIPBOARD_UPDATE HOST {current}"
+            sock.sendto(msg.encode("utf-8"), (MULTICAST_IP, UDP_CLIPBOARD_PORT))
+            logging.info("Host clipboard updated and broadcast.")
+        time.sleep(1)
+
+def clipboard_listener_host():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("", UDP_CLIPBOARD_PORT))
+    while True:
+        try:
+            data, addr = sock.recvfrom(65535)
+            msg = data.decode("utf-8", errors="replace")
+            tokens = msg.split(maxsplit=2)
+            if len(tokens) >= 3 and tokens[0] == "CLIPBOARD_UPDATE" and tokens[1] == "CLIENT":
+                new_content = tokens[2]
+                proc = subprocess.run(["xclip", "-o", "-selection", "clipboard"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+                current = proc.stdout.strip()
+                if new_content != current:
+                    p = subprocess.Popen(["xclip", "-selection", "clipboard", "-in"], stdin=subprocess.PIPE)
+                    p.communicate(new_content.encode("utf-8"))
+                    logging.info("Host clipboard updated from client.")
+        except Exception as e:
+            logging.error(f"Host clipboard listener error: {e}")
+
 def main():
     global current_video_thread, current_bitrate, host_password
     parser = argparse.ArgumentParser(description="Remote Desktop Host (Production Ready)")
-    parser.add_argument("--encoder", choices=["nvenc", "vaapi", "none"], default="none", help="Video encoder: nvenc, vaapi, or none (CPU x264).")
-    parser.add_argument("--resolution", default=DEFAULT_RES, help="Capture resolution, e.g., 1920x1080.")
-    parser.add_argument("--framerate", default=DEFAULT_FPS, help="Capture framerate, e.g., 30.")
-    parser.add_argument("--bitrate", default=DEFAULT_BITRATE, help="Initial video bitrate, e.g., 8M.")
-    parser.add_argument("--audio", choices=["enable", "disable"], default="disable", help="Enable or disable audio streaming.")
-    parser.add_argument("--adaptive", action="store_true", help="Enable adaptive bitrate switching.")
-    parser.add_argument("--password", default="", help="Optional password for control messages and handshake.")
+    parser.add_argument("--encoder", choices=["nvenc", "vaapi", "none"], default="none",
+                        help="Video encoder: nvenc, vaapi, or none (CPU x264).")
+    parser.add_argument("--resolution", default=DEFAULT_RES,
+                        help="Capture resolution, e.g., 1920x1080.")
+    parser.add_argument("--framerate", default=DEFAULT_FPS,
+                        help="Capture framerate, e.g., 30.")
+    parser.add_argument("--bitrate", default=DEFAULT_BITRATE,
+                        help="Initial video bitrate, e.g., 8M.")
+    parser.add_argument("--audio", choices=["enable", "disable"], default="disable",
+                        help="Enable or disable audio streaming.")
+    parser.add_argument("--adaptive", action="store_true",
+                        help="Enable adaptive bitrate switching.")
+    parser.add_argument("--password", default="",
+                        help="Optional password for control messages and handshake.")
     args = parser.parse_args()
 
     host_password = args.password if args.password else None
@@ -208,6 +286,11 @@ def main():
 
     handshake_thread = threading.Thread(target=tcp_handshake_server, daemon=True)
     handshake_thread.start()
+
+    clipboard_monitor_thread = threading.Thread(target=clipboard_monitor_host, daemon=True)
+    clipboard_monitor_thread.start()
+    clipboard_listener_thread = threading.Thread(target=clipboard_listener_host, daemon=True)
+    clipboard_listener_thread.start()
 
     logging.info("Waiting for a successful TCP handshake...")
     handshake_success = False
