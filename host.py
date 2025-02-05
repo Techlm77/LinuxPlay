@@ -7,6 +7,7 @@ import logging
 import time
 import threading
 import socket
+import atexit
 
 UDP_VIDEO_PORT = 5000
 UDP_AUDIO_PORT = 6001
@@ -22,8 +23,9 @@ video_thread_lock = threading.Lock()
 current_video_thread = None
 current_bitrate = DEFAULT_BITRATE
 host_password = None
-
 last_clipboard_content = ""
+clipboard_lock = threading.Lock()
+ignore_clipboard_update = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -236,11 +238,12 @@ def clipboard_monitor_host():
         except Exception as e:
             logging.error(f"Error reading clipboard: {e}")
             current = ""
-        if current and current != last_clipboard_content:
-            last_clipboard_content = current
-            msg = f"CLIPBOARD_UPDATE HOST {current}"
-            sock.sendto(msg.encode("utf-8"), (MULTICAST_IP, UDP_CLIPBOARD_PORT))
-            logging.info("Host clipboard updated and broadcast.")
+        with clipboard_lock:
+            if not ignore_clipboard_update and current and current != last_clipboard_content:
+                last_clipboard_content = current
+                msg = f"CLIPBOARD_UPDATE HOST {current}"
+                sock.sendto(msg.encode("utf-8"), (MULTICAST_IP, UDP_CLIPBOARD_PORT))
+                logging.info("Host clipboard updated and broadcast.")
         time.sleep(1)
 
 def clipboard_listener_host():
@@ -253,14 +256,28 @@ def clipboard_listener_host():
             tokens = msg.split(maxsplit=2)
             if len(tokens) >= 3 and tokens[0] == "CLIPBOARD_UPDATE" and tokens[1] == "CLIENT":
                 new_content = tokens[2]
-                proc = subprocess.run(["xclip", "-o", "-selection", "clipboard"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-                current = proc.stdout.strip()
-                if new_content != current:
-                    p = subprocess.Popen(["xclip", "-selection", "clipboard", "-in"], stdin=subprocess.PIPE)
-                    p.communicate(new_content.encode("utf-8"))
-                    logging.info("Host clipboard updated from client.")
+                with clipboard_lock:
+                    global ignore_clipboard_update
+                    ignore_clipboard_update = True
+                    proc = subprocess.run(["xclip", "-o", "-selection", "clipboard"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+                    current = proc.stdout.strip()
+                    if new_content != current:
+                        p = subprocess.Popen(["xclip", "-selection", "clipboard", "-in"], stdin=subprocess.PIPE)
+                        p.communicate(new_content.encode("utf-8"))
+                        logging.info("Host clipboard updated from client.")
+                    ignore_clipboard_update = False
         except Exception as e:
             logging.error(f"Host clipboard listener error: {e}")
+
+def cleanup():
+    try:
+        if current_video_thread:
+            current_video_thread.stop()
+            current_video_thread.join(timeout=2)
+    except Exception:
+        pass
+
+atexit.register(cleanup)
 
 def main():
     global current_video_thread, current_bitrate, host_password
@@ -334,11 +351,11 @@ def main():
             time.sleep(1)
     except KeyboardInterrupt:
         logging.info("Shutting down host...")
-        current_video_thread.stop()
+        if current_video_thread:
+            current_video_thread.stop()
+            current_video_thread.join()
         if audio_thread:
             audio_thread.stop()
-        current_video_thread.join()
-        if audio_thread:
             audio_thread.join()
         sys.exit(0)
 
