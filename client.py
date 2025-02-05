@@ -7,8 +7,9 @@ import subprocess
 import socket
 import time
 import threading
-from PyQt5.QtWidgets import QApplication, QLabel, QMainWindow
-from PyQt5.QtGui import QImage, QPixmap
+import urllib.request
+from PyQt5.QtWidgets import QApplication, QLabel, QMainWindow, QSizePolicy
+from PyQt5.QtGui import QImage, QPixmap, QIcon
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 
 DEFAULT_UDP_PORT   = 5000
@@ -78,6 +79,8 @@ class VideoWidget(QLabel):
         self.setScaledContents(True)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setContentsMargins(0, 0, 0, 0)
         self.control_callback = control_callback
         self.remote_width  = rwidth
         self.remote_height = rheight
@@ -237,7 +240,7 @@ class VideoWidget(QLabel):
 class MainWindow(QMainWindow):
     def __init__(self, decoder_opts, rwidth, rheight, host_ip, password, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Remote Desktop Viewer")
+        self.setWindowTitle("Remote Desktop Viewer (LinuxPlay by Techlm77)")
         self.remote_width  = rwidth
         self.remote_height = rheight
         self.control_addr  = (host_ip, CONTROL_PORT)
@@ -304,7 +307,7 @@ def main():
     parser.add_argument("--audio", choices=["enable", "disable"], default="disable",
                         help="Enable or disable audio playback.")
     parser.add_argument("--password", default="",
-                        help="Optional password for control events and handshake.")
+                        help="Optional password for control events and TCP handshake.")
     args = parser.parse_args()
 
     try:
@@ -345,6 +348,15 @@ def main():
         ]
         logging.info("Starting audio playback...")
         audio_proc = subprocess.Popen(audio_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    try:
+        req = urllib.request.Request("https://techlm77.co.uk/png/logo.png", headers={"User-Agent": "Mozilla/5.0"})
+        data = urllib.request.urlopen(req).read()
+        pixmap = QPixmap()
+        pixmap.loadFromData(data)
+        app.setWindowIcon(QIcon(pixmap))
+    except Exception as e:
+        logging.error(f"Failed to load window icon: {e}")
 
     window = MainWindow(decoder_opts, w, h, args.host_ip, args.password)
     window.show()
