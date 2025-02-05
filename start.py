@@ -5,6 +5,7 @@ import socket
 import threading
 import argparse
 import os
+import urllib.request
 from PyQt5.QtWidgets import (QApplication, QWidget, QTabWidget, QVBoxLayout, QFormLayout, 
                              QLineEdit, QComboBox, QCheckBox, QPushButton, QSizePolicy)
 from PyQt5.QtGui import QIcon, QPixmap
@@ -74,22 +75,17 @@ class StartWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Remote Desktop Viewer (LinuxPlay by Techlm77)")
-
         self.tabs = QTabWidget()
         self.hostTab = HostTab()
         self.clientTab = ClientTab()
         self.tabs.addTab(self.hostTab, "Host")
         self.tabs.addTab(self.clientTab, "Client")
-
         layout = QVBoxLayout()
         layout.addWidget(self.tabs)
         self.setLayout(layout)
-
         self.hostTab.startButton.clicked.connect(self.start_host)
         self.clientTab.startButton.clicked.connect(self.start_client)
-
         try:
-            import urllib.request
             req = urllib.request.Request("https://techlm77.co.uk/png/logo.png", headers={"User-Agent": "Mozilla/5.0"})
             data = urllib.request.urlopen(req).read()
             pixmap = QPixmap()
@@ -106,7 +102,6 @@ class StartWindow(QWidget):
         audio = self.hostTab.audioCombo.currentText()
         adaptive = self.hostTab.adaptiveCheck.isChecked()
         password = self.hostTab.passwordEdit.text()
-
         cmd = ["python3", "host.py",
                "--encoder", encoder,
                "--resolution", resolution,
@@ -126,7 +121,6 @@ class StartWindow(QWidget):
         resolution = self.clientTab.resolutionEdit.text()
         audio = self.clientTab.audioCombo.currentText()
         password = self.clientTab.passwordEdit.text()
-
         cmd = ["python3", "client.py",
                "--decoder", decoder,
                "--host_ip", host_ip,
