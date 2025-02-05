@@ -54,7 +54,6 @@ python3 client.py --decoder nvdec --udp_port 5000 --host_ip 192.168.1.123 --remo
 | Option                | Description                                            | Default     |
 |-----------------------|--------------------------------------------------------|-------------|
 | `--decoder`           | Video decoder: `nvdec`, `vaapi`, or `none` (CPU)       | `none`      |
-| `--udp_port`          | UDP port for video streaming                           | `5000`      |
 | `--host_ip`           | The IP address of the host machine                     | Required    |
 | `--remote_resolution` | Remote screen resolution (e.g., `1600x900`)            | `1920x1080` |
 | `--audio`             | Enable or disable audio playback (`enable`, `disable`) | `disable`   |
