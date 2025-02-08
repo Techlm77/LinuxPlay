@@ -34,7 +34,6 @@ def has_nvidia():
 def has_vaapi():
     return os.path.exists("/dev/dri/renderD128")
 
-
 def tcp_handshake_client(host_ip, password):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
