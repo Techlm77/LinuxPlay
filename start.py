@@ -10,6 +10,8 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import QIcon, QPixmap, QPalette, QColor
 from PyQt5.QtCore import Qt
+import subprocess
+from shutil import which
 
 def load_history():
     try:
@@ -21,6 +23,38 @@ def load_history():
 def save_history(data):
     with open("history.json", "w") as f:
         json.dump(data, f, indent=2)
+
+def has_nvidia():
+    return which("nvidia-smi") is not None
+
+def has_vaapi():
+    return os.path.exists("/dev/dri/renderD128")
+
+def check_encoder_support(codec):
+    try:
+        output = subprocess.check_output(["ffmpeg", "-encoders"], stderr=subprocess.DEVNULL).decode()
+    except Exception:
+        return False
+    if codec == "h265":
+        return any(x in output for x in ["hevc_nvenc", "hevc_vaapi", "hevc_qsv"])
+    elif codec == "av1":
+        return any(x in output for x in ["av1_nvenc", "av1_vaapi", "av1_qsv"])
+    elif codec == "h.264":
+        return has_nvidia() or has_vaapi()
+    return False
+
+def check_decoder_support(codec):
+    try:
+        output = subprocess.check_output(["ffmpeg", "-decoders"], stderr=subprocess.DEVNULL).decode()
+    except Exception:
+        return False
+    if codec == "h265":
+        return any(x in output for x in ["hevc_nvdec", "hevc_vaapi", "hevc_qsv", "hevc_cuvid"])
+    elif codec == "av1":
+        return "av1" in output
+    elif codec == "h.264":
+        return has_nvidia() or has_vaapi()
+    return False
 
 class HostTab(QWidget):
     def __init__(self, history, save_callback, parent=None):
@@ -35,12 +69,16 @@ class HostTab(QWidget):
 
         self.encoderCombo = QComboBox()
         self.encoderCombo.setEditable(True)
-        if "encoder" in self.history:
-            for item in self.history["encoder"]:
-                self.encoderCombo.addItem(item)
-        self.encoderCombo.addItem("nvenc")
-        self.encoderCombo.addItem("vaapi")
+
         self.encoderCombo.addItem("none")
+        if check_encoder_support("h.264"):
+            self.encoderCombo.addItem("h.264")
+        if check_encoder_support("h265"):
+            self.encoderCombo.addItem("h.265")
+        if check_encoder_support("av1"):
+            self.encoderCombo.addItem("av1")
+        if "encoder" in self.history and self.history["encoder"]:
+            self.encoderCombo.setCurrentText(self.history["encoder"][0])
 
         self.resolutionCombo = QComboBox()
         self.resolutionCombo.setEditable(True)
@@ -185,12 +223,15 @@ class ClientTab(QWidget):
 
         self.decoderCombo = QComboBox()
         self.decoderCombo.setEditable(True)
-        if "decoder" in self.history:
-            for item in self.history["decoder"]:
-                self.decoderCombo.addItem(item)
-        self.decoderCombo.addItem("nvdec")
-        self.decoderCombo.addItem("vaapi")
         self.decoderCombo.addItem("none")
+        if check_decoder_support("h.264"):
+            self.decoderCombo.addItem("h.264")
+        if check_decoder_support("h265"):
+            self.decoderCombo.addItem("h.265")
+        if check_decoder_support("av1"):
+            self.decoderCombo.addItem("av1")
+        if "decoder" in self.history and self.history["decoder"]:
+            self.decoderCombo.setCurrentText(self.history["decoder"][0])
 
         self.hostIPEdit = QComboBox()
         self.hostIPEdit.setEditable(True)
