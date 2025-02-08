@@ -8,6 +8,7 @@ import time
 import threading
 import socket
 import atexit
+from shutil import which
 
 UDP_VIDEO_PORT = 5000
 UDP_AUDIO_PORT = 6001
@@ -37,6 +38,12 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S"
 )
+
+def has_nvidia():
+    return which("nvidia-smi") is not None
+
+def has_vaapi():
+    return os.path.exists("/dev/dri/renderD128")
 
 def stop_all():
     global should_terminate
@@ -137,25 +144,93 @@ def build_video_cmd(args, bitrate):
         "-video_size", args.resolution,
         "-i", disp
     ]
-    if args.encoder == "nvenc":
-        encode = [
-            "-c:v", "h264_nvenc",
-            "-preset", "llhq",
-            "-g", "30",
-            "-bf", "0",
-            "-b:v", bitrate,
-            "-pix_fmt", "yuv420p"
-        ]
-    elif args.encoder == "vaapi":
-        encode = [
-            "-vf", "format=nv12,hwupload",
-            "-vaapi_device", "/dev/dri/renderD128",
-            "-c:v", "h264_vaapi",
-            "-g", "30",
-            "-bf", "0",
-            "-qp", "20",
-            "-b:v", bitrate
-        ]
+    if args.encoder == "h.264":
+        if has_nvidia():
+            encode = [
+                "-c:v", "h264_nvenc",
+                "-preset", "llhq",
+                "-g", "30",
+                "-bf", "0",
+                "-b:v", bitrate,
+                "-pix_fmt", "yuv420p"
+            ]
+        elif has_vaapi():
+            encode = [
+                "-vf", "format=nv12,hwupload",
+                "-vaapi_device", "/dev/dri/renderD128",
+                "-c:v", "h264_vaapi",
+                "-g", "30",
+                "-bf", "0",
+                "-qp", "20",
+                "-b:v", bitrate
+            ]
+        else:
+            encode = [
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-tune", "zerolatency",
+                "-g", "30",
+                "-bf", "0",
+                "-b:v", bitrate,
+                "-pix_fmt", "yuv420p"
+            ]
+    elif args.encoder == "h.265":
+        if has_nvidia():
+            encode = [
+                "-c:v", "hevc_nvenc",
+                "-preset", "llhq",
+                "-g", "30",
+                "-bf", "0",
+                "-b:v", bitrate,
+                "-pix_fmt", "yuv420p"
+            ]
+        elif has_vaapi():
+            encode = [
+                "-vf", "format=nv12,hwupload",
+                "-vaapi_device", "/dev/dri/renderD128",
+                "-c:v", "hevc_vaapi",
+                "-g", "30",
+                "-bf", "0",
+                "-qp", "20",
+                "-b:v", bitrate
+            ]
+        else:
+            encode = [
+                "-c:v", "libx265",
+                "-preset", "ultrafast",
+                "-tune", "zerolatency",
+                "-g", "30",
+                "-bf", "0",
+                "-b:v", bitrate
+            ]
+    elif args.encoder == "av1":
+        if has_nvidia():
+            encode = [
+                "-c:v", "av1_nvenc",
+                "-preset", "llhq",
+                "-g", "30",
+                "-bf", "0",
+                "-b:v", bitrate,
+                "-pix_fmt", "yuv420p"
+            ]
+        elif has_vaapi():
+            encode = [
+                "-vf", "format=nv12,hwupload",
+                "-vaapi_device", "/dev/dri/renderD128",
+                "-c:v", "av1_vaapi",
+                "-g", "30",
+                "-bf", "0",
+                "-qp", "20",
+                "-b:v", bitrate
+            ]
+        else:
+            encode = [
+                "-c:v", "libaom-av1",
+                "-strict", "experimental",
+                "-cpu-used", "4",
+                "-g", "30",
+                "-b:v", bitrate
+            ]
     else:
         encode = [
             "-c:v", "libx264",
@@ -343,7 +418,7 @@ def main():
     global handshake_sock, control_sock, clipboard_listener_sock
 
     parser = argparse.ArgumentParser(description="Remote Desktop Host (Production Ready)")
-    parser.add_argument("--encoder", choices=["nvenc", "vaapi", "none"], default="none")
+    parser.add_argument("--encoder", choices=["none", "h.264", "h.265", "av1"], default="none")
     parser.add_argument("--resolution", default=DEFAULT_RES)
     parser.add_argument("--framerate", default=DEFAULT_FPS)
     parser.add_argument("--bitrate", default=DEFAULT_BITRATE)
