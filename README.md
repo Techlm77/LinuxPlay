@@ -17,7 +17,7 @@ LinuxPlay is a lightweight, low-latency, fully open-source remote desktop soluti
 LinuxPlay requires Python 3, FFmpeg, xdotool, and PyQt5. Install them using:
 
 ```bash
-sudo apt install python3 ffmpeg xdotool python3-pyqt5
+sudo apt install python3 ffmpeg xdotool python3-pyqt5 python3-av
 ```
 
 ## Usage
@@ -95,10 +95,15 @@ LinuxPlay is licensed under the MIT License.
 
 Development is ongoing, and here are some planned features for future updates:
 
-- **(Added) Clipboard Sharing** – Copy and paste text between client and host.
-- **(Added) H.265 and AV1 Support** – Improve compression and reduce bandwidth usage for better performance.
+- **Drag-and-Drop File Transfer** – Allow users to drag and drop files into the client application for seamless file uploads to the host.
+- **Wayland Support** – Extend compatibility to Wayland-based environments alongside X11.
 - **Full Encryption** – Implement TLS encryption for control messages and video streaming to enhance security.
 - **Internet-Ready Security** – Enable secure connections over the internet with end-to-end encryption.
+
+Updates that has been added:
+
+- **Clipboard Sharing** – Copy and paste text between client and host.
+- **H.265 and AV1 Support** – Improve compression and reduce bandwidth usage for better performance.
 
 ### Security Warning
 
