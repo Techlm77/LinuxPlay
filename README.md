@@ -96,7 +96,7 @@ LinuxPlay is licensed under the MIT License.
 Development is ongoing, and here are some planned features for future updates:
 
 - **(Added) Clipboard Sharing** – Copy and paste text between client and host.
-- **H.265 and AV1 Support** – Improve compression and reduce bandwidth usage for better performance.
+- **(Added) H.265 and AV1 Support** – Improve compression and reduce bandwidth usage for better performance.
 - **Full Encryption** – Implement TLS encryption for control messages and video streaming to enhance security.
 - **Internet-Ready Security** – Enable secure connections over the internet with end-to-end encryption.
 
