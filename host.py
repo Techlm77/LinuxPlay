@@ -21,11 +21,16 @@ DEFAULT_BITRATE = "8M"
 
 video_thread_lock = threading.Lock()
 current_video_thread = None
+current_audio_thread = None
 current_bitrate = DEFAULT_BITRATE
 host_password = None
 last_clipboard_content = ""
 clipboard_lock = threading.Lock()
 ignore_clipboard_update = False
+handshake_sock = None
+control_sock = None
+clipboard_listener_sock = None
+should_terminate = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,13 +38,83 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 
-def get_display():
-    return os.environ.get("DISPLAY", ":0")
+def stop_all():
+    global should_terminate
+    should_terminate = True
+    with video_thread_lock:
+        if current_video_thread:
+            current_video_thread.stop()
+            current_video_thread.join(timeout=2)
+    if current_audio_thread:
+        current_audio_thread.stop()
+        current_audio_thread.join(timeout=2)
+    if handshake_sock:
+        try:
+            handshake_sock.close()
+        except:
+            pass
+    if control_sock:
+        try:
+            control_sock.close()
+        except:
+            pass
+    if clipboard_listener_sock:
+        try:
+            clipboard_listener_sock.close()
+        except:
+            pass
+
+def cleanup():
+    stop_all()
+
+atexit.register(cleanup)
+
+class StreamThread(threading.Thread):
+    def __init__(self, cmd, name):
+        super().__init__(daemon=True)
+        self.cmd = cmd
+        self.name = name
+        self.process = None
+        self._running = True
+
+    def run(self):
+        logging.info("Starting {} stream: {}".format(self.name, " ".join(self.cmd)))
+        self.process = subprocess.Popen(
+            self.cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
+        while self._running:
+            if should_terminate:
+                break
+            ret = self.process.poll()
+            if ret is not None:
+                out, err = self.process.communicate()
+                logging.error("{} process ended unexpectedly. Return code: {}. Error output:\n{}".format(self.name, ret, err))
+                break
+            time.sleep(0.5)
+
+    def stop(self):
+        self._running = False
+        if self.process:
+            self.process.terminate()
+
+def shutil_which(cmd):
+    import shutil
+    return shutil.which(cmd)
+
+def get_display(default=":0"):
+    disp = os.environ.get("DISPLAY", default)
+    return disp
 
 def detect_pulse_monitor():
     monitor = os.environ.get("PULSE_MONITOR")
     if monitor:
         return monitor
+    if not shutil_which("pactl"):
+        logging.warning("pactl not found, using default.monitor")
+        return "default.monitor"
     try:
         output = subprocess.check_output(["pactl", "list", "short", "sources"], universal_newlines=True)
         for line in output.splitlines():
@@ -47,11 +122,11 @@ def detect_pulse_monitor():
             if len(parts) >= 2 and ".monitor" in parts[1]:
                 return parts[1]
     except Exception as e:
-        logging.error(f"Error detecting PulseAudio monitor: {e}")
+        logging.error("Error detecting PulseAudio monitor: {}".format(e))
     return "default.monitor"
 
 def build_video_cmd(args, bitrate):
-    display = get_display()
+    disp = args.display
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -60,7 +135,7 @@ def build_video_cmd(args, bitrate):
         "-f", "x11grab",
         "-framerate", args.framerate,
         "-video_size", args.resolution,
-        "-i", display
+        "-i", disp
     ]
     if args.encoder == "nvenc":
         encode = [
@@ -93,7 +168,7 @@ def build_video_cmd(args, bitrate):
         ]
     out = [
         "-f", "mpegts",
-        f"udp://{MULTICAST_IP}:{UDP_VIDEO_PORT}?pkt_size=1316&buffer_size=65536"
+        "udp://{}:{}?pkt_size=1316&buffer_size=65536".format(MULTICAST_IP, UDP_VIDEO_PORT)
     ]
     return cmd + encode + out
 
@@ -110,48 +185,27 @@ def build_audio_cmd():
         "-c:a", "libopus",
         "-b:a", "128k",
         "-f", "mpegts",
-        f"udp://{MULTICAST_IP}:{UDP_AUDIO_PORT}?pkt_size=1316&buffer_size=65536"
+        "udp://{}:{}?pkt_size=1316&buffer_size=65536".format(MULTICAST_IP, UDP_AUDIO_PORT)
     ]
-
-class StreamThread(threading.Thread):
-    def __init__(self, cmd, name):
-        super().__init__(daemon=True)
-        self.cmd = cmd
-        self.name = name
-        self.process = None
-        self._running = True
-
-    def run(self):
-        logging.info(f"Starting {self.name} stream: {' '.join(self.cmd)}")
-        self.process = subprocess.Popen(self.cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, universal_newlines=True)
-        while self._running:
-            ret = self.process.poll()
-            if ret is not None:
-                out, err = self.process.communicate()
-                logging.error(f"{self.name} process ended unexpectedly. Return code: {ret}. Error output:\n{err}")
-                break
-            time.sleep(0.5)
-
-    def stop(self):
-        self._running = False
-        if self.process:
-            self.process.terminate()
 
 def adaptive_bitrate_manager(args):
     global current_bitrate, current_video_thread
-    while True:
+    while not should_terminate:
         time.sleep(30)
+        if should_terminate:
+            break
         with video_thread_lock:
             if current_bitrate == DEFAULT_BITRATE:
                 try:
-                    base = int(''.join(filter(str.isdigit, DEFAULT_BITRATE)))
-                    new_bitrate = f"{int(base * 0.6)}M"
-                except Exception:
+                    base = int("".join(filter(str.isdigit, DEFAULT_BITRATE)))
+                    new_bitrate = "{}M".format(int(base * 0.6))
+                except:
                     new_bitrate = DEFAULT_BITRATE
             else:
                 new_bitrate = DEFAULT_BITRATE
+
             if new_bitrate != current_bitrate:
-                logging.info(f"Adaptive ABR: Switching bitrate from {current_bitrate} to {new_bitrate}")
+                logging.info("Adaptive ABR: Switching bitrate from {} to {}".format(current_bitrate, new_bitrate))
                 new_cmd = build_video_cmd(args, new_bitrate)
                 new_thread = StreamThread(new_cmd, "Video (Adaptive)")
                 new_thread.start()
@@ -162,42 +216,42 @@ def adaptive_bitrate_manager(args):
                 current_video_thread = new_thread
                 current_bitrate = new_bitrate
 
-def tcp_handshake_server():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("", TCP_HANDSHAKE_PORT))
-    sock.listen(5)
-    logging.info(f"TCP Handshake server listening on port {TCP_HANDSHAKE_PORT}")
-    while True:
+def tcp_handshake_server(sock):
+    logging.info("TCP Handshake server listening on port {}".format(TCP_HANDSHAKE_PORT))
+    while not should_terminate:
         try:
             conn, addr = sock.accept()
-            logging.info(f"TCP handshake connection from {addr}")
+            logging.info("TCP handshake connection from {}".format(addr))
             data = conn.recv(1024).decode("utf-8", errors="replace").strip()
-            logging.info(f"Received handshake: '{data}'")
-            expected = f"PASSWORD:{host_password}" if host_password else "PASSWORD:"
+            logging.info("Received handshake: '{}'".format(data))
+            expected = "PASSWORD:{}".format(host_password) if host_password else "PASSWORD:"
             if data == expected:
                 conn.sendall("OK".encode("utf-8"))
-                logging.info(f"Handshake from {addr} successful.")
+                logging.info("Handshake from {} successful.".format(addr))
             else:
                 conn.sendall("FAIL".encode("utf-8"))
-                logging.error(f"Handshake from {addr} failed. Expected '{expected}', got '{data}'")
+                logging.error("Handshake from {} failed. Expected '{}', got '{}'".format(addr, expected, data))
             conn.close()
+        except OSError:
+            break
         except Exception as e:
-            logging.error(f"TCP handshake server error: {e}")
+            logging.error("TCP handshake server error: {}".format(e))
+            break
 
-def control_listener():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("", UDP_CONTROL_PORT))
-    logging.info(f"Control listener active on UDP port {UDP_CONTROL_PORT}")
-    while True:
+def control_listener(sock):
+    logging.info("Control listener active on UDP port {}".format(UDP_CONTROL_PORT))
+    while not should_terminate:
         try:
             data, addr = sock.recvfrom(2048)
             msg = data.decode("utf-8", errors="replace").strip()
+
             if host_password:
-                prefix = f"PASSWORD:{host_password}:"
+                prefix = "PASSWORD:{}:".format(host_password)
                 if not msg.startswith(prefix):
-                    logging.warning(f"Rejected control message from {addr} due to password mismatch.")
+                    logging.warning("Rejected control message from {} due to password mismatch.".format(addr))
                     continue
                 msg = msg[len(prefix):].strip()
+
             tokens = msg.split()
             if not tokens:
                 continue
@@ -223,33 +277,40 @@ def control_listener():
                 subprocess.Popen(["xdotool", "keyup", tokens[1]],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
-                logging.warning(f"Ignored unsupported control message: {msg}")
+                logging.warning("Ignored unsupported control message: {}".format(msg))
+        except OSError:
+            break
         except Exception as e:
-            logging.error(f"Control listener error: {e}")
+            logging.error("Control listener error: {}".format(e))
+            break
 
 def clipboard_monitor_host():
     global last_clipboard_content
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
-    while True:
+    while not should_terminate:
         try:
-            proc = subprocess.run(["xclip", "-o", "-selection", "clipboard"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            proc = subprocess.run(
+                ["xclip", "-o", "-selection", "clipboard"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True
+            )
             current = proc.stdout.strip()
-        except Exception as e:
-            logging.error(f"Error reading clipboard: {e}")
+        except:
             current = ""
         with clipboard_lock:
             if not ignore_clipboard_update and current and current != last_clipboard_content:
                 last_clipboard_content = current
-                msg = f"CLIPBOARD_UPDATE HOST {current}"
+                msg = "CLIPBOARD_UPDATE HOST {}".format(current)
                 sock.sendto(msg.encode("utf-8"), (MULTICAST_IP, UDP_CLIPBOARD_PORT))
                 logging.info("Host clipboard updated and broadcast.")
         time.sleep(1)
+    sock.close()
 
-def clipboard_listener_host():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("", UDP_CLIPBOARD_PORT))
-    while True:
+def clipboard_listener_host(sock):
+    global ignore_clipboard_update
+    while not should_terminate:
         try:
             data, addr = sock.recvfrom(65535)
             msg = data.decode("utf-8", errors="replace")
@@ -257,92 +318,96 @@ def clipboard_listener_host():
             if len(tokens) >= 3 and tokens[0] == "CLIPBOARD_UPDATE" and tokens[1] == "CLIENT":
                 new_content = tokens[2]
                 with clipboard_lock:
-                    global ignore_clipboard_update
                     ignore_clipboard_update = True
-                    proc = subprocess.run(["xclip", "-o", "-selection", "clipboard"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+                    proc = subprocess.run(
+                        ["xclip", "-o", "-selection", "clipboard"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        universal_newlines=True
+                    )
                     current = proc.stdout.strip()
                     if new_content != current:
                         p = subprocess.Popen(["xclip", "-selection", "clipboard", "-in"], stdin=subprocess.PIPE)
                         p.communicate(new_content.encode("utf-8"))
                         logging.info("Host clipboard updated from client.")
                     ignore_clipboard_update = False
+        except OSError:
+            break
         except Exception as e:
-            logging.error(f"Host clipboard listener error: {e}")
-
-def cleanup():
-    try:
-        if current_video_thread:
-            current_video_thread.stop()
-            current_video_thread.join(timeout=2)
-    except Exception:
-        pass
-
-atexit.register(cleanup)
+            logging.error("Host clipboard listener error: {}".format(e))
+            break
 
 def main():
-    global current_video_thread, current_bitrate, host_password
+    global current_video_thread, current_audio_thread
+    global current_bitrate, host_password
+    global handshake_sock, control_sock, clipboard_listener_sock
+
     parser = argparse.ArgumentParser(description="Remote Desktop Host (Production Ready)")
-    parser.add_argument("--encoder", choices=["nvenc", "vaapi", "none"], default="none",
-                        help="Video encoder: nvenc, vaapi, or none (CPU x264).")
-    parser.add_argument("--resolution", default=DEFAULT_RES,
-                        help="Capture resolution, e.g., 1920x1080.")
-    parser.add_argument("--framerate", default=DEFAULT_FPS,
-                        help="Capture framerate, e.g., 30.")
-    parser.add_argument("--bitrate", default=DEFAULT_BITRATE,
-                        help="Initial video bitrate, e.g., 8M.")
-    parser.add_argument("--audio", choices=["enable", "disable"], default="disable",
-                        help="Enable or disable audio streaming.")
-    parser.add_argument("--adaptive", action="store_true",
-                        help="Enable adaptive bitrate switching.")
-    parser.add_argument("--password", default="",
-                        help="Optional password for control messages and handshake.")
+    parser.add_argument("--encoder", choices=["nvenc", "vaapi", "none"], default="none")
+    parser.add_argument("--resolution", default=DEFAULT_RES)
+    parser.add_argument("--framerate", default=DEFAULT_FPS)
+    parser.add_argument("--bitrate", default=DEFAULT_BITRATE)
+    parser.add_argument("--audio", choices=["enable", "disable"], default="disable")
+    parser.add_argument("--adaptive", action="store_true")
+    parser.add_argument("--password", default="")
+    parser.add_argument("--display", default=":0")
     args = parser.parse_args()
 
     host_password = args.password if args.password else None
     current_bitrate = args.bitrate
 
-    handshake_thread = threading.Thread(target=tcp_handshake_server, daemon=True)
+    handshake_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    handshake_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        handshake_sock.bind(("", TCP_HANDSHAKE_PORT))
+        handshake_sock.listen(5)
+    except Exception as e:
+        logging.error("Failed to bind TCP handshake port {}: {}".format(TCP_HANDSHAKE_PORT, e))
+        stop_all()
+        sys.exit(1)
+
+    control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    control_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        control_sock.bind(("", UDP_CONTROL_PORT))
+    except Exception as e:
+        logging.error("Failed to bind control port {}: {}".format(UDP_CONTROL_PORT, e))
+        stop_all()
+        sys.exit(1)
+
+    clipboard_listener_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    clipboard_listener_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        clipboard_listener_sock.bind(("", UDP_CLIPBOARD_PORT))
+    except Exception as e:
+        logging.error("Failed to bind clipboard port {}: {}".format(UDP_CLIPBOARD_PORT, e))
+        stop_all()
+        sys.exit(1)
+
+    handshake_thread = threading.Thread(target=tcp_handshake_server, args=(handshake_sock,), daemon=True)
     handshake_thread.start()
 
     clipboard_monitor_thread = threading.Thread(target=clipboard_monitor_host, daemon=True)
     clipboard_monitor_thread.start()
-    clipboard_listener_thread = threading.Thread(target=clipboard_listener_host, daemon=True)
+
+    clipboard_listener_thread = threading.Thread(target=clipboard_listener_host, args=(clipboard_listener_sock,), daemon=True)
     clipboard_listener_thread.start()
 
-    logging.info("Waiting for a successful TCP handshake...")
-    handshake_success = False
-    while not handshake_success:
-        temp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            temp_sock.connect(("localhost", TCP_HANDSHAKE_PORT))
-            handshake_msg = f"PASSWORD:{host_password}" if host_password else "PASSWORD:"
-            temp_sock.sendall(handshake_msg.encode("utf-8"))
-            resp = temp_sock.recv(1024).decode("utf-8", errors="replace").strip()
-            temp_sock.close()
-            if resp == "OK":
-                handshake_success = True
-                logging.info("A successful TCP handshake was received.")
-            else:
-                logging.info("Received FAIL from handshake; waiting for a correct handshake...")
-                time.sleep(3)
-        except Exception:
-            time.sleep(3)
-
     video_cmd = build_video_cmd(args, current_bitrate)
-    current_video_thread = StreamThread(video_cmd, "Video")
-    current_video_thread.start()
+    with video_thread_lock:
+        current_video_thread = StreamThread(video_cmd, "Video")
+        current_video_thread.start()
 
-    audio_thread = None
     if args.audio == "enable":
         audio_cmd = build_audio_cmd()
-        audio_thread = StreamThread(audio_cmd, "Audio")
-        audio_thread.start()
+        current_audio_thread = StreamThread(audio_cmd, "Audio")
+        current_audio_thread.start()
 
     if args.adaptive:
         abr_thread = threading.Thread(target=adaptive_bitrate_manager, args=(args,), daemon=True)
         abr_thread.start()
 
-    ctrl_thread = threading.Thread(target=control_listener, daemon=True)
+    ctrl_thread = threading.Thread(target=control_listener, args=(control_sock,), daemon=True)
     ctrl_thread.start()
 
     logging.info("Host running. Press Ctrl+C to exit.")
@@ -351,12 +416,7 @@ def main():
             time.sleep(1)
     except KeyboardInterrupt:
         logging.info("Shutting down host...")
-        if current_video_thread:
-            current_video_thread.stop()
-            current_video_thread.join()
-        if audio_thread:
-            audio_thread.stop()
-            audio_thread.join()
+        stop_all()
         sys.exit(0)
 
 if __name__ == "__main__":
