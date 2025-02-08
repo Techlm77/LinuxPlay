@@ -95,13 +95,13 @@ LinuxPlay is licensed under the MIT License.
 
 Development is ongoing, and here are some planned features for future updates:
 
-- **Drag-and-Drop File Transfer** – Allow users to drag and drop files into the client application for seamless file uploads to the host.
 - **Wayland Support** – Extend compatibility to Wayland-based environments alongside X11.
 - **Full Encryption** – Implement TLS encryption for control messages and video streaming to enhance security.
 - **Internet-Ready Security** – Enable secure connections over the internet with end-to-end encryption.
 
 Updates that has been added:
 
+- **Drag-and-Drop File Transfer** – Allow users to drag and drop files into the client application for seamless file uploads to the host.
 - **Clipboard Sharing** – Copy and paste text between client and host.
 - **H.265 and AV1 Support** – Improve compression and reduce bandwidth usage for better performance.
 
