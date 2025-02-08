@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import QApplication, QLabel, QMainWindow, QSizePolicy
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 import atexit
+from shutil import which
 
 DEFAULT_UDP_PORT = 5000
 DEFAULT_RESOLUTION = "1920x1080"
@@ -26,6 +27,14 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S"
 )
+
+# --- Helper functions for GPU detection ---
+def has_nvidia():
+    return which("nvidia-smi") is not None
+
+def has_vaapi():
+    return os.path.exists("/dev/dri/renderD128")
+# ------------------------------------------
 
 def tcp_handshake_client(host_ip, password):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -281,7 +290,8 @@ atexit.register(cleanup)
 
 def main():
     parser = argparse.ArgumentParser(description="Remote Desktop Client (Production Ready)")
-    parser.add_argument("--decoder", choices=["nvdec", "vaapi", "none"], default="none")
+    # Updated decoder choices
+    parser.add_argument("--decoder", choices=["none", "h.264", "h.265", "av1"], default="none")
     parser.add_argument("--host_ip", required=True)
     parser.add_argument("--remote_resolution", default=DEFAULT_RESOLUTION)
     parser.add_argument("--audio", choices=["enable", "disable"], default="disable")
@@ -294,12 +304,24 @@ def main():
         logging.error("Invalid remote_resolution format. Use e.g. 1600x900.")
         sys.exit(1)
 
+    # Set decoder options based on the chosen codec and available GPU acceleration.
     decoder_opts = {}
-    if args.decoder == "nvdec":
-        decoder_opts["hwaccel"] = "nvdec"
-    elif args.decoder == "vaapi":
-        decoder_opts["hwaccel"] = "vaapi"
-        decoder_opts["vaapi_device"] = "/dev/dri/renderD128"
+    if args.decoder == "h.264":
+        if has_nvidia():
+            decoder_opts["hwaccel"] = "h264_nvdec"
+        elif has_vaapi():
+            decoder_opts["hwaccel"] = "h264_vaapi"
+    elif args.decoder == "h.265":
+        if has_nvidia():
+            decoder_opts["hwaccel"] = "hevc_nvdec"
+        elif has_vaapi():
+            decoder_opts["hwaccel"] = "hevc_vaapi"
+    elif args.decoder == "av1":
+        if has_nvidia():
+            decoder_opts["hwaccel"] = "av1_nvdec"
+        elif has_vaapi():
+            decoder_opts["hwaccel"] = "av1_vaapi"
+    # For "none" leave decoder_opts empty.
 
     if not tcp_handshake_client(args.host_ip, args.password):
         sys.exit("TCP handshake failed. Exiting.")
