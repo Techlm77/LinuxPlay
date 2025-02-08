@@ -28,13 +28,12 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 
-# --- Helper functions for GPU detection ---
 def has_nvidia():
     return which("nvidia-smi") is not None
 
 def has_vaapi():
     return os.path.exists("/dev/dri/renderD128")
-# ------------------------------------------
+
 
 def tcp_handshake_client(host_ip, password):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -290,7 +289,6 @@ atexit.register(cleanup)
 
 def main():
     parser = argparse.ArgumentParser(description="Remote Desktop Client (Production Ready)")
-    # Updated decoder choices
     parser.add_argument("--decoder", choices=["none", "h.264", "h.265", "av1"], default="none")
     parser.add_argument("--host_ip", required=True)
     parser.add_argument("--remote_resolution", default=DEFAULT_RESOLUTION)
@@ -304,7 +302,6 @@ def main():
         logging.error("Invalid remote_resolution format. Use e.g. 1600x900.")
         sys.exit(1)
 
-    # Set decoder options based on the chosen codec and available GPU acceleration.
     decoder_opts = {}
     if args.decoder == "h.264":
         if has_nvidia():
@@ -321,7 +318,6 @@ def main():
             decoder_opts["hwaccel"] = "av1_nvdec"
         elif has_vaapi():
             decoder_opts["hwaccel"] = "av1_vaapi"
-    # For "none" leave decoder_opts empty.
 
     if not tcp_handshake_client(args.host_ip, args.password):
         sys.exit("TCP handshake failed. Exiting.")
