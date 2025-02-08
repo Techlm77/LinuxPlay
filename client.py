@@ -29,11 +29,6 @@ def has_vaapi():
     return os.path.exists("/dev/dri/renderD128")
 
 def tcp_handshake_client(host_ip, password):
-    """
-    Returns either:
-      - (False, None) if handshake fails
-      - (True, host_encoder) if handshake succeeds
-    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         logging.info("Attempting TCP handshake with %s:%s", host_ip, TCP_HANDSHAKE_PORT)
@@ -328,8 +323,11 @@ def main():
     else:
         if args.decoder.replace(".", "") != host_encoder.replace(".", ""):
             logging.error("Encoder/decoder mismatch: Host uses '%s', client selected '%s'.", host_encoder, args.decoder)
-            print(f"ERROR: The host is currently using '{host_encoder}' encoder, but your decoder is '{args.decoder}'.\n"
-                  f"Please exit and restart the client with '--decoder {host_encoder}'.")
+            # Create a temporary QApplication (if not already created) to show a QMessageBox
+            temp_app = QApplication.instance() or QApplication(sys.argv)
+            QMessageBox.critical(None, "Decoder Mismatch",
+                f"ERROR: The host is currently using '{host_encoder}' encoder, but your decoder is '{args.decoder}'.\n"
+                f"Please switch to '{host_encoder}' instead.")
             sys.exit(1)
 
     decoder_opts = {}
