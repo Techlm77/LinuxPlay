@@ -1,15 +1,16 @@
-# LinuxPlay – A Fast Remote Desktop for Linux
+# LinuxPlay – A Fast, Fully Open-Source Remote Desktop for Linux
 
-LinuxPlay is a lightweight, low-latency, open-source remote desktop solution for Linux. It provides seamless video streaming and full keyboard/mouse control with ultra-low latency, making it a great alternative to VNC or Parsec (which lacks proper Linux support). No accounts, no cloud, 100% local and private.
+LinuxPlay is a lightweight, low-latency, fully open-source remote desktop solution designed specifically for Linux. It provides seamless video streaming and full keyboard/mouse control with ultra-low latency, making it a superior alternative to VNC and other traditional remote desktop solutions. LinuxPlay is 100% local and private – no accounts, no cloud dependency, just pure performance.
 
 ## Features
 
-- Ultra-low latency using UDP multicast for real-time streaming
-- Full keyboard and mouse support, including function keys and modifiers
-- Adaptive bitrate streaming to adjust quality based on network conditions
-- Local only, no cloud dependency or account requirements
-- Hardware-accelerated encoding and decoding for better performance
-- Fully open-source and customizable
+- **Ultra-low latency** using UDP multicast for real-time streaming
+- **Full keyboard and mouse support**, including function keys and modifiers
+- **Adaptive bitrate streaming** to optimize quality based on network conditions
+- **Completely local and private** – no third-party servers, no cloud accounts
+- **Hardware-accelerated encoding and decoding** for maximum performance
+- **Fully open-source** and customizable to fit your needs
+- **Clipboard sharing** between the client and host
 
 ## Installation
 
@@ -63,24 +64,30 @@ python3 client.py --decoder nvdec --host_ip 192.168.1.123 --remote_resolution 16
 
 ## Why Choose LinuxPlay?
 
-LinuxPlay is designed specifically for Linux, unlike Parsec, which lacks proper Linux support.
+LinuxPlay is designed specifically for Linux, unlike many other remote desktop solutions that have limited or outdated Linux support. Here’s how LinuxPlay compares:
 
-- Faster than VNC with low-latency streaming
-- More flexible than RDP, works over LAN without cloud lock-in
-- Supports full keyboard and mouse functionality, including all special keys
+| Feature             | LinuxPlay | VNC | X2Go | NoMachine |
+|--------------------|-----------|-----|------|-----------|
+| **Latency**        | Ultra-low | High | Medium | Medium |
+| **Video Streaming** | Hardware-accelerated | Software-based | Software-based | Limited hardware acceleration |
+| **Audio Support**  | Yes | No | Yes | Yes |
+| **Clipboard Sharing** | Yes | Yes | Yes | Yes |
+| **Adaptive Bitrate** | Yes | No | No | No |
+| **Encryption** | Planned (Future) | Yes | Yes | Yes |
+| **Open-Source** | **Yes** | Yes | Yes | No |
+| **Cloud-Dependency** | None | None | None | Required for full features |
 
 ---
 
 ## Contribute
 
-This project is open-source. Contributions, bug reports, and feature suggestions are welcome.
+LinuxPlay is **fully open-source** and welcomes contributions. Whether you want to improve performance, add features, or report bugs, you are welcome to participate.
 
 ---
 
 ## License
 
-This project is licensed under the MIT License.
-
+LinuxPlay is licensed under the MIT License.
 
 ---
 
@@ -88,12 +95,13 @@ This project is licensed under the MIT License.
 
 Development is ongoing, and here are some planned features for future updates:
 
-- (Added) **Clipboard Sharing** – Allow users to copy and paste text between the client and host.
+- **(Added) Clipboard Sharing** – Copy and paste text between client and host.
 - **H.265 and AV1 Support** – Improve compression and reduce bandwidth usage for better performance.
 - **Full Encryption** – Implement TLS encryption for control messages and video streaming to enhance security.
 - **Internet-Ready Security** – Enable secure connections over the internet with end-to-end encryption.
 
 ### Security Warning
+
 LinuxPlay can be used over the internet, but **it currently does not have encryption**. It is recommended to use a **VPN, SSH tunnel, or manually restrict access via firewall rules** if you plan to use it remotely. Future versions will include built-in encryption to enhance security.
 
 ---
