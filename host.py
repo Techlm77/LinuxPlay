@@ -20,12 +20,6 @@ DEFAULT_RES = "1920x1080"
 DEFAULT_FPS = "30"
 DEFAULT_BITRATE = "8M"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S"
-)
-
 class HostState:
     def __init__(self):
         self.video_thread = None
@@ -88,7 +82,7 @@ class StreamThread(threading.Thread):
         self._running = True
 
     def run(self):
-        logging.info("Starting {} stream: {}".format(self.name, " ".join(self.cmd)))
+        logging.info("Starting %s stream: %s", self.name, " ".join(self.cmd))
         self.process = subprocess.Popen(
             self.cmd,
             stdout=subprocess.DEVNULL,
@@ -101,7 +95,8 @@ class StreamThread(threading.Thread):
             ret = self.process.poll()
             if ret is not None:
                 out, err = self.process.communicate()
-                logging.error("{} process ended unexpectedly. Return code: {}. Error output:\n{}".format(self.name, ret, err))
+                logging.error("%s process ended unexpectedly. Return code: %s. Error output:\n%s",
+                              self.name, ret, err)
                 break
             time.sleep(0.5)
 
@@ -132,7 +127,7 @@ def detect_pulse_monitor():
             if len(parts) >= 2 and ".monitor" in parts[1]:
                 return parts[1]
     except Exception as e:
-        logging.error("Error detecting PulseAudio monitor: {}".format(e))
+        logging.error("Error detecting PulseAudio monitor: %s", e)
     return "default.monitor"
 
 def build_video_cmd(args, bitrate):
@@ -147,6 +142,7 @@ def build_video_cmd(args, bitrate):
         "-video_size", args.resolution,
         "-i", disp
     ]
+
     if args.encoder == "h.264":
         if has_nvidia():
             encode = [
@@ -244,9 +240,10 @@ def build_video_cmd(args, bitrate):
             "-b:v", bitrate,
             "-pix_fmt", "yuv420p"
         ]
+
     out = [
         "-f", "mpegts",
-        "udp://{}:{}?pkt_size=1316&buffer_size=65536".format(MULTICAST_IP, UDP_VIDEO_PORT)
+        f"udp://{MULTICAST_IP}:{UDP_VIDEO_PORT}?pkt_size=1316&buffer_size=65536"
     ]
     return cmd + encode + out
 
@@ -263,7 +260,7 @@ def build_audio_cmd():
         "-c:a", "libopus",
         "-b:a", "128k",
         "-f", "mpegts",
-        "udp://{}:{}?pkt_size=1316&buffer_size=65536".format(MULTICAST_IP, UDP_AUDIO_PORT)
+        f"udp://{MULTICAST_IP}:{UDP_AUDIO_PORT}?pkt_size=1316&buffer_size=65536"
     ]
 
 def adaptive_bitrate_manager(args):
@@ -275,14 +272,15 @@ def adaptive_bitrate_manager(args):
             if host_state.current_bitrate == DEFAULT_BITRATE:
                 try:
                     base = int("".join(filter(str.isdigit, DEFAULT_BITRATE)))
-                    new_bitrate = "{}M".format(int(base * 0.6))
+                    new_bitrate = f"{int(base*0.6)}M"
                 except:
                     new_bitrate = DEFAULT_BITRATE
             else:
                 new_bitrate = DEFAULT_BITRATE
 
             if new_bitrate != host_state.current_bitrate:
-                logging.info("Adaptive ABR: Switching bitrate from {} to {}".format(host_state.current_bitrate, new_bitrate))
+                logging.info("Adaptive ABR: Switching bitrate from %s to %s",
+                             host_state.current_bitrate, new_bitrate)
                 new_cmd = build_video_cmd(args, new_bitrate)
                 new_thread = StreamThread(new_cmd, "Video (Adaptive)")
                 new_thread.start()
@@ -293,39 +291,41 @@ def adaptive_bitrate_manager(args):
                 host_state.video_thread = new_thread
                 host_state.current_bitrate = new_bitrate
 
-def tcp_handshake_server(sock):
-    logging.info("TCP Handshake server listening on port {}".format(TCP_HANDSHAKE_PORT))
+def tcp_handshake_server(sock, encoder_str):
+    logging.info("TCP Handshake server listening on port %s", TCP_HANDSHAKE_PORT)
     while not host_state.should_terminate:
         try:
             conn, addr = sock.accept()
-            logging.info("TCP handshake connection from {}".format(addr))
+            logging.info("TCP handshake connection from %s", addr)
             data = conn.recv(1024).decode("utf-8", errors="replace").strip()
-            logging.info("Received handshake: '{}'".format(data))
-            expected = "PASSWORD:{}".format(host_state.host_password) if host_state.host_password else "PASSWORD:"
+            logging.info("Received handshake: '%s'", data)
+            expected = f"PASSWORD:{host_state.host_password}" if host_state.host_password else "PASSWORD:"
             if data == expected:
-                conn.sendall("OK".encode("utf-8"))
-                logging.info("Handshake from {} successful.".format(addr))
+                resp = f"OK:{encoder_str}"
+                conn.sendall(resp.encode("utf-8"))
+                logging.info("Handshake from %s successful. Sent %s", addr, resp)
             else:
                 conn.sendall("FAIL".encode("utf-8"))
-                logging.error("Handshake from {} failed. Expected '{}', got '{}'".format(addr, expected, data))
+                logging.error("Handshake from %s failed. Expected '%s', got '%s'",
+                              addr, expected, data)
             conn.close()
         except OSError:
             break
         except Exception as e:
-            logging.error("TCP handshake server error: {}".format(e))
+            logging.error("TCP handshake server error: %s", e)
             break
 
 def control_listener(sock):
-    logging.info("Control listener active on UDP port {}".format(UDP_CONTROL_PORT))
+    logging.info("Control listener active on UDP port %s", UDP_CONTROL_PORT)
     while not host_state.should_terminate:
         try:
             data, addr = sock.recvfrom(2048)
             msg = data.decode("utf-8", errors="replace").strip()
 
             if host_state.host_password:
-                prefix = "PASSWORD:{}:".format(host_state.host_password)
+                prefix = f"PASSWORD:{host_state.host_password}:"
                 if not msg.startswith(prefix):
-                    logging.warning("Rejected control message from {} due to password mismatch.".format(addr))
+                    logging.warning("Rejected control message from %s due to password mismatch.", addr)
                     continue
                 msg = msg[len(prefix):].strip()
 
@@ -354,11 +354,11 @@ def control_listener(sock):
                 subprocess.Popen(["xdotool", "keyup", tokens[1]],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
-                logging.warning("Ignored unsupported control message: {}".format(msg))
+                logging.warning("Ignored unsupported control message: %s", msg)
         except OSError:
             break
         except Exception as e:
-            logging.error("Control listener error: {}".format(e))
+            logging.error("Control listener error: %s", e)
             break
 
 def clipboard_monitor_host():
@@ -376,9 +376,10 @@ def clipboard_monitor_host():
         except:
             current = ""
         with host_state.clipboard_lock:
-            if not host_state.ignore_clipboard_update and current and current != host_state.last_clipboard_content:
+            if (not host_state.ignore_clipboard_update and
+               current and current != host_state.last_clipboard_content):
                 host_state.last_clipboard_content = current
-                msg = "CLIPBOARD_UPDATE HOST {}".format(current)
+                msg = f"CLIPBOARD_UPDATE HOST {current}"
                 sock.sendto(msg.encode("utf-8"), (MULTICAST_IP, UDP_CLIPBOARD_PORT))
                 logging.info("Host clipboard updated and broadcast.")
         time.sleep(1)
@@ -409,7 +410,7 @@ def clipboard_listener_host(sock):
         except OSError:
             break
         except Exception as e:
-            logging.error("Host clipboard listener error: {}".format(e))
+            logging.error("Host clipboard listener error: %s", e)
             break
 
 def main():
@@ -422,10 +423,26 @@ def main():
     parser.add_argument("--adaptive", action="store_true")
     parser.add_argument("--password", default="")
     parser.add_argument("--display", default=":0")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode with more logging.")
     args = parser.parse_args()
+
+    if args.debug:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%H:%M:%S"
+        )
+    else:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%H:%M:%S"
+        )
 
     host_state.host_password = args.password if args.password else None
     host_state.current_bitrate = args.bitrate
+
+    encoder_str = args.encoder
 
     host_state.handshake_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     host_state.handshake_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -433,7 +450,7 @@ def main():
         host_state.handshake_sock.bind(("", TCP_HANDSHAKE_PORT))
         host_state.handshake_sock.listen(5)
     except Exception as e:
-        logging.error("Failed to bind TCP handshake port {}: {}".format(TCP_HANDSHAKE_PORT, e))
+        logging.error("Failed to bind TCP handshake port %s: %s", TCP_HANDSHAKE_PORT, e)
         stop_all()
         sys.exit(1)
 
@@ -442,7 +459,7 @@ def main():
     try:
         host_state.control_sock.bind(("", UDP_CONTROL_PORT))
     except Exception as e:
-        logging.error("Failed to bind control port {}: {}".format(UDP_CONTROL_PORT, e))
+        logging.error("Failed to bind control port %s: %s", UDP_CONTROL_PORT, e)
         stop_all()
         sys.exit(1)
 
@@ -451,11 +468,11 @@ def main():
     try:
         host_state.clipboard_listener_sock.bind(("", UDP_CLIPBOARD_PORT))
     except Exception as e:
-        logging.error("Failed to bind clipboard port {}: {}".format(UDP_CLIPBOARD_PORT, e))
+        logging.error("Failed to bind clipboard port %s: %s", UDP_CLIPBOARD_PORT, e)
         stop_all()
         sys.exit(1)
 
-    handshake_thread = threading.Thread(target=tcp_handshake_server, args=(host_state.handshake_sock,), daemon=True)
+    handshake_thread = threading.Thread(target=tcp_handshake_server, args=(host_state.handshake_sock, encoder_str), daemon=True)
     handshake_thread.start()
 
     clipboard_monitor_thread = threading.Thread(target=clipboard_monitor_host, daemon=True)
@@ -465,12 +482,14 @@ def main():
     clipboard_listener_thread.start()
 
     video_cmd = build_video_cmd(args, host_state.current_bitrate)
+    logging.debug("Video command: %s", " ".join(video_cmd))
     with host_state.video_thread_lock:
         host_state.video_thread = StreamThread(video_cmd, "Video")
         host_state.video_thread.start()
 
     if args.audio == "enable":
         audio_cmd = build_audio_cmd()
+        logging.debug("Audio command: %s", " ".join(audio_cmd))
         host_state.audio_thread = StreamThread(audio_cmd, "Audio")
         host_state.audio_thread.start()
 
