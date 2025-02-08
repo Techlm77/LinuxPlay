@@ -323,7 +323,6 @@ def main():
     else:
         if args.decoder.replace(".", "") != host_encoder.replace(".", ""):
             logging.error("Encoder/decoder mismatch: Host uses '%s', client selected '%s'.", host_encoder, args.decoder)
-            # Create a temporary QApplication (if not already created) to show a QMessageBox
             temp_app = QApplication.instance() or QApplication(sys.argv)
             QMessageBox.critical(None, "Decoder Mismatch",
                 f"ERROR: The host is currently using '{host_encoder}' encoder, but your decoder is '{args.decoder}'.\n"
