@@ -105,6 +105,10 @@ Updates that has been added:
 - **Clipboard Sharing** – Copy and paste text between client and host.
 - **H.265 and AV1 Support** – Improve compression and reduce bandwidth usage for better performance.
 
+Updates that has been removed:
+
+- **History** - Stores information into history.json and automatically load it into start.py without needing to type the configurations over and over again.
+
 ### Security Warning
 
 LinuxPlay can be used over the internet, but **it currently does not have encryption**. It is recommended to use a **VPN, SSH tunnel, or manually restrict access via firewall rules** if you plan to use it remotely. Future versions will include built-in encryption to enhance security.
