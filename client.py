@@ -8,7 +8,7 @@ import socket
 import time
 import threading
 import os
-from PyQt5.QtWidgets import QApplication, QLabel, QMainWindow, QSizePolicy
+from PyQt5.QtWidgets import QApplication, QLabel, QMainWindow, QSizePolicy, QMessageBox
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 import atexit
@@ -22,12 +22,6 @@ TCP_HANDSHAKE_PORT = 7001
 UDP_CLIPBOARD_PORT = 7002
 MOUSE_MOVE_THROTTLE = 0.02
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S"
-)
-
 def has_nvidia():
     return which("nvidia-smi") is not None
 
@@ -35,32 +29,39 @@ def has_vaapi():
     return os.path.exists("/dev/dri/renderD128")
 
 def tcp_handshake_client(host_ip, password):
+    """
+    Returns either:
+      - (False, None) if handshake fails
+      - (True, host_encoder) if handshake succeeds
+    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        logging.info("Attempting TCP handshake with {}:{}".format(host_ip, TCP_HANDSHAKE_PORT))
+        logging.info("Attempting TCP handshake with %s:%s", host_ip, TCP_HANDSHAKE_PORT)
         sock.connect((host_ip, TCP_HANDSHAKE_PORT))
     except Exception as e:
-        logging.error("TCP handshake connection failed: {}".format(e))
+        logging.error("TCP handshake connection failed: %s", e)
         sock.close()
-        return False
+        return (False, None)
 
-    handshake_msg = "PASSWORD:{}".format(password) if password else "PASSWORD:"
+    handshake_msg = f"PASSWORD:{password}" if password else "PASSWORD:"
     sock.sendall(handshake_msg.encode("utf-8"))
 
     try:
         resp = sock.recv(1024).decode("utf-8", errors="replace").strip()
     except Exception as e:
-        logging.error("Failed to receive handshake response: {}".format(e))
+        logging.error("Failed to receive handshake response: %s", e)
         sock.close()
-        return False
+        return (False, None)
 
     sock.close()
-    if resp == "OK":
+
+    if resp.startswith("OK:"):
         logging.info("TCP handshake successful.")
-        return True
+        host_encoder = resp.split(":", 1)[1].strip()
+        return (True, host_encoder)
     else:
         logging.error("TCP handshake failed: Incorrect password or unknown error.")
-        return False
+        return (False, None)
 
 class DecoderThread(QThread):
     frame_ready = pyqtSignal(QImage)
@@ -75,7 +76,7 @@ class DecoderThread(QThread):
         try:
             container = av.open(self.input_url, options=self.decoder_opts)
         except Exception as e:
-            logging.error("Error opening video stream: {}".format(e))
+            logging.error("Error opening video stream: %s", e)
             return
 
         while self._running:
@@ -88,7 +89,7 @@ class DecoderThread(QThread):
                     qimg = QImage(data, img.width, img.height, QImage.Format_RGB888)
                     self.frame_ready.emit(qimg)
             except Exception as e:
-                logging.error("Decoding error: {}".format(e))
+                logging.error("Decoding error: %s", e)
                 QThread.msleep(10)
                 continue
 
@@ -118,7 +119,7 @@ class VideoWidget(QLabel):
         new_text = self.clipboard.text()
         if not self.ignore_clipboard and new_text and new_text != self.last_clipboard:
             self.last_clipboard = new_text
-            msg = "CLIPBOARD_UPDATE CLIENT {}".format(new_text)
+            msg = f"CLIPBOARD_UPDATE CLIENT {new_text}"
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
             sock.sendto(msg.encode("utf-8"), (MULTICAST_IP, UDP_CLIPBOARD_PORT))
@@ -132,7 +133,7 @@ class VideoWidget(QLabel):
         if self.width() and self.height():
             rx = int(e.x() / self.width() * self.remote_width)
             ry = int(e.y() / self.height() * self.remote_height)
-            self.control_callback("MOUSE_MOVE {} {}".format(rx, ry))
+            self.control_callback(f"MOUSE_MOVE {rx} {ry}")
         e.accept()
 
     def mousePressEvent(self, e):
@@ -141,37 +142,37 @@ class VideoWidget(QLabel):
         if b and self.width() and self.height():
             rx = int(e.x() / self.width() * self.remote_width)
             ry = int(e.y() / self.height() * self.remote_height)
-            self.control_callback("MOUSE_PRESS {} {} {}".format(b, rx, ry))
+            self.control_callback(f"MOUSE_PRESS {b} {rx} {ry}")
         e.accept()
 
     def mouseReleaseEvent(self, e):
         button_map = {Qt.LeftButton: "1", Qt.MiddleButton: "2", Qt.RightButton: "3"}
         b = button_map.get(e.button(), "")
         if b:
-            self.control_callback("MOUSE_RELEASE {}".format(b))
+            self.control_callback(f"MOUSE_RELEASE {b}")
         e.accept()
 
     def wheelEvent(self, e):
         delta = e.angleDelta()
         if delta.y() != 0:
             b = "4" if delta.y() > 0 else "5"
-            self.control_callback("MOUSE_SCROLL {}".format(b))
+            self.control_callback(f"MOUSE_SCROLL {b}")
             e.accept()
         elif delta.x() != 0:
             b = "6" if delta.x() < 0 else "7"
-            self.control_callback("MOUSE_SCROLL {}".format(b))
+            self.control_callback(f"MOUSE_SCROLL {b}")
             e.accept()
 
     def keyPressEvent(self, e):
         key_name = self._get_key_name(e)
         if key_name:
-            self.control_callback("KEY_PRESS {}".format(key_name))
+            self.control_callback(f"KEY_PRESS {key_name}")
         e.accept()
 
     def keyReleaseEvent(self, e):
         key_name = self._get_key_name(e)
         if key_name:
-            self.control_callback("KEY_RELEASE {}".format(key_name))
+            self.control_callback(f"KEY_RELEASE {key_name}")
         e.accept()
 
     def _get_key_name(self, event):
@@ -225,7 +226,10 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.video_widget)
         self.video_widget.setFocus()
 
-        mcast_url = "udp://@{}:{}?fifo_size=5000000&overrun_nonfatal=1".format(MULTICAST_IP, DEFAULT_UDP_PORT)
+        logging.debug("Client selected decoder options: %s", decoder_opts)
+        logging.debug("Client connecting to host at %s, remote resolution %sx%s", host_ip, rwidth, rheight)
+
+        mcast_url = f"udp://@{MULTICAST_IP}:{DEFAULT_UDP_PORT}?fifo_size=5000000&overrun_nonfatal=1"
         self.decoder_thread = DecoderThread(mcast_url, decoder_opts)
         self.decoder_thread.frame_ready.connect(self.update_image)
         self.decoder_thread.start()
@@ -235,18 +239,18 @@ class MainWindow(QMainWindow):
 
     def send_control(self, msg):
         if self.password:
-            msg = "PASSWORD:{}:{}".format(self.password, msg)
+            msg = f"PASSWORD:{self.password}:{msg}"
         try:
             self.control_sock.sendto(msg.encode("utf-8"), self.control_addr)
         except Exception as e:
-            logging.error("Error sending control message: {}".format(e))
+            logging.error("Error sending control message: %s", e)
 
 def clipboard_listener_client():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.bind(("", UDP_CLIPBOARD_PORT))
     except Exception as e:
-        logging.error("Clipboard listener bind failed: {}".format(e))
+        logging.error("Clipboard listener bind failed: %s", e)
         return
     while True:
         try:
@@ -262,24 +266,24 @@ def clipboard_listener_client():
                     logging.info("Client clipboard updated from host.")
                 clipboard.blockSignals(False)
         except Exception as e:
-            logging.error("Client clipboard listener error: {}".format(e))
+            logging.error("Client clipboard listener error: %s", e)
 
 def control_listener_client():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.bind(("", CONTROL_PORT))
     except Exception as e:
-        logging.error("Client control listener bind failed: {}".format(e))
+        logging.error("Client control listener bind failed: %s", e)
         return
-    logging.info("Client control listener active on UDP port {}".format(CONTROL_PORT))
+    logging.info("Client control listener active on UDP port %s", CONTROL_PORT)
     while True:
         try:
             data, addr = sock.recvfrom(2048)
             msg = data.decode("utf-8", errors="replace").strip()
             if msg:
-                logging.info("Client received control message: {}".format(msg))
+                logging.info("Client received control message: %s", msg)
         except Exception as e:
-            logging.error("Client control listener error: {}".format(e))
+            logging.error("Client control listener error: %s", e)
 
 def cleanup():
     pass
@@ -293,13 +297,40 @@ def main():
     parser.add_argument("--remote_resolution", default=DEFAULT_RESOLUTION)
     parser.add_argument("--audio", choices=["enable", "disable"], default="disable")
     parser.add_argument("--password", default="")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode with more logging.")
     args = parser.parse_args()
+
+    if args.debug:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%H:%M:%S"
+        )
+    else:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%H:%M:%S"
+        )
 
     try:
         w, h = map(int, args.remote_resolution.lower().split("x"))
     except:
         logging.error("Invalid remote_resolution format. Use e.g. 1600x900.")
         sys.exit(1)
+
+    handshake_ok, host_encoder = tcp_handshake_client(args.host_ip, args.password)
+    if not handshake_ok:
+        sys.exit("TCP handshake failed. Exiting.")
+
+    if args.decoder == "none":
+        logging.warning("You selected 'none' decoder, but host is using '%s'. Attempting raw decode fallback...", host_encoder)
+    else:
+        if args.decoder.replace(".", "") != host_encoder.replace(".", ""):
+            logging.error("Encoder/decoder mismatch: Host uses '%s', client selected '%s'.", host_encoder, args.decoder)
+            print(f"ERROR: The host is currently using '{host_encoder}' encoder, but your decoder is '{args.decoder}'.\n"
+                  f"Please exit and restart the client with '--decoder {host_encoder}'.")
+            sys.exit(1)
 
     decoder_opts = {}
     if args.decoder == "h.264":
@@ -318,11 +349,7 @@ def main():
         elif has_vaapi():
             decoder_opts["hwaccel"] = "av1_vaapi"
 
-    if not tcp_handshake_client(args.host_ip, args.password):
-        sys.exit("TCP handshake failed. Exiting.")
-
     app = QApplication(sys.argv)
-
     window = MainWindow(decoder_opts, w, h, args.host_ip, args.password)
 
     clipboard_thread = threading.Thread(target=clipboard_listener_client, daemon=True)
@@ -341,9 +368,9 @@ def main():
             "-flags", "low_delay",
             "-autoexit",
             "-nodisp",
-            "udp://@{}:6001?fifo_size=5000000&overrun_nonfatal=1".format(MULTICAST_IP)
+            f"udp://@{MULTICAST_IP}:6001?fifo_size=5000000&overrun_nonfatal=1"
         ]
-        logging.info("Starting audio playback...")
+        logging.info("Starting audio playback with ffplay...")
         audio_proc = subprocess.Popen(audio_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     window.show()
