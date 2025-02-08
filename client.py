@@ -1,26 +1,42 @@
 #!/usr/bin/env python3
-import sys
-import av
-import argparse
-import logging
+import os
 import subprocess
-import socket
+import argparse
+import sys
+import logging
 import time
 import threading
-import os
-from PyQt5.QtWidgets import QApplication, QLabel, QMainWindow, QSizePolicy, QMessageBox
-from PyQt5.QtGui import QImage, QPixmap
-from PyQt5.QtCore import QThread, pyqtSignal, Qt
+import socket
 import atexit
 from shutil import which
 
-DEFAULT_UDP_PORT = 5000
-DEFAULT_RESOLUTION = "1920x1080"
-MULTICAST_IP = "239.0.0.1"
-CONTROL_PORT = 7000
-TCP_HANDSHAKE_PORT = 7001
+UDP_VIDEO_PORT = 5000
+UDP_AUDIO_PORT = 6001
+UDP_CONTROL_PORT = 7000
 UDP_CLIPBOARD_PORT = 7002
-MOUSE_MOVE_THROTTLE = 0.02
+TCP_HANDSHAKE_PORT = 7001
+FILE_UPLOAD_PORT = 7003
+MULTICAST_IP = "239.0.0.1"
+DEFAULT_RES = "1920x1080"
+DEFAULT_FPS = "30"
+DEFAULT_BITRATE = "8M"
+
+class HostState:
+    def __init__(self):
+        self.video_thread = None
+        self.audio_thread = None
+        self.current_bitrate = DEFAULT_BITRATE
+        self.host_password = None
+        self.last_clipboard_content = ""
+        self.ignore_clipboard_update = False
+        self.should_terminate = False
+        self.video_thread_lock = threading.Lock()
+        self.clipboard_lock = threading.Lock()
+        self.handshake_sock = None
+        self.control_sock = None
+        self.clipboard_listener_sock = None
+
+host_state = HostState()
 
 def has_nvidia():
     return which("nvidia-smi") is not None
@@ -28,270 +44,433 @@ def has_nvidia():
 def has_vaapi():
     return os.path.exists("/dev/dri/renderD128")
 
-def tcp_handshake_client(host_ip, password):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        logging.info("Attempting TCP handshake with %s:%s", host_ip, TCP_HANDSHAKE_PORT)
-        sock.connect((host_ip, TCP_HANDSHAKE_PORT))
-    except Exception as e:
-        logging.error("TCP handshake connection failed: %s", e)
-        sock.close()
-        return (False, None)
+def stop_all():
+    host_state.should_terminate = True
+    with host_state.video_thread_lock:
+        if host_state.video_thread:
+            host_state.video_thread.stop()
+            host_state.video_thread.join(timeout=2)
+    if host_state.audio_thread:
+        host_state.audio_thread.stop()
+        host_state.audio_thread.join(timeout=2)
+    if host_state.handshake_sock:
+        try:
+            host_state.handshake_sock.close()
+        except:
+            pass
+    if host_state.control_sock:
+        try:
+            host_state.control_sock.close()
+        except:
+            pass
+    if host_state.clipboard_listener_sock:
+        try:
+            host_state.clipboard_listener_sock.close()
+        except:
+            pass
 
-    handshake_msg = f"PASSWORD:{password}" if password else "PASSWORD:"
-    sock.sendall(handshake_msg.encode("utf-8"))
+def cleanup():
+    stop_all()
 
-    try:
-        resp = sock.recv(1024).decode("utf-8", errors="replace").strip()
-    except Exception as e:
-        logging.error("Failed to receive handshake response: %s", e)
-        sock.close()
-        return (False, None)
+atexit.register(cleanup)
 
-    sock.close()
-
-    if resp.startswith("OK:"):
-        logging.info("TCP handshake successful.")
-        host_encoder = resp.split(":", 1)[1].strip()
-        return (True, host_encoder)
-    else:
-        logging.error("TCP handshake failed: Incorrect password or unknown error.")
-        return (False, None)
-
-class DecoderThread(QThread):
-    frame_ready = pyqtSignal(QImage)
-
-    def __init__(self, input_url, decoder_opts, parent=None):
-        super().__init__(parent)
-        self.input_url = input_url
-        self.decoder_opts = decoder_opts
+class StreamThread(threading.Thread):
+    def __init__(self, cmd, name):
+        super().__init__(daemon=True)
+        self.cmd = cmd
+        self.name = name
+        self.process = None
         self._running = True
 
     def run(self):
-        try:
-            container = av.open(self.input_url, options=self.decoder_opts)
-        except Exception as e:
-            logging.error("Error opening video stream: %s", e)
-            return
-
+        logging.info("Starting %s stream: %s", self.name, " ".join(self.cmd))
+        self.process = subprocess.Popen(
+            self.cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            universal_newlines=True
+        )
         while self._running:
-            try:
-                for frame in container.decode(video=0):
-                    if not self._running:
-                        break
-                    img = frame.to_image()
-                    data = img.tobytes("raw", "RGB")
-                    qimg = QImage(data, img.width, img.height, QImage.Format_RGB888)
-                    self.frame_ready.emit(qimg)
-            except Exception as e:
-                logging.error("Decoding error: %s", e)
-                QThread.msleep(10)
-                continue
+            if host_state.should_terminate:
+                break
+            ret = self.process.poll()
+            if ret is not None:
+                out, err = self.process.communicate()
+                logging.error("%s process ended unexpectedly. Return code: %s. Error output:\n%s",
+                              self.name, ret, err)
+                break
+            time.sleep(0.5)
 
     def stop(self):
         self._running = False
+        if self.process:
+            self.process.terminate()
 
-class VideoWidget(QLabel):
-    def __init__(self, control_callback, rwidth, rheight, parent=None):
-        super().__init__(parent)
-        self.setScaledContents(True)
-        self.setMouseTracking(True)
-        self.setFocusPolicy(Qt.StrongFocus)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setContentsMargins(0, 0, 0, 0)
+def shutil_which(cmd):
+    import shutil
+    return shutil.which(cmd)
 
-        self.control_callback = control_callback
-        self.remote_width = rwidth
-        self.remote_height = rheight
-        self.last_mouse_move = 0
+def get_display(default=":0"):
+    disp = os.environ.get("DISPLAY", default)
+    return disp
 
-        self.clipboard = QApplication.clipboard()
-        self.clipboard.dataChanged.connect(self.on_clipboard_change)
-        self.last_clipboard = self.clipboard.text()
-        self.ignore_clipboard = False
-
-    def on_clipboard_change(self):
-        new_text = self.clipboard.text()
-        if not self.ignore_clipboard and new_text and new_text != self.last_clipboard:
-            self.last_clipboard = new_text
-            msg = f"CLIPBOARD_UPDATE CLIENT {new_text}"
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
-            sock.sendto(msg.encode("utf-8"), (MULTICAST_IP, UDP_CLIPBOARD_PORT))
-            logging.info("Client clipboard updated and broadcast.")
-
-    def mouseMoveEvent(self, e):
-        now = time.time()
-        if now - self.last_mouse_move < MOUSE_MOVE_THROTTLE:
-            return
-        self.last_mouse_move = now
-        if self.width() and self.height():
-            rx = int(e.x() / self.width() * self.remote_width)
-            ry = int(e.y() / self.height() * self.remote_height)
-            self.control_callback(f"MOUSE_MOVE {rx} {ry}")
-        e.accept()
-
-    def mousePressEvent(self, e):
-        button_map = {Qt.LeftButton: "1", Qt.MiddleButton: "2", Qt.RightButton: "3"}
-        b = button_map.get(e.button(), "")
-        if b and self.width() and self.height():
-            rx = int(e.x() / self.width() * self.remote_width)
-            ry = int(e.y() / self.height() * self.remote_height)
-            self.control_callback(f"MOUSE_PRESS {b} {rx} {ry}")
-        e.accept()
-
-    def mouseReleaseEvent(self, e):
-        button_map = {Qt.LeftButton: "1", Qt.MiddleButton: "2", Qt.RightButton: "3"}
-        b = button_map.get(e.button(), "")
-        if b:
-            self.control_callback(f"MOUSE_RELEASE {b}")
-        e.accept()
-
-    def wheelEvent(self, e):
-        delta = e.angleDelta()
-        if delta.y() != 0:
-            b = "4" if delta.y() > 0 else "5"
-            self.control_callback(f"MOUSE_SCROLL {b}")
-            e.accept()
-        elif delta.x() != 0:
-            b = "6" if delta.x() < 0 else "7"
-            self.control_callback(f"MOUSE_SCROLL {b}")
-            e.accept()
-
-    def keyPressEvent(self, e):
-        key_name = self._get_key_name(e)
-        if key_name:
-            self.control_callback(f"KEY_PRESS {key_name}")
-        e.accept()
-
-    def keyReleaseEvent(self, e):
-        key_name = self._get_key_name(e)
-        if key_name:
-            self.control_callback(f"KEY_RELEASE {key_name}")
-        e.accept()
-
-    def _get_key_name(self, event):
-        from PyQt5.QtCore import Qt
-        key = event.key()
-        text = event.text()
-        key_map = {
-            Qt.Key_Escape: "Escape", Qt.Key_Tab: "Tab", Qt.Key_Backtab: "Tab", Qt.Key_Backspace: "BackSpace",
-            Qt.Key_Return: "Return", Qt.Key_Enter: "Return", Qt.Key_Insert: "Insert", Qt.Key_Delete: "Delete",
-            Qt.Key_Pause: "Pause", Qt.Key_Print: "Print", Qt.Key_SysReq: "Sys_Req", Qt.Key_Clear: "Clear",
-            Qt.Key_Home: "Home", Qt.Key_End: "End", Qt.Key_Left: "Left", Qt.Key_Up: "Up", Qt.Key_Right: "Right",
-            Qt.Key_Down: "Down", Qt.Key_PageUp: "Page_Up", Qt.Key_PageDown: "Page_Down", Qt.Key_Shift: "Shift_L",
-            Qt.Key_Control: "Control_L", Qt.Key_Meta: "Super_L", Qt.Key_Alt: "Alt_L", Qt.Key_AltGr: "Alt_R",
-            Qt.Key_CapsLock: "Caps_Lock", Qt.Key_NumLock: "Num_Lock", Qt.Key_ScrollLock: "Scroll_Lock",
-            Qt.Key_F1: "F1", Qt.Key_F2: "F2", Qt.Key_F3: "F3", Qt.Key_F4: "F4", Qt.Key_F5: "F5", Qt.Key_F6: "F6",
-            Qt.Key_F7: "F7", Qt.Key_F8: "F8", Qt.Key_F9: "F9", Qt.Key_F10: "F10", Qt.Key_F11: "F11", Qt.Key_F12: "F12",
-            Qt.Key_Space: "space", Qt.Key_QuoteLeft: "grave", Qt.Key_Minus: "minus", Qt.Key_Equal: "equal",
-            Qt.Key_BracketLeft: "bracketleft", Qt.Key_BracketRight: "bracketright", Qt.Key_Backslash: "backslash",
-            Qt.Key_Semicolon: "semicolon", Qt.Key_Apostrophe: "apostrophe", Qt.Key_Comma: "comma",
-            Qt.Key_Period: "period", Qt.Key_Slash: "slash", Qt.Key_Exclam: "exclam", Qt.Key_QuoteDbl: "quotedbl",
-            Qt.Key_NumberSign: "numbersign", Qt.Key_Dollar: "dollar", Qt.Key_Percent: "percent",
-            Qt.Key_Ampersand: "ampersand", Qt.Key_Asterisk: "asterisk", Qt.Key_ParenLeft: "parenleft",
-            Qt.Key_ParenRight: "parenright", Qt.Key_Underscore: "underscore", Qt.Key_Plus: "plus",
-            Qt.Key_BraceLeft: "braceleft", Qt.Key_BraceRight: "braceright", Qt.Key_Bar: "bar",
-            Qt.Key_Colon: "colon", Qt.Key_Less: "less", Qt.Key_Greater: "greater", Qt.Key_Question: "question"
-        }
-        if key in key_map:
-            return key_map[key]
-        if (Qt.Key_A <= key <= Qt.Key_Z) or (Qt.Key_0 <= key <= Qt.Key_9):
-            return chr(key).lower()
-        if text:
-            if text == "£":
-                return "sterling"
-            if text == "¬":
-                return "notsign"
-            return text
-        return None
-
-class MainWindow(QMainWindow):
-    def __init__(self, decoder_opts, rwidth, rheight, host_ip, password, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Remote Desktop Viewer (LinuxPlay by Techlm77)")
-        self.remote_width = rwidth
-        self.remote_height = rheight
-        self.control_addr = (host_ip, CONTROL_PORT)
-        self.control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.control_sock.setblocking(False)
-        self.password = password
-
-        self.video_widget = VideoWidget(self.send_control, rwidth, rheight)
-        self.setCentralWidget(self.video_widget)
-        self.video_widget.setFocus()
-
-        logging.debug("Client selected decoder options: %s", decoder_opts)
-        logging.debug("Client connecting to host at %s, remote resolution %sx%s", host_ip, rwidth, rheight)
-
-        mcast_url = f"udp://@{MULTICAST_IP}:{DEFAULT_UDP_PORT}?fifo_size=5000000&overrun_nonfatal=1"
-        self.decoder_thread = DecoderThread(mcast_url, decoder_opts)
-        self.decoder_thread.frame_ready.connect(self.update_image)
-        self.decoder_thread.start()
-
-    def update_image(self, qimg):
-        self.video_widget.setPixmap(QPixmap.fromImage(qimg))
-
-    def send_control(self, msg):
-        if self.password:
-            msg = f"PASSWORD:{self.password}:{msg}"
-        try:
-            self.control_sock.sendto(msg.encode("utf-8"), self.control_addr)
-        except Exception as e:
-            logging.error("Error sending control message: %s", e)
-
-def clipboard_listener_client():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+def detect_pulse_monitor():
+    monitor = os.environ.get("PULSE_MONITOR")
+    if monitor:
+        return monitor
+    if not shutil_which("pactl"):
+        logging.warning("pactl not found, using default.monitor")
+        return "default.monitor"
     try:
-        sock.bind(("", UDP_CLIPBOARD_PORT))
+        output = subprocess.check_output(["pactl", "list", "short", "sources"], universal_newlines=True)
+        for line in output.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and ".monitor" in parts[1]:
+                return parts[1]
     except Exception as e:
-        logging.error("Clipboard listener bind failed: %s", e)
-        return
-    while True:
+        logging.error("Error detecting PulseAudio monitor: %s", e)
+    return "default.monitor"
+
+def build_video_cmd(args, bitrate):
+    disp = args.display
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-threads", "0",
+        "-f", "x11grab",
+        "-framerate", args.framerate,
+        "-video_size", args.resolution,
+        "-i", disp
+    ]
+
+    if args.encoder == "h.264":
+        if has_nvidia():
+            encode = [
+                "-c:v", "h264_nvenc",
+                "-preset", "llhq",
+                "-g", "30",
+                "-bf", "0",
+                "-b:v", bitrate,
+                "-pix_fmt", "yuv420p"
+            ]
+        elif has_vaapi():
+            encode = [
+                "-vf", "format=nv12,hwupload",
+                "-vaapi_device", "/dev/dri/renderD128",
+                "-c:v", "h264_vaapi",
+                "-g", "30",
+                "-bf", "0",
+                "-qp", "20",
+                "-b:v", bitrate
+            ]
+        else:
+            encode = [
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-tune", "zerolatency",
+                "-g", "30",
+                "-bf", "0",
+                "-b:v", bitrate,
+                "-pix_fmt", "yuv420p"
+            ]
+    elif args.encoder == "h.265":
+        if has_nvidia():
+            encode = [
+                "-c:v", "hevc_nvenc",
+                "-preset", "llhq",
+                "-g", "30",
+                "-bf", "0",
+                "-b:v", bitrate,
+                "-pix_fmt", "yuv420p"
+            ]
+        elif has_vaapi():
+            encode = [
+                "-vf", "format=nv12,hwupload",
+                "-vaapi_device", "/dev/dri/renderD128",
+                "-c:v", "hevc_vaapi",
+                "-g", "30",
+                "-bf", "0",
+                "-qp", "20",
+                "-b:v", bitrate
+            ]
+        else:
+            encode = [
+                "-c:v", "libx265",
+                "-preset", "ultrafast",
+                "-tune", "zerolatency",
+                "-g", "30",
+                "-bf", "0",
+                "-b:v", bitrate
+            ]
+    elif args.encoder == "av1":
+        if has_nvidia():
+            encode = [
+                "-c:v", "av1_nvenc",
+                "-preset", "llhq",
+                "-g", "30",
+                "-bf", "0",
+                "-b:v", bitrate,
+                "-pix_fmt", "yuv420p"
+            ]
+        elif has_vaapi():
+            encode = [
+                "-vf", "format=nv12,hwupload",
+                "-vaapi_device", "/dev/dri/renderD128",
+                "-c:v", "av1_vaapi",
+                "-g", "30",
+                "-bf", "0",
+                "-qp", "20",
+                "-b:v", bitrate
+            ]
+        else:
+            encode = [
+                "-c:v", "libaom-av1",
+                "-strict", "experimental",
+                "-cpu-used", "4",
+                "-g", "30",
+                "-b:v", bitrate
+            ]
+    else:
+        encode = [
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-tune", "zerolatency",
+            "-g", "30",
+            "-bf", "0",
+            "-b:v", bitrate,
+            "-pix_fmt", "yuv420p"
+        ]
+
+    out = [
+        "-f", "mpegts",
+        f"udp://{MULTICAST_IP}:{UDP_VIDEO_PORT}?pkt_size=1316&buffer_size=65536"
+    ]
+    return cmd + encode + out
+
+def build_audio_cmd():
+    monitor_source = detect_pulse_monitor()
+    return [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-fflags", "nobuffer",
+        "-flags", "low_delay",
+        "-f", "pulse",
+        "-i", monitor_source,
+        "-c:a", "libopus",
+        "-b:a", "128k",
+        "-f", "mpegts",
+        f"udp://{MULTICAST_IP}:{UDP_AUDIO_PORT}?pkt_size=1316&buffer_size=65536"
+    ]
+
+def adaptive_bitrate_manager(args):
+    while not host_state.should_terminate:
+        time.sleep(30)
+        if host_state.should_terminate:
+            break
+        with host_state.video_thread_lock:
+            if host_state.current_bitrate == DEFAULT_BITRATE:
+                try:
+                    base = int("".join(filter(str.isdigit, DEFAULT_BITRATE)))
+                    new_bitrate = f"{int(base*0.6)}M"
+                except:
+                    new_bitrate = DEFAULT_BITRATE
+            else:
+                new_bitrate = DEFAULT_BITRATE
+
+            if new_bitrate != host_state.current_bitrate:
+                logging.info("Adaptive ABR: Switching bitrate from %s to %s",
+                             host_state.current_bitrate, new_bitrate)
+                new_cmd = build_video_cmd(args, new_bitrate)
+                new_thread = StreamThread(new_cmd, "Video (Adaptive)")
+                new_thread.start()
+                time.sleep(3)
+                if host_state.video_thread:
+                    host_state.video_thread.stop()
+                    host_state.video_thread.join()
+                host_state.video_thread = new_thread
+                host_state.current_bitrate = new_bitrate
+
+def tcp_handshake_server(sock, encoder_str):
+    logging.info("TCP Handshake server listening on port %s", TCP_HANDSHAKE_PORT)
+    while not host_state.should_terminate:
+        try:
+            conn, addr = sock.accept()
+            logging.info("TCP handshake connection from %s", addr)
+            data = conn.recv(1024).decode("utf-8", errors="replace").strip()
+            logging.info("Received handshake: '%s'", data)
+            expected = f"PASSWORD:{host_state.host_password}" if host_state.host_password else "PASSWORD:"
+            if data == expected:
+                resp = f"OK:{encoder_str}"
+                conn.sendall(resp.encode("utf-8"))
+                logging.info("Handshake from %s successful. Sent %s", addr, resp)
+            else:
+                conn.sendall("FAIL".encode("utf-8"))
+                logging.error("Handshake from %s failed. Expected '%s', got '%s'",
+                              addr, expected, data)
+            conn.close()
+        except OSError:
+            break
+        except Exception as e:
+            logging.error("TCP handshake server error: %s", e)
+            break
+
+def control_listener(sock):
+    logging.info("Control listener active on UDP port %s", UDP_CONTROL_PORT)
+    while not host_state.should_terminate:
+        try:
+            data, addr = sock.recvfrom(2048)
+            msg = data.decode("utf-8", errors="replace").strip()
+
+            if host_state.host_password:
+                prefix = f"PASSWORD:{host_state.host_password}:"
+                if not msg.startswith(prefix):
+                    logging.warning("Rejected control message from %s due to password mismatch.", addr)
+                    continue
+                msg = msg[len(prefix):].strip()
+
+            tokens = msg.split()
+            if not tokens:
+                continue
+            cmd = tokens[0]
+            if cmd == "MOUSE_MOVE" and len(tokens) == 3:
+                subprocess.Popen(["xdotool", "mousemove", tokens[1], tokens[2]],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif cmd == "MOUSE_PRESS" and len(tokens) == 4:
+                subprocess.Popen(["xdotool", "mousemove", tokens[2], tokens[3]],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.Popen(["xdotool", "mousedown", tokens[1]],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif cmd == "MOUSE_RELEASE" and len(tokens) == 2:
+                subprocess.Popen(["xdotool", "mouseup", tokens[1]],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif cmd == "MOUSE_SCROLL" and len(tokens) == 2:
+                subprocess.Popen(["xdotool", "click", tokens[1]],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif cmd == "KEY_PRESS" and len(tokens) == 2:
+                subprocess.Popen(["xdotool", "keydown", tokens[1]],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif cmd == "KEY_RELEASE" and len(tokens) == 2:
+                subprocess.Popen(["xdotool", "keyup", tokens[1]],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                logging.warning("Ignored unsupported control message: %s", msg)
+        except OSError:
+            break
+        except Exception as e:
+            logging.error("Control listener error: %s", e)
+            break
+
+def clipboard_monitor_host():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+    while not host_state.should_terminate:
+        try:
+            proc = subprocess.run(
+                ["xclip", "-o", "-selection", "clipboard"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True
+            )
+            current = proc.stdout.strip()
+        except:
+            current = ""
+        with host_state.clipboard_lock:
+            if (not host_state.ignore_clipboard_update and
+               current and current != host_state.last_clipboard_content):
+                host_state.last_clipboard_content = current
+                msg = f"CLIPBOARD_UPDATE HOST {current}"
+                sock.sendto(msg.encode("utf-8"), (MULTICAST_IP, UDP_CLIPBOARD_PORT))
+                logging.info("Host clipboard updated and broadcast.")
+        time.sleep(1)
+    sock.close()
+
+def clipboard_listener_host(sock):
+    while not host_state.should_terminate:
         try:
             data, addr = sock.recvfrom(65535)
             msg = data.decode("utf-8", errors="replace")
             tokens = msg.split(maxsplit=2)
-            if len(tokens) >= 3 and tokens[0] == "CLIPBOARD_UPDATE" and tokens[1] == "HOST":
+            if len(tokens) >= 3 and tokens[0] == "CLIPBOARD_UPDATE" and tokens[1] == "CLIENT":
                 new_content = tokens[2]
-                clipboard = QApplication.clipboard()
-                clipboard.blockSignals(True)
-                if new_content != clipboard.text():
-                    clipboard.setText(new_content)
-                    logging.info("Client clipboard updated from host.")
-                clipboard.blockSignals(False)
+                with host_state.clipboard_lock:
+                    host_state.ignore_clipboard_update = True
+                    proc = subprocess.run(
+                        ["xclip", "-o", "-selection", "clipboard"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        universal_newlines=True
+                    )
+                    current = proc.stdout.strip()
+                    if new_content != current:
+                        p = subprocess.Popen(["xclip", "-selection", "clipboard", "-in"], stdin=subprocess.PIPE)
+                        p.communicate(new_content.encode("utf-8"))
+                        logging.info("Host clipboard updated from client.")
+                    host_state.ignore_clipboard_update = False
+        except OSError:
+            break
         except Exception as e:
-            logging.error("Client clipboard listener error: %s", e)
+            logging.error("Host clipboard listener error: %s", e)
+            break
 
-def control_listener_client():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.bind(("", CONTROL_PORT))
-    except Exception as e:
-        logging.error("Client control listener bind failed: %s", e)
-        return
-    logging.info("Client control listener active on UDP port %s", CONTROL_PORT)
-    while True:
+def recvall(sock, n):
+    data = b""
+    while len(data) < n:
+        packet = sock.recv(n - len(data))
+        if not packet:
+            return None
+        data += packet
+    return data
+
+def file_upload_listener():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("", FILE_UPLOAD_PORT))
+    s.listen(5)
+    logging.info("File upload listener active on TCP port %s", FILE_UPLOAD_PORT)
+    while not host_state.should_terminate:
         try:
-            data, addr = sock.recvfrom(2048)
-            msg = data.decode("utf-8", errors="replace").strip()
-            if msg:
-                logging.info("Client received control message: %s", msg)
+            conn, addr = s.accept()
+            logging.info("File upload connection from %s", addr)
+            header = recvall(conn, 4)
+            if not header:
+                conn.close()
+                continue
+            filename_length = int.from_bytes(header, byteorder='big')
+            filename_bytes = recvall(conn, filename_length)
+            filename = filename_bytes.decode('utf-8')
+            filesize_bytes = recvall(conn, 8)
+            file_size = int.from_bytes(filesize_bytes, byteorder='big')
+            dest_dir = os.path.expanduser("~/LinuxPlayDrop")
+            if not os.path.exists(dest_dir):
+                os.makedirs(dest_dir)
+            dest_path = os.path.join(dest_dir, filename)
+            with open(dest_path, 'wb') as f:
+                remaining = file_size
+                while remaining > 0:
+                    chunk_size = 4096 if remaining >= 4096 else remaining
+                    chunk = conn.recv(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    remaining -= len(chunk)
+            logging.info("Received file %s (%d bytes)", dest_path, file_size)
+            conn.close()
         except Exception as e:
-            logging.error("Client control listener error: %s", e)
-
-def cleanup():
-    pass
-
-atexit.register(cleanup)
+            logging.error("File upload error: %s", e)
+    s.close()
 
 def main():
-    parser = argparse.ArgumentParser(description="Remote Desktop Client (Production Ready)")
-    parser.add_argument("--decoder", choices=["none", "h.264", "h.265", "av1"], default="none")
-    parser.add_argument("--host_ip", required=True)
-    parser.add_argument("--remote_resolution", default=DEFAULT_RESOLUTION)
+    parser = argparse.ArgumentParser(description="Remote Desktop Host (Production Ready)")
+    parser.add_argument("--encoder", choices=["none", "h.264", "h.265", "av1"], default="none")
+    parser.add_argument("--resolution", default=DEFAULT_RES)
+    parser.add_argument("--framerate", default=DEFAULT_FPS)
+    parser.add_argument("--bitrate", default=DEFAULT_BITRATE)
     parser.add_argument("--audio", choices=["enable", "disable"], default="disable")
+    parser.add_argument("--adaptive", action="store_true")
     parser.add_argument("--password", default="")
+    parser.add_argument("--display", default=":0")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode with more logging.")
     args = parser.parse_args()
 
@@ -308,75 +487,78 @@ def main():
             datefmt="%H:%M:%S"
         )
 
+    host_state.host_password = args.password if args.password else None
+    host_state.current_bitrate = args.bitrate
+
+    encoder_str = args.encoder
+
+    host_state.handshake_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    host_state.handshake_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        w, h = map(int, args.remote_resolution.lower().split("x"))
-    except:
-        logging.error("Invalid remote_resolution format. Use e.g. 1600x900.")
+        host_state.handshake_sock.bind(("", TCP_HANDSHAKE_PORT))
+        host_state.handshake_sock.listen(5)
+    except Exception as e:
+        logging.error("Failed to bind TCP handshake port %s: %s", TCP_HANDSHAKE_PORT, e)
+        stop_all()
         sys.exit(1)
 
-    handshake_ok, host_encoder = tcp_handshake_client(args.host_ip, args.password)
-    if not handshake_ok:
-        sys.exit("TCP handshake failed. Exiting.")
+    host_state.control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    host_state.control_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        host_state.control_sock.bind(("", UDP_CONTROL_PORT))
+    except Exception as e:
+        logging.error("Failed to bind control port %s: %s", UDP_CONTROL_PORT, e)
+        stop_all()
+        sys.exit(1)
 
-    if args.decoder == "none":
-        logging.warning("You selected 'none' decoder, but host is using '%s'. Attempting raw decode fallback...", host_encoder)
-    else:
-        if args.decoder.replace(".", "") != host_encoder.replace(".", ""):
-            logging.error("Encoder/decoder mismatch: Host uses '%s', client selected '%s'.", host_encoder, args.decoder)
-            temp_app = QApplication.instance() or QApplication(sys.argv)
-            QMessageBox.critical(None, "Decoder Mismatch",
-                f"ERROR: The host is currently using '{host_encoder}' encoder, but your decoder is '{args.decoder}'.\n"
-                f"Please switch to '{host_encoder}' instead.")
-            sys.exit(1)
+    host_state.clipboard_listener_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    host_state.clipboard_listener_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        host_state.clipboard_listener_sock.bind(("", UDP_CLIPBOARD_PORT))
+    except Exception as e:
+        logging.error("Failed to bind clipboard port %s: %s", UDP_CLIPBOARD_PORT, e)
+        stop_all()
+        sys.exit(1)
 
-    decoder_opts = {}
-    if args.decoder == "h.264":
-        if has_nvidia():
-            decoder_opts["hwaccel"] = "h264_nvdec"
-        elif has_vaapi():
-            decoder_opts["hwaccel"] = "h264_vaapi"
-    elif args.decoder == "h.265":
-        if has_nvidia():
-            decoder_opts["hwaccel"] = "hevc_nvdec"
-        elif has_vaapi():
-            decoder_opts["hwaccel"] = "hevc_vaapi"
-    elif args.decoder == "av1":
-        if has_nvidia():
-            decoder_opts["hwaccel"] = "av1_nvdec"
-        elif has_vaapi():
-            decoder_opts["hwaccel"] = "av1_vaapi"
+    handshake_thread = threading.Thread(target=tcp_handshake_server, args=(host_state.handshake_sock, encoder_str), daemon=True)
+    handshake_thread.start()
 
-    app = QApplication(sys.argv)
-    window = MainWindow(decoder_opts, w, h, args.host_ip, args.password)
+    clipboard_monitor_thread = threading.Thread(target=clipboard_monitor_host, daemon=True)
+    clipboard_monitor_thread.start()
 
-    clipboard_thread = threading.Thread(target=clipboard_listener_client, daemon=True)
-    clipboard_thread.start()
+    clipboard_listener_thread = threading.Thread(target=clipboard_listener_host, args=(host_state.clipboard_listener_sock,), daemon=True)
+    clipboard_listener_thread.start()
 
-    control_thread = threading.Thread(target=control_listener_client, daemon=True)
-    control_thread.start()
+    file_thread = threading.Thread(target=file_upload_listener, daemon=True)
+    file_thread.start()
 
-    audio_proc = None
+    video_cmd = build_video_cmd(args, host_state.current_bitrate)
+    logging.debug("Video command: %s", " ".join(video_cmd))
+    with host_state.video_thread_lock:
+        host_state.video_thread = StreamThread(video_cmd, "Video")
+        host_state.video_thread.start()
+
     if args.audio == "enable":
-        audio_cmd = [
-            "ffplay",
-            "-hide_banner",
-            "-loglevel", "error",
-            "-fflags", "nobuffer",
-            "-flags", "low_delay",
-            "-autoexit",
-            "-nodisp",
-            f"udp://@{MULTICAST_IP}:6001?fifo_size=5000000&overrun_nonfatal=1"
-        ]
-        logging.info("Starting audio playback with ffplay...")
-        audio_proc = subprocess.Popen(audio_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        audio_cmd = build_audio_cmd()
+        logging.debug("Audio command: %s", " ".join(audio_cmd))
+        host_state.audio_thread = StreamThread(audio_cmd, "Audio")
+        host_state.audio_thread.start()
 
-    window.show()
-    ret = app.exec_()
+    if args.adaptive:
+        abr_thread = threading.Thread(target=adaptive_bitrate_manager, args=(args,), daemon=True)
+        abr_thread.start()
 
-    if audio_proc:
-        audio_proc.terminate()
+    ctrl_thread = threading.Thread(target=control_listener, args=(host_state.control_sock,), daemon=True)
+    ctrl_thread.start()
 
-    sys.exit(ret)
+    logging.info("Host running. Press Ctrl+C to exit.")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logging.info("Shutting down host...")
+        stop_all()
+        sys.exit(0)
 
 if __name__ == "__main__":
     main()
