@@ -2,27 +2,14 @@
 import sys
 import subprocess
 import os
-import json
 import signal
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QFormLayout, QComboBox, QCheckBox, QPushButton, QGroupBox, QLineEdit
 )
-from PyQt5.QtGui import QIcon, QPixmap, QPalette, QColor
+from PyQt5.QtGui import QPalette, QColor
 from PyQt5.QtCore import Qt
-import subprocess
 from shutil import which
-
-def load_history():
-    try:
-        with open("history.json", "r") as f:
-            return json.load(f)
-    except:
-        return {}
-
-def save_history(data):
-    with open("history.json", "w") as f:
-        json.dump(data, f, indent=2)
 
 def has_nvidia():
     return which("nvidia-smi") is not None
@@ -57,11 +44,8 @@ def check_decoder_support(codec):
     return False
 
 class HostTab(QWidget):
-    def __init__(self, history, save_callback, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.history = history
-        self.save_callback = save_callback
-        self.host_process = None
 
         main_layout = QVBoxLayout()
         form_group = QGroupBox("Host Configuration")
@@ -69,7 +53,6 @@ class HostTab(QWidget):
 
         self.encoderCombo = QComboBox()
         self.encoderCombo.setEditable(True)
-
         self.encoderCombo.addItem("none")
         if check_encoder_support("h.264"):
             self.encoderCombo.addItem("h.264")
@@ -77,59 +60,40 @@ class HostTab(QWidget):
             self.encoderCombo.addItem("h.265")
         if check_encoder_support("av1"):
             self.encoderCombo.addItem("av1")
-        if "encoder" in self.history and self.history["encoder"]:
-            self.encoderCombo.setCurrentText(self.history["encoder"][0])
 
         self.resolutionCombo = QComboBox()
         self.resolutionCombo.setEditable(True)
-        if "resolution" in self.history:
-            for item in self.history["resolution"]:
-                self.resolutionCombo.addItem(item)
         self.resolutionCombo.addItem("1920x1080")
         self.resolutionCombo.addItem("1600x900")
         self.resolutionCombo.addItem("1280x720")
 
         self.framerateCombo = QComboBox()
         self.framerateCombo.setEditable(True)
-        if "framerate" in self.history:
-            for item in self.history["framerate"]:
-                self.framerateCombo.addItem(item)
         self.framerateCombo.addItem("30")
         self.framerateCombo.addItem("60")
 
         self.bitrateCombo = QComboBox()
         self.bitrateCombo.setEditable(True)
-        if "bitrate" in self.history:
-            for item in self.history["bitrate"]:
-                self.bitrateCombo.addItem(item)
         self.bitrateCombo.addItem("8M")
         self.bitrateCombo.addItem("5M")
         self.bitrateCombo.addItem("2M")
 
         self.audioCombo = QComboBox()
         self.audioCombo.setEditable(True)
-        if "audio" in self.history:
-            for item in self.history["audio"]:
-                self.audioCombo.addItem(item)
         self.audioCombo.addItem("enable")
         self.audioCombo.addItem("disable")
 
         self.adaptiveCheck = QCheckBox("Enable Adaptive Bitrate")
 
-        self.passwordCombo = QComboBox()
-        self.passwordCombo.setEditable(True)
-        if "host_password" in self.history:
-            for item in self.history["host_password"]:
-                self.passwordCombo.addItem(item)
-        self.passwordCombo.lineEdit().setEchoMode(QLineEdit.Password)
+        self.passwordField = QLineEdit()
+        self.passwordField.setEchoMode(QLineEdit.Password)
 
         self.displayCombo = QComboBox()
         self.displayCombo.setEditable(True)
-        if "display" in self.history:
-            for item in self.history["display"]:
-                self.displayCombo.addItem(item)
         self.displayCombo.addItem(":0")
         self.displayCombo.addItem(":1")
+
+        self.debugCheck = QCheckBox("Enable Debug")
 
         form_layout.addRow("Encoder:", self.encoderCombo)
         form_layout.addRow("Resolution:", self.resolutionCombo)
@@ -137,8 +101,9 @@ class HostTab(QWidget):
         form_layout.addRow("Bitrate:", self.bitrateCombo)
         form_layout.addRow("Audio:", self.audioCombo)
         form_layout.addRow("Adaptive:", self.adaptiveCheck)
-        form_layout.addRow("Password:", self.passwordCombo)
+        form_layout.addRow("Password:", self.passwordField)
         form_layout.addRow("X Display:", self.displayCombo)
+        form_layout.addRow("Debug:", self.debugCheck)
         form_group.setLayout(form_layout)
 
         button_layout = QHBoxLayout()
@@ -154,6 +119,7 @@ class HostTab(QWidget):
 
         self.startButton.clicked.connect(self.start_host)
         self.stopButton.clicked.connect(self.stop_host)
+        self.host_process = None
 
     def start_host(self):
         encoder = self.encoderCombo.currentText()
@@ -162,17 +128,9 @@ class HostTab(QWidget):
         bitrate = self.bitrateCombo.currentText()
         audio = self.audioCombo.currentText()
         adaptive = self.adaptiveCheck.isChecked()
-        password = self.passwordCombo.currentText()
+        password = self.passwordField.text()
         display = self.displayCombo.currentText()
-
-        self.update_history("encoder", encoder)
-        self.update_history("resolution", resolution)
-        self.update_history("framerate", framerate)
-        self.update_history("bitrate", bitrate)
-        self.update_history("audio", audio)
-        self.update_history("host_password", password)
-        self.update_history("display", display)
-        self.save_callback()
+        debug = self.debugCheck.isChecked()
 
         cmd = [
             sys.executable, "host.py",
@@ -187,9 +145,10 @@ class HostTab(QWidget):
             cmd.append("--adaptive")
         if password:
             cmd.extend(["--password", password])
+        if debug:
+            cmd.append("--debug")
 
         self.stop_host()
-
         self.host_process = subprocess.Popen(cmd, preexec_fn=os.setsid)
 
     def stop_host(self):
@@ -203,19 +162,9 @@ class HostTab(QWidget):
                     self.host_process.kill()
             self.host_process = None
 
-    def update_history(self, key, value):
-        if key not in self.history:
-            self.history[key] = []
-        if value and value not in self.history[key]:
-            self.history[key].insert(0, value)
-            if len(self.history[key]) > 10:
-                self.history[key].pop()
-
 class ClientTab(QWidget):
-    def __init__(self, history, save_callback, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.history = history
-        self.save_callback = save_callback
 
         main_layout = QVBoxLayout()
         form_group = QGroupBox("Client Configuration")
@@ -230,44 +179,32 @@ class ClientTab(QWidget):
             self.decoderCombo.addItem("h.265")
         if check_decoder_support("av1"):
             self.decoderCombo.addItem("av1")
-        if "decoder" in self.history and self.history["decoder"]:
-            self.decoderCombo.setCurrentText(self.history["decoder"][0])
 
         self.hostIPEdit = QComboBox()
         self.hostIPEdit.setEditable(True)
-        if "host_ip" in self.history:
-            for item in self.history["host_ip"]:
-                self.hostIPEdit.addItem(item)
 
         self.resolutionCombo = QComboBox()
         self.resolutionCombo.setEditable(True)
-        if "remote_resolution" in self.history:
-            for item in self.history["remote_resolution"]:
-                self.resolutionCombo.addItem(item)
         self.resolutionCombo.addItem("1920x1080")
         self.resolutionCombo.addItem("1600x900")
         self.resolutionCombo.addItem("1280x720")
 
         self.audioCombo = QComboBox()
         self.audioCombo.setEditable(True)
-        if "client_audio" in self.history:
-            for item in self.history["client_audio"]:
-                self.audioCombo.addItem(item)
         self.audioCombo.addItem("enable")
         self.audioCombo.addItem("disable")
 
-        self.passwordCombo = QComboBox()
-        self.passwordCombo.setEditable(True)
-        if "client_password" in self.history:
-            for item in self.history["client_password"]:
-                self.passwordCombo.addItem(item)
-        self.passwordCombo.lineEdit().setEchoMode(QLineEdit.Password)
+        self.passwordField = QLineEdit()
+        self.passwordField.setEchoMode(QLineEdit.Password)
+
+        self.debugCheck = QCheckBox("Enable Debug")
 
         form_layout.addRow("Decoder:", self.decoderCombo)
         form_layout.addRow("Host IP:", self.hostIPEdit)
         form_layout.addRow("Remote Resolution:", self.resolutionCombo)
         form_layout.addRow("Audio:", self.audioCombo)
-        form_layout.addRow("Password:", self.passwordCombo)
+        form_layout.addRow("Password:", self.passwordField)
+        form_layout.addRow("Debug:", self.debugCheck)
         form_group.setLayout(form_layout)
 
         button_layout = QHBoxLayout()
@@ -286,14 +223,8 @@ class ClientTab(QWidget):
         host_ip = self.hostIPEdit.currentText()
         resolution = self.resolutionCombo.currentText()
         audio = self.audioCombo.currentText()
-        password = self.passwordCombo.currentText()
-
-        self.update_history("decoder", decoder)
-        self.update_history("host_ip", host_ip)
-        self.update_history("remote_resolution", resolution)
-        self.update_history("client_audio", audio)
-        self.update_history("client_password", password)
-        self.save_callback()
+        password = self.passwordField.text()
+        debug = self.debugCheck.isChecked()
 
         cmd = [
             sys.executable, "client.py",
@@ -304,27 +235,19 @@ class ClientTab(QWidget):
         ]
         if password:
             cmd.extend(["--password", password])
+        if debug:
+            cmd.append("--debug")
 
         subprocess.Popen(cmd)
-
-    def update_history(self, key, value):
-        if key not in self.history:
-            self.history[key] = []
-        if value and value not in self.history[key]:
-            self.history[key].insert(0, value)
-            if len(self.history[key]) > 10:
-                self.history[key].pop()
 
 class StartWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Remote Desktop Viewer (LinuxPlay by Techlm77)")
 
-        self.history_data = load_history()
-
         self.tabs = QTabWidget()
-        self.hostTab = HostTab(self.history_data, self.save_history)
-        self.clientTab = ClientTab(self.history_data, self.save_history)
+        self.hostTab = HostTab()
+        self.clientTab = ClientTab()
         self.tabs.addTab(self.hostTab, "Host")
         self.tabs.addTab(self.clientTab, "Client")
 
@@ -336,9 +259,6 @@ class StartWindow(QWidget):
         if self.hostTab.host_process:
             self.hostTab.stop_host()
         event.accept()
-
-    def save_history(self):
-        save_history(self.history_data)
 
 def main():
     application = QApplication(sys.argv)
