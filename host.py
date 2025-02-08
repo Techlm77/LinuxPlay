@@ -15,6 +15,7 @@ UDP_AUDIO_PORT = 6001
 UDP_CONTROL_PORT = 7000
 UDP_CLIPBOARD_PORT = 7002
 TCP_HANDSHAKE_PORT = 7001
+FILE_UPLOAD_PORT = 7003
 MULTICAST_IP = "239.0.0.1"
 DEFAULT_RES = "1920x1080"
 DEFAULT_FPS = "30"
@@ -413,6 +414,53 @@ def clipboard_listener_host(sock):
             logging.error("Host clipboard listener error: %s", e)
             break
 
+def recvall(sock, n):
+    data = b""
+    while len(data) < n:
+        packet = sock.recv(n - len(data))
+        if not packet:
+            return None
+        data += packet
+    return data
+
+def file_upload_listener():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("", FILE_UPLOAD_PORT))
+    s.listen(5)
+    logging.info("File upload listener active on TCP port %s", FILE_UPLOAD_PORT)
+    while not host_state.should_terminate:
+        try:
+            conn, addr = s.accept()
+            logging.info("File upload connection from %s", addr)
+            header = recvall(conn, 4)
+            if not header:
+                conn.close()
+                continue
+            filename_length = int.from_bytes(header, byteorder='big')
+            filename_bytes = recvall(conn, filename_length)
+            filename = filename_bytes.decode('utf-8')
+            filesize_bytes = recvall(conn, 8)
+            file_size = int.from_bytes(filesize_bytes, byteorder='big')
+            dest_dir = os.path.expanduser("~/LinuxPlayDrop")
+            if not os.path.exists(dest_dir):
+                os.makedirs(dest_dir)
+            dest_path = os.path.join(dest_dir, filename)
+            with open(dest_path, 'wb') as f:
+                remaining = file_size
+                while remaining > 0:
+                    chunk_size = 4096 if remaining >= 4096 else remaining
+                    chunk = conn.recv(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    remaining -= len(chunk)
+            logging.info("Received file %s (%d bytes)", dest_path, file_size)
+            conn.close()
+        except Exception as e:
+            logging.error("File upload error: %s", e)
+    s.close()
+
 def main():
     parser = argparse.ArgumentParser(description="Remote Desktop Host (Production Ready)")
     parser.add_argument("--encoder", choices=["none", "h.264", "h.265", "av1"], default="none")
@@ -480,6 +528,9 @@ def main():
 
     clipboard_listener_thread = threading.Thread(target=clipboard_listener_host, args=(host_state.clipboard_listener_sock,), daemon=True)
     clipboard_listener_thread.start()
+
+    file_thread = threading.Thread(target=file_upload_listener, daemon=True)
+    file_thread.start()
 
     video_cmd = build_video_cmd(args, host_state.current_bitrate)
     logging.debug("Video command: %s", " ".join(video_cmd))
