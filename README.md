@@ -109,6 +109,10 @@ Updates that has been removed:
 
 - **History** - Stores information into history.json and automatically load it into start.py without needing to type the configurations over and over again.
 
+Issues:
+
+- WiFi - At the moment, WiFi does not work since it's hardcoded to only work with LAN.
+
 ### Security Warning
 
 LinuxPlay can be used over the internet, but **it currently does not have encryption**. It is recommended to use a **VPN, SSH tunnel, or manually restrict access via firewall rules** if you plan to use it remotely. Future versions will include built-in encryption to enhance security.
