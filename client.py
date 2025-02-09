@@ -53,14 +53,14 @@ def tcp_handshake_client(host_ip, password):
 
     if resp.startswith("OK:"):
         logging.info("TCP handshake successful.")
-        parts = resp.split(":")
+        parts = resp.split(":", 2)
         if len(parts) >= 3:
             host_encoder = parts[1].strip()
-            resolution = parts[2].strip()
+            monitor_info = parts[2].strip()
         else:
             host_encoder = parts[1].strip()
-            resolution = DEFAULT_RESOLUTION
-        return (True, (host_encoder, resolution))
+            monitor_info = DEFAULT_RESOLUTION
+        return (True, (host_encoder, monitor_info))
     else:
         logging.error("TCP handshake failed: Incorrect password or unknown error.")
         return (False, None)
@@ -99,7 +99,7 @@ class DecoderThread(QThread):
         self._running = False
 
 class VideoWidget(QLabel):
-    def __init__(self, control_callback, rwidth, rheight, parent=None):
+    def __init__(self, control_callback, rwidth, rheight, offset_x, offset_y, parent=None):
         super().__init__(parent)
         self.setScaledContents(True)
         self.setMouseTracking(True)
@@ -110,6 +110,8 @@ class VideoWidget(QLabel):
         self.control_callback = control_callback
         self.remote_width = rwidth
         self.remote_height = rheight
+        self.offset_x = offset_x
+        self.offset_y = offset_y
         self.last_mouse_move = 0
 
         self.clipboard = QApplication.clipboard()
@@ -133,8 +135,8 @@ class VideoWidget(QLabel):
             return
         self.last_mouse_move = now
         if self.width() and self.height():
-            rx = int(e.x() / self.width() * self.remote_width)
-            ry = int(e.y() / self.height() * self.remote_height)
+            rx = self.offset_x + int(e.x() / self.width() * self.remote_width)
+            ry = self.offset_y + int(e.y() / self.height() * self.remote_height)
             self.control_callback(f"MOUSE_MOVE {rx} {ry}")
         e.accept()
 
@@ -142,8 +144,8 @@ class VideoWidget(QLabel):
         button_map = {Qt.LeftButton: "1", Qt.MiddleButton: "2", Qt.RightButton: "3"}
         b = button_map.get(e.button(), "")
         if b and self.width() and self.height():
-            rx = int(e.x() / self.width() * self.remote_width)
-            ry = int(e.y() / self.height() * self.remote_height)
+            rx = self.offset_x + int(e.x() / self.width() * self.remote_width)
+            ry = self.offset_y + int(e.y() / self.height() * self.remote_height)
             self.control_callback(f"MOUSE_PRESS {b} {rx} {ry}")
         e.accept()
 
@@ -214,17 +216,19 @@ class VideoWidget(QLabel):
         return None
 
 class MainWindow(QMainWindow):
-    def __init__(self, decoder_opts, rwidth, rheight, host_ip, password, parent=None):
+    def __init__(self, decoder_opts, rwidth, rheight, host_ip, password, udp_port, offset_x, offset_y, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Remote Desktop Viewer (LinuxPlay by Techlm77)")
         self.remote_width = rwidth
         self.remote_height = rheight
+        self.offset_x = offset_x
+        self.offset_y = offset_y
         self.control_addr = (host_ip, CONTROL_PORT)
         self.control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.control_sock.setblocking(False)
         self.password = password
 
-        self.video_widget = VideoWidget(self.send_control, rwidth, rheight)
+        self.video_widget = VideoWidget(self.send_control, rwidth, rheight, offset_x, offset_y)
         self.setCentralWidget(self.video_widget)
         self.video_widget.setFocus()
         
@@ -233,7 +237,7 @@ class MainWindow(QMainWindow):
         logging.debug("Client selected decoder options: %s", decoder_opts)
         logging.debug("Client connecting to host at %s, resolution %sx%s", host_ip, rwidth, rheight)
 
-        video_url = f"udp://0.0.0.0:{DEFAULT_UDP_PORT}?fifo_size=5000000&overrun_nonfatal=1"
+        video_url = f"udp://0.0.0.0:{udp_port}?fifo_size=5000000&overrun_nonfatal=1"
         self.decoder_thread = DecoderThread(video_url, decoder_opts)
         self.decoder_thread.frame_ready.connect(self.update_image)
         self.decoder_thread.start()
@@ -338,6 +342,7 @@ def main():
     parser.add_argument("--host_ip", required=True)
     parser.add_argument("--audio", choices=["enable", "disable"], default="disable")
     parser.add_argument("--password", default="")
+    parser.add_argument("--monitor", default="0", help="Monitor index to view or 'all' for all monitors")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode with more logging.")
     args = parser.parse_args()
 
@@ -357,12 +362,43 @@ def main():
     handshake_ok, host_info = tcp_handshake_client(args.host_ip, args.password)
     if not handshake_ok:
         sys.exit("TCP handshake failed. Exiting.")
-    host_encoder, resolution = host_info
+    host_encoder, monitor_info_str = host_info
     try:
-        w, h = map(int, resolution.lower().split("x"))
-    except:
-        logging.error("Invalid resolution received from host: %s. Using default %s.", resolution, DEFAULT_RESOLUTION)
+        monitors = []
+        if ";" in monitor_info_str:
+            parts = monitor_info_str.split(";")
+            for part in parts:
+                try:
+                    if '+' in part:
+                        res_part, ox, oy = part.split('+')
+                        w_str, h_str = res_part.split('x')
+                        w = int(w_str)
+                        h = int(h_str)
+                        ox = int(ox)
+                        oy = int(oy)
+                    else:
+                        w, h = map(int, part.split('x'))
+                        ox = 0
+                        oy = 0
+                    monitors.append((w, h, ox, oy))
+                except Exception:
+                    pass
+        else:
+            if '+' in monitor_info_str:
+                res_part, ox, oy = monitor_info_str.split('+')
+                w_str, h_str = res_part.split('x')
+                w = int(w_str)
+                h = int(h_str)
+                ox = int(ox)
+                oy = int(oy)
+                monitors.append((w, h, ox, oy))
+            else:
+                w, h = map(int, monitor_info_str.lower().split("x"))
+                monitors.append((w, h, 0, 0))
+    except Exception:
+        logging.error("Error parsing monitor info from host; using default.")
         w, h = map(int, DEFAULT_RESOLUTION.lower().split("x"))
+        monitors = [(w, h, 0, 0)]
 
     if args.decoder == "none":
         logging.warning("You selected 'none' decoder, but host is using '%s'. Attempting raw decode fallback...", host_encoder)
@@ -393,34 +429,30 @@ def main():
             decoder_opts["hwaccel"] = "av1_vaapi"
 
     app = QApplication(sys.argv)
-    window = MainWindow(decoder_opts, w, h, args.host_ip, args.password)
 
-    clipboard_thread = threading.Thread(target=clipboard_listener_client, daemon=True)
-    clipboard_thread.start()
-
-    control_thread = threading.Thread(target=control_listener_client, daemon=True)
-    control_thread.start()
-
-    audio_proc = None
-    if args.audio == "enable":
-        audio_cmd = [
-            "ffplay",
-            "-hide_banner",
-            "-loglevel", "error",
-            "-fflags", "nobuffer",
-            "-flags", "low_delay",
-            "-autoexit",
-            "-nodisp",
-            f"udp://@{MULTICAST_IP}:6001?fifo_size=5000000&overrun_nonfatal=1"
-        ]
-        logging.info("Starting audio playback with ffplay...")
-        audio_proc = subprocess.Popen(audio_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    window.show()
-    ret = app.exec_()
-
-    if audio_proc:
-        audio_proc.terminate()
+    if args.monitor.lower() == "all":
+        windows = []
+        base_port = DEFAULT_UDP_PORT
+        for i, mon in enumerate(monitors):
+            w, h, ox, oy = mon
+            window = MainWindow(decoder_opts, w, h, args.host_ip, args.password, base_port + i, ox, oy)
+            window.setWindowTitle(f"Remote Desktop Viewer - Monitor {i}")
+            window.show()
+            windows.append(window)
+        ret = app.exec_()
+    else:
+        try:
+            mon_index = int(args.monitor)
+        except Exception:
+            mon_index = 0
+        if mon_index < 0 or mon_index >= len(monitors):
+            logging.error("Invalid monitor index %d, defaulting to 0", mon_index)
+            mon_index = 0
+        w, h, ox, oy = monitors[mon_index]
+        window = MainWindow(decoder_opts, w, h, args.host_ip, args.password, DEFAULT_UDP_PORT + mon_index, ox, oy)
+        window.setWindowTitle(f"Remote Desktop Viewer - Monitor {mon_index}")
+        window.show()
+        ret = app.exec_()
 
     sys.exit(ret)
 
