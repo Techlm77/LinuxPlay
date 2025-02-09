@@ -227,8 +227,8 @@ class MainWindow(QMainWindow):
         logging.debug("Client selected decoder options: %s", decoder_opts)
         logging.debug("Client connecting to host at %s, remote resolution %sx%s", host_ip, rwidth, rheight)
 
-        mcast_url = f"udp://@{MULTICAST_IP}:{DEFAULT_UDP_PORT}?fifo_size=5000000&overrun_nonfatal=1"
-        self.decoder_thread = DecoderThread(mcast_url, decoder_opts)
+        video_url = f"udp://0.0.0.0:{DEFAULT_UDP_PORT}?fifo_size=5000000&overrun_nonfatal=1"
+        self.decoder_thread = DecoderThread(video_url, decoder_opts)
         self.decoder_thread.frame_ready.connect(self.update_image)
         self.decoder_thread.start()
 
