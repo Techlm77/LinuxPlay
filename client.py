@@ -53,8 +53,14 @@ def tcp_handshake_client(host_ip, password):
 
     if resp.startswith("OK:"):
         logging.info("TCP handshake successful.")
-        host_encoder = resp.split(":", 1)[1].strip()
-        return (True, host_encoder)
+        parts = resp.split(":")
+        if len(parts) >= 3:
+            host_encoder = parts[1].strip()
+            resolution = parts[2].strip()
+        else:
+            host_encoder = parts[1].strip()
+            resolution = DEFAULT_RESOLUTION
+        return (True, (host_encoder, resolution))
     else:
         logging.error("TCP handshake failed: Incorrect password or unknown error.")
         return (False, None)
@@ -225,7 +231,7 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         logging.debug("Client selected decoder options: %s", decoder_opts)
-        logging.debug("Client connecting to host at %s, remote resolution %sx%s", host_ip, rwidth, rheight)
+        logging.debug("Client connecting to host at %s, resolution %sx%s", host_ip, rwidth, rheight)
 
         video_url = f"udp://0.0.0.0:{DEFAULT_UDP_PORT}?fifo_size=5000000&overrun_nonfatal=1"
         self.decoder_thread = DecoderThread(video_url, decoder_opts)
@@ -330,7 +336,6 @@ def main():
     parser = argparse.ArgumentParser(description="Remote Desktop Client (Production Ready)")
     parser.add_argument("--decoder", choices=["none", "h.264", "h.265", "av1"], default="none")
     parser.add_argument("--host_ip", required=True)
-    parser.add_argument("--remote_resolution", default=DEFAULT_RESOLUTION)
     parser.add_argument("--audio", choices=["enable", "disable"], default="disable")
     parser.add_argument("--password", default="")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode with more logging.")
@@ -349,15 +354,15 @@ def main():
             datefmt="%H:%M:%S"
         )
 
-    try:
-        w, h = map(int, args.remote_resolution.lower().split("x"))
-    except:
-        logging.error("Invalid remote_resolution format. Use e.g. 1600x900.")
-        sys.exit(1)
-
-    handshake_ok, host_encoder = tcp_handshake_client(args.host_ip, args.password)
+    handshake_ok, host_info = tcp_handshake_client(args.host_ip, args.password)
     if not handshake_ok:
         sys.exit("TCP handshake failed. Exiting.")
+    host_encoder, resolution = host_info
+    try:
+        w, h = map(int, resolution.lower().split("x"))
+    except:
+        logging.error("Invalid resolution received from host: %s. Using default %s.", resolution, DEFAULT_RESOLUTION)
+        w, h = map(int, DEFAULT_RESOLUTION.lower().split("x"))
 
     if args.decoder == "none":
         logging.warning("You selected 'none' decoder, but host is using '%s'. Attempting raw decode fallback...", host_encoder)
