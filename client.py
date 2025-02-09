@@ -72,6 +72,8 @@ class DecoderThread(QThread):
         super().__init__(parent)
         self.input_url = input_url
         self.decoder_opts = decoder_opts
+        self.decoder_opts.setdefault("probesize", "32")
+        self.decoder_opts.setdefault("analyzeduration", "0")
         self._running = True
 
     def run(self):
@@ -237,7 +239,7 @@ class MainWindow(QMainWindow):
         logging.debug("Client selected decoder options: %s", decoder_opts)
         logging.debug("Client connecting to host at %s, resolution %sx%s", host_ip, rwidth, rheight)
 
-        video_url = f"udp://0.0.0.0:{udp_port}?fifo_size=5000000&overrun_nonfatal=1"
+        video_url = f"udp://0.0.0.0:{udp_port}?fifo_size=100000&overrun_nonfatal=1"
         self.decoder_thread = DecoderThread(video_url, decoder_opts)
         self.decoder_thread.frame_ready.connect(self.update_image)
         self.decoder_thread.start()
@@ -430,6 +432,21 @@ def main():
 
     app = QApplication(sys.argv)
 
+    audio_proc = None
+    if args.audio == "enable":
+        audio_cmd = [
+            "ffplay",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-autoexit",
+            "-nodisp",
+            f"udp://@{MULTICAST_IP}:6001?fifo_size=100000&overrun_nonfatal=1"
+        ]
+        logging.info("Starting audio playback with ffplay...")
+        audio_proc = subprocess.Popen(audio_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     if args.monitor.lower() == "all":
         windows = []
         base_port = DEFAULT_UDP_PORT
@@ -454,6 +471,8 @@ def main():
         window.show()
         ret = app.exec_()
 
+    if audio_proc:
+        audio_proc.terminate()
     sys.exit(ret)
 
 if __name__ == "__main__":
