@@ -183,12 +183,6 @@ class ClientTab(QWidget):
         self.hostIPEdit = QComboBox()
         self.hostIPEdit.setEditable(True)
 
-        self.resolutionCombo = QComboBox()
-        self.resolutionCombo.setEditable(True)
-        self.resolutionCombo.addItem("1920x1080")
-        self.resolutionCombo.addItem("1600x900")
-        self.resolutionCombo.addItem("1280x720")
-
         self.audioCombo = QComboBox()
         self.audioCombo.setEditable(True)
         self.audioCombo.addItem("enable")
@@ -201,7 +195,6 @@ class ClientTab(QWidget):
 
         form_layout.addRow("Decoder:", self.decoderCombo)
         form_layout.addRow("Host IP:", self.hostIPEdit)
-        form_layout.addRow("Remote Resolution:", self.resolutionCombo)
         form_layout.addRow("Audio:", self.audioCombo)
         form_layout.addRow("Password:", self.passwordField)
         form_layout.addRow("Debug:", self.debugCheck)
@@ -221,7 +214,6 @@ class ClientTab(QWidget):
     def start_client(self):
         decoder = self.decoderCombo.currentText()
         host_ip = self.hostIPEdit.currentText()
-        resolution = self.resolutionCombo.currentText()
         audio = self.audioCombo.currentText()
         password = self.passwordField.text()
         debug = self.debugCheck.isChecked()
@@ -230,7 +222,6 @@ class ClientTab(QWidget):
             sys.executable, "client.py",
             "--decoder", decoder,
             "--host_ip", host_ip,
-            "--remote_resolution", resolution,
             "--audio", audio
         ]
         if password:
