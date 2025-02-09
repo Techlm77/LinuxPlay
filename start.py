@@ -61,12 +61,6 @@ class HostTab(QWidget):
         if check_encoder_support("av1"):
             self.encoderCombo.addItem("av1")
 
-        self.resolutionCombo = QComboBox()
-        self.resolutionCombo.setEditable(True)
-        self.resolutionCombo.addItem("1920x1080")
-        self.resolutionCombo.addItem("1600x900")
-        self.resolutionCombo.addItem("1280x720")
-
         self.framerateCombo = QComboBox()
         self.framerateCombo.setEditable(True)
         self.framerateCombo.addItem("30")
@@ -96,7 +90,6 @@ class HostTab(QWidget):
         self.debugCheck = QCheckBox("Enable Debug")
 
         form_layout.addRow("Encoder:", self.encoderCombo)
-        form_layout.addRow("Resolution:", self.resolutionCombo)
         form_layout.addRow("Framerate:", self.framerateCombo)
         form_layout.addRow("Bitrate:", self.bitrateCombo)
         form_layout.addRow("Audio:", self.audioCombo)
@@ -123,7 +116,6 @@ class HostTab(QWidget):
 
     def start_host(self):
         encoder = self.encoderCombo.currentText()
-        resolution = self.resolutionCombo.currentText()
         framerate = self.framerateCombo.currentText()
         bitrate = self.bitrateCombo.currentText()
         audio = self.audioCombo.currentText()
@@ -135,7 +127,6 @@ class HostTab(QWidget):
         cmd = [
             sys.executable, "host.py",
             "--encoder", encoder,
-            "--resolution", resolution,
             "--framerate", framerate,
             "--bitrate", bitrate,
             "--audio", audio,
@@ -191,12 +182,16 @@ class ClientTab(QWidget):
         self.passwordField = QLineEdit()
         self.passwordField.setEchoMode(QLineEdit.Password)
 
+        self.monitorField = QLineEdit()
+        self.monitorField.setText("0")
+
         self.debugCheck = QCheckBox("Enable Debug")
 
         form_layout.addRow("Decoder:", self.decoderCombo)
         form_layout.addRow("Host IP:", self.hostIPEdit)
         form_layout.addRow("Audio:", self.audioCombo)
         form_layout.addRow("Password:", self.passwordField)
+        form_layout.addRow("Monitor (index or 'all'):", self.monitorField)
         form_layout.addRow("Debug:", self.debugCheck)
         form_group.setLayout(form_layout)
 
@@ -216,13 +211,15 @@ class ClientTab(QWidget):
         host_ip = self.hostIPEdit.currentText()
         audio = self.audioCombo.currentText()
         password = self.passwordField.text()
+        monitor = self.monitorField.text()
         debug = self.debugCheck.isChecked()
 
         cmd = [
             sys.executable, "client.py",
             "--decoder", decoder,
             "--host_ip", host_ip,
-            "--audio", audio
+            "--audio", audio,
+            "--monitor", monitor
         ]
         if password:
             cmd.extend(["--password", password])
