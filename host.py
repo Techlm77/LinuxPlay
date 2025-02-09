@@ -36,6 +36,7 @@ class HostState:
         self.control_sock = None
         self.clipboard_listener_sock = None
         self.client_ip = None
+        self.resolution = DEFAULT_RES
 
 host_state = HostState()
 
@@ -304,7 +305,7 @@ def tcp_handshake_server(sock, encoder_str):
             logging.info("Received handshake: '%s'", data)
             expected = f"PASSWORD:{host_state.host_password}" if host_state.host_password else "PASSWORD:"
             if data == expected:
-                resp = f"OK:{encoder_str}"
+                resp = f"OK:{encoder_str}:{host_state.resolution}"
                 conn.sendall(resp.encode("utf-8"))
                 logging.info("Handshake from %s successful. Sent %s", addr, resp)
             else:
@@ -491,6 +492,7 @@ def main():
 
     host_state.host_password = args.password if args.password else None
     host_state.current_bitrate = args.bitrate
+    host_state.resolution = args.resolution
 
     encoder_str = args.encoder
 
