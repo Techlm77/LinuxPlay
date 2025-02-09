@@ -1,23 +1,23 @@
 # LinuxPlay – A Fast, Fully Open-Source Remote Desktop for Linux
 
-LinuxPlay is a lightweight, low-latency, fully open-source remote desktop solution designed specifically for Linux. It provides seamless video streaming and full keyboard/mouse control with ultra-low latency, making it a superior alternative to VNC and other traditional remote desktop solutions. LinuxPlay is 100% local and private – no accounts, no cloud dependency, just pure performance.
+LinuxPlay is a lightweight, low-latency, fully open-source remote desktop solution designed specifically for Linux. It provides seamless video streaming and full keyboard/mouse control with low latency, making it a superior alternative to VNC and other traditional remote desktop solutions. LinuxPlay is 100% local and private – no accounts, no cloud dependency, just pure performance.
 
 ## Features
 
-- **Ultra-low latency** using UDP multicast for real-time streaming
+- **Low-latency** using UDP multicast streaming
 - **Full keyboard and mouse support**, including function keys and modifiers
+- **Multi-monitor support** – Choose individual displays or view all at once
 - **Adaptive bitrate streaming** to optimize quality based on network conditions
-- **Completely local and private** – no third-party servers, no cloud accounts
-- **Hardware-accelerated encoding and decoding** for maximum performance
-- **Fully open-source** and customizable to fit your needs
+- **Hardware-accelerated encoding and decoding** for superior performance
+- **Drag-and-drop file transfer** for seamless file sharing
 - **Clipboard sharing** between the client and host
 
 ## Installation
 
-LinuxPlay requires Python 3, FFmpeg, xdotool, and PyQt5. Install them using:
+LinuxPlay requires Python 3, FFmpeg, xdotool, xclip, and PyQt5. Install them using:
 
 ```bash
-sudo apt install python3 ffmpeg xdotool python3-pyqt5 python3-av
+sudo apt install python3 ffmpeg xdotool xclip python3-pyqt5 python3-av
 ```
 
 ## Usage
@@ -31,15 +31,15 @@ python3 host.py --encoder vaapi --resolution 1600x900 --framerate 60 --audio ena
 ```
 
 #### Available Options:
-| Option             | Description                                            | Default     |
-|--------------------|--------------------------------------------------------|-------------|
-| `--encoder`       | Video encoder: `nvenc`, `vaapi`, or `none` (CPU)        | `none`      |
-| `--resolution`    | Capture resolution (e.g., `1920x1080`)                  | `1920x1080` |
-| `--framerate`     | Capture framerate (e.g., `30`, `60`)                    | `30`        |
-| `--bitrate`       | Initial video bitrate (e.g., `8M`)                      | `8M`        |
-| `--audio`         | Enable or disable audio streaming (`enable`, `disable`) | `disable`   |
-| `--adaptive`      | Enable adaptive bitrate switching                       | Off         |
-| `--password`      | Set an optional password for control messages           | None        |
+| Option          | Description                                             | Default     |
+|-----------------|---------------------------------------------------------|-------------|
+| `--encoder`    | Video encoder: `nvenc`, `vaapi`, or `none` (CPU)         | `none`      |
+| `--resolution` | Capture resolution (e.g., `1920x1080`)                   | `1920x1080` |
+| `--framerate`  | Capture framerate (e.g., `30`, `60`)                     | `30`        |
+| `--bitrate`    | Initial video bitrate (e.g., `8M`)                       | `8M`        |
+| `--audio`      | Enable or disable audio streaming (`enable`, `disable`)  | `disable`   |
+| `--adaptive`   | Enable adaptive bitrate switching                        | Off         |
+| `--password`   | Set an optional password for control messages            | None        |
 
 ---
 
@@ -52,66 +52,28 @@ python3 client.py --decoder nvdec --host_ip 192.168.1.123 --remote_resolution 16
 ```
 
 #### Available Options:
-| Option                | Description                                            | Default     |
-|-----------------------|--------------------------------------------------------|-------------|
-| `--decoder`           | Video decoder: `nvdec`, `vaapi`, or `none` (CPU)       | `none`      |
-| `--host_ip`           | The IP address of the host machine                     | Required    |
-| `--remote_resolution` | Remote screen resolution (e.g., `1600x900`)            | `1920x1080` |
-| `--audio`             | Enable or disable audio playback (`enable`, `disable`) | `disable`   |
-| `--password`          | Optional password for control events and handshake     | None        |
-
----
-
-## Why Choose LinuxPlay?
-
-LinuxPlay is designed specifically for Linux, unlike many other remote desktop solutions that have limited or outdated Linux support. Here’s how LinuxPlay compares:
-
-| Feature             | LinuxPlay | VNC | X2Go | NoMachine |
-|--------------------|-----------|-----|------|-----------|
-| **Latency**        | Ultra-low | High | Medium | Medium |
-| **Video Streaming** | Hardware-accelerated | Software-based | Software-based | Limited hardware acceleration |
-| **Audio Support**  | Yes | No | Yes | Yes |
-| **Clipboard Sharing** | Yes | Yes | Yes | Yes |
-| **Adaptive Bitrate** | Yes | No | No | No |
-| **Encryption** | Planned (Future) | Yes | Yes | Yes |
-| **Open-Source** | **Yes** | Yes | Yes | No |
-| **Cloud-Dependency** | None | None | None | Required for full features |
-
----
+| Option                | Description                                             | Default     |
+|-----------------------|---------------------------------------------------------|-------------|
+| `--decoder`           | Video decoder: `nvdec`, `vaapi`, or `none` (CPU)        | `none`      |
+| `--host_ip`           | The IP address of the host machine                      | Required    |
+| `--remote_resolution` | Remote screen resolution (e.g., `1600x900`)             | `1920x1080` |
+| `--audio`             | Enable or disable audio playback (`enable`, `disable`)  | `disable`   |
+| `--password`          | Optional password for control events and handshake      | None        |
 
 ## Contribute
 
-LinuxPlay is **fully open-source** and welcomes contributions. Whether you want to improve performance, add features, or report bugs, you are welcome to participate.
-
----
+LinuxPlay is fully open-source and welcomes contributions. Whether you want to improve performance, add features, or report bugs, your input is appreciated.
 
 ## License
 
 LinuxPlay is licensed under the MIT License.
 
----
-
 ## Future Plans
 
-Development is ongoing, and here are some planned features for future updates:
-
 - **Wayland Support** – Extend compatibility to Wayland-based environments alongside X11.
-- **Full Encryption** – Implement TLS encryption for control messages and video streaming to enhance security.
-- **Internet-Ready Security** – Enable secure connections over the internet with end-to-end encryption.
-
-Updates that has been added:
-
-- **Multi-Monitor Support** – Able to choose or use all monitors on multiple gui applications on the client side.
-- **Drag-and-Drop File Transfer** – Allow users to drag and drop files into the client application for seamless file uploads to the host.
-- **Clipboard Sharing** – Copy and paste text between client and host.
-- **H.265 and AV1 Support** – Improve compression and reduce bandwidth usage for better performance.
-
-Updates that has been removed:
-
-- **History** - Stores information into history.json and automatically load it into start.py without needing to type the configurations over and over again.
+- **Full Encryption** – Implement TLS encryption for control messages and video streaming.
+- **Internet-Ready Security** – Enable secure remote connections with end-to-end encryption.
 
 ### Security Warning
 
-LinuxPlay can be used over the internet, but **it currently does not have encryption**. It is recommended to use a **VPN, SSH tunnel, or manually restrict access via firewall rules** if you plan to use it remotely. Future versions will include built-in encryption to enhance security.
-
----
+LinuxPlay can be used over the internet, but it currently does **not** include built-in encryption. It is recommended to use a **VPN, SSH tunnel, or firewall rules** to secure your connection if accessing remotely. Future versions will include built-in encryption for enhanced security.
