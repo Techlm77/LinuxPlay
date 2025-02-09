@@ -173,6 +173,9 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
         "-f", "x11grab",
         "-framerate", args.framerate,
         "-video_size", video_size,
+        "-fflags", "nobuffer",
+        "-flags", "low_delay",
+        "-rtbufsize", "100M",
         "-i", input_arg
     ]
 
@@ -277,7 +280,7 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
     dest_ip = host_state.client_ip
     out = [
         "-f", "mpegts",
-        f"udp://{dest_ip}:{video_port}?pkt_size=1316&buffer_size=65536"
+        f"udp://{dest_ip}:{video_port}?pkt_size=1316&buffer_size=65536&flush_packets=0"
     ]
     return cmd + encode + out
 
@@ -294,7 +297,7 @@ def build_audio_cmd():
         "-c:a", "libopus",
         "-b:a", "128k",
         "-f", "mpegts",
-        f"udp://{MULTICAST_IP}:{UDP_AUDIO_PORT}?pkt_size=1316&buffer_size=65536"
+        f"udp://{MULTICAST_IP}:{UDP_AUDIO_PORT}?pkt_size=1316&buffer_size=65536&flush_packets=0"
     ]
 
 def adaptive_bitrate_manager(args):
