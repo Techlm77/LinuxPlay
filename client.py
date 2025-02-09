@@ -297,6 +297,8 @@ def clipboard_listener_client():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.bind(("", UDP_CLIPBOARD_PORT))
+        mreq = socket.inet_aton(MULTICAST_IP) + socket.inet_aton("0.0.0.0")
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
     except Exception as e:
         logging.error("Clipboard listener bind failed: %s", e)
         return
@@ -431,6 +433,7 @@ def main():
             decoder_opts["hwaccel"] = "av1_vaapi"
 
     app = QApplication(sys.argv)
+    threading.Thread(target=clipboard_listener_client, daemon=True).start()
 
     audio_proc = None
     if args.audio == "enable":
