@@ -173,114 +173,154 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
         "-f", "x11grab",
         "-framerate", args.framerate,
         "-video_size", video_size,
-        "-fflags", "nobuffer",
-        "-flags", "low_delay",
-        "-rtbufsize", "100M",
         "-i", input_arg
     ]
+    preset = args.preset if args.preset else (
+        "llhq" if (args.encoder in ["h.264", "h.265", "av1"] and has_nvidia()) else "ultrafast")
+    gop = args.gop
+    qp = args.qp
+    tune = args.tune
+    pix_fmt = args.pix_fmt
 
     if args.encoder == "h.264":
         if has_nvidia():
             encode = [
                 "-c:v", "h264_nvenc",
-                "-preset", "llhq",
-                "-g", "30",
+                "-preset", preset,
+                "-g", gop,
                 "-bf", "0",
                 "-b:v", bitrate,
-                "-pix_fmt", "yuv420p"
+                "-pix_fmt", pix_fmt
             ]
+            if qp:
+                encode.extend(["-qp", qp])
         elif has_vaapi():
             encode = [
                 "-vf", "format=nv12,hwupload",
                 "-vaapi_device", "/dev/dri/renderD128",
                 "-c:v", "h264_vaapi",
-                "-g", "30",
+                "-g", gop,
                 "-bf", "0",
-                "-qp", "20",
                 "-b:v", bitrate
             ]
+            if qp:
+                encode.extend(["-qp", qp])
+            else:
+                encode.extend(["-qp", "20"])
         else:
             encode = [
                 "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-tune", "zerolatency",
-                "-g", "30",
+                "-preset", preset,
+            ]
+            if tune:
+                encode.extend(["-tune", tune])
+            else:
+                encode.extend(["-tune", "zerolatency"])
+            encode.extend([
+                "-g", gop,
                 "-bf", "0",
                 "-b:v", bitrate,
-                "-pix_fmt", "yuv420p"
-            ]
+                "-pix_fmt", pix_fmt
+            ])
+            if qp:
+                encode.extend(["-qp", qp])
     elif args.encoder == "h.265":
         if has_nvidia():
             encode = [
                 "-c:v", "hevc_nvenc",
-                "-preset", "llhq",
-                "-g", "30",
+                "-preset", preset,
+                "-g", gop,
                 "-bf", "0",
                 "-b:v", bitrate,
-                "-pix_fmt", "yuv420p"
+                "-pix_fmt", pix_fmt
             ]
+            if qp:
+                encode.extend(["-qp", qp])
         elif has_vaapi():
             encode = [
                 "-vf", "format=nv12,hwupload",
                 "-vaapi_device", "/dev/dri/renderD128",
                 "-c:v", "hevc_vaapi",
-                "-g", "30",
+                "-g", gop,
                 "-bf", "0",
-                "-qp", "20",
                 "-b:v", bitrate
             ]
+            if qp:
+                encode.extend(["-qp", qp])
+            else:
+                encode.extend(["-qp", "20"])
         else:
             encode = [
                 "-c:v", "libx265",
-                "-preset", "ultrafast",
-                "-tune", "zerolatency",
-                "-g", "30",
+                "-preset", preset,
+            ]
+            if tune:
+                encode.extend(["-tune", tune])
+            else:
+                encode.extend(["-tune", "zerolatency"])
+            encode.extend([
+                "-g", gop,
                 "-bf", "0",
                 "-b:v", bitrate
-            ]
+            ])
+            if qp:
+                encode.extend(["-qp", qp])
     elif args.encoder == "av1":
         if has_nvidia():
             encode = [
                 "-c:v", "av1_nvenc",
-                "-preset", "llhq",
-                "-g", "30",
+                "-preset", preset,
+                "-g", gop,
                 "-bf", "0",
                 "-b:v", bitrate,
-                "-pix_fmt", "yuv420p"
+                "-pix_fmt", pix_fmt
             ]
+            if qp:
+                encode.extend(["-qp", qp])
         elif has_vaapi():
             encode = [
                 "-vf", "format=nv12,hwupload",
                 "-vaapi_device", "/dev/dri/renderD128",
                 "-c:v", "av1_vaapi",
-                "-g", "30",
+                "-g", gop,
                 "-bf", "0",
-                "-qp", "20",
                 "-b:v", bitrate
             ]
+            if qp:
+                encode.extend(["-qp", qp])
+            else:
+                encode.extend(["-qp", "20"])
         else:
             encode = [
                 "-c:v", "libaom-av1",
                 "-strict", "experimental",
                 "-cpu-used", "4",
-                "-g", "30",
+                "-g", gop,
                 "-b:v", bitrate
             ]
+            if qp:
+                encode.extend(["-qp", qp])
     else:
         encode = [
             "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-tune", "zerolatency",
-            "-g", "30",
+            "-preset", preset,
+        ]
+        if tune:
+            encode.extend(["-tune", tune])
+        else:
+            encode.extend(["-tune", "zerolatency"])
+        encode.extend([
+            "-g", gop,
             "-bf", "0",
             "-b:v", bitrate,
-            "-pix_fmt", "yuv420p"
-        ]
-
+            "-pix_fmt", pix_fmt
+        ])
+        if qp:
+            encode.extend(["-qp", qp])
     dest_ip = host_state.client_ip
     out = [
         "-f", "mpegts",
-        f"udp://{dest_ip}:{video_port}?pkt_size=1316&buffer_size=65536&flush_packets=0"
+        f"udp://{dest_ip}:{video_port}?pkt_size=1316&buffer_size=65536"
     ]
     return cmd + encode + out
 
@@ -297,7 +337,7 @@ def build_audio_cmd():
         "-c:a", "libopus",
         "-b:a", "128k",
         "-f", "mpegts",
-        f"udp://{MULTICAST_IP}:{UDP_AUDIO_PORT}?pkt_size=1316&buffer_size=65536&flush_packets=0"
+        f"udp://{MULTICAST_IP}:{UDP_AUDIO_PORT}?pkt_size=1316&buffer_size=65536"
     ]
 
 def adaptive_bitrate_manager(args):
@@ -514,7 +554,12 @@ def main():
     parser.add_argument("--adaptive", action="store_true")
     parser.add_argument("--password", default="")
     parser.add_argument("--display", default=":0")
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode with more logging.")
+    parser.add_argument("--preset", default="", help="Encoder preset (if empty, built-in default is used)")
+    parser.add_argument("--gop", default="30", help="Group of Pictures size (keyframe interval)")
+    parser.add_argument("--qp", default="", help="Quantization Parameter (leave empty for none)")
+    parser.add_argument("--tune", default="", help="Tune option (e.g., zerolatency)")
+    parser.add_argument("--pix_fmt", default="yuv420p", help="Pixel format (default: yuv420p)")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
 
     if args.debug:
@@ -536,7 +581,7 @@ def main():
     host_state.monitors = detect_monitors()
     if not host_state.monitors:
         try:
-            w, h = map(int, DEFAULT_RES.split("x"))
+            w, h = map(int, DEFAULT_RES.lower().split("x"))
         except:
             w, h = map(int, "1920x1080".split("x"))
         host_state.monitors = [(w, h, 0, 0)]
