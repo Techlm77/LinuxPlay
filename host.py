@@ -471,6 +471,11 @@ def clipboard_monitor_host():
     sock.close()
 
 def clipboard_listener_host(sock):
+    try:
+        mreq = socket.inet_aton(MULTICAST_IP) + socket.inet_aton("0.0.0.0")
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    except Exception as e:
+        logging.error("Failed to join multicast group in clipboard_listener_host: %s", e)
     while not host_state.should_terminate:
         try:
             data, addr = sock.recvfrom(65535)
@@ -611,6 +616,8 @@ def main():
     host_state.clipboard_listener_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         host_state.clipboard_listener_sock.bind(("", UDP_CLIPBOARD_PORT))
+        mreq = socket.inet_aton(MULTICAST_IP) + socket.inet_aton("0.0.0.0")
+        host_state.clipboard_listener_sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
     except Exception as e:
         logging.error("Failed to bind clipboard port %s: %s", UDP_CLIPBOARD_PORT, e)
         stop_all()
