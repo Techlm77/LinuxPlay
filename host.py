@@ -35,6 +35,7 @@ class HostState:
         self.handshake_sock = None
         self.control_sock = None
         self.clipboard_listener_sock = None
+        self.client_ip = None
 
 host_state = HostState()
 
@@ -111,8 +112,7 @@ def shutil_which(cmd):
     return shutil.which(cmd)
 
 def get_display(default=":0"):
-    disp = os.environ.get("DISPLAY", default)
-    return disp
+    return os.environ.get("DISPLAY", default)
 
 def detect_pulse_monitor():
     monitor = os.environ.get("PULSE_MONITOR")
@@ -242,9 +242,10 @@ def build_video_cmd(args, bitrate):
             "-pix_fmt", "yuv420p"
         ]
 
+    dest_ip = host_state.client_ip
     out = [
         "-f", "mpegts",
-        f"udp://{MULTICAST_IP}:{UDP_VIDEO_PORT}?pkt_size=1316&buffer_size=65536"
+        f"udp://{dest_ip}:{UDP_VIDEO_PORT}?pkt_size=1316&buffer_size=65536"
     ]
     return cmd + encode + out
 
@@ -298,6 +299,7 @@ def tcp_handshake_server(sock, encoder_str):
         try:
             conn, addr = sock.accept()
             logging.info("TCP handshake connection from %s", addr)
+            host_state.client_ip = addr[0]
             data = conn.recv(1024).decode("utf-8", errors="replace").strip()
             logging.info("Received handshake: '%s'", data)
             expected = f"PASSWORD:{host_state.host_password}" if host_state.host_password else "PASSWORD:"
@@ -531,6 +533,11 @@ def main():
 
     file_thread = threading.Thread(target=file_upload_listener, daemon=True)
     file_thread.start()
+
+    logging.info("Waiting for client to connect for unicast video streaming...")
+    while host_state.client_ip is None and not host_state.should_terminate:
+        time.sleep(0.1)
+    logging.info("Client connected from %s, starting video stream.", host_state.client_ip)
 
     video_cmd = build_video_cmd(args, host_state.current_bitrate)
     logging.debug("Video command: %s", " ".join(video_cmd))
