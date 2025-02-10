@@ -77,6 +77,7 @@ LinuxPlay is licensed under the MIT License.
 ## Testing
 
 - **Wayland Support** – Extend compatibility to Wayland-based environments alongside X11.
+
 I have noticed that you have to be version 5 or higher on ffmpeg which means you cannot simply install using apt install ffmpeg as my Ubuntu desktop (22.04) only support up to version 4.4.2 so I'm working on a install.sh script for users that want to use wayland support.
 
 ### Security Warning
