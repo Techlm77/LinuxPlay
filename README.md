@@ -74,6 +74,11 @@ LinuxPlay is licensed under the MIT License.
 - **Full Encryption** – Implement TLS encryption for control messages and video streaming.
 - **Internet-Ready Security** – Enable secure remote connections with end-to-end encryption.
 
+## Testing
+
+- **Wayland Support** – Extend compatibility to Wayland-based environments alongside X11.
+I have noticed that you have to be version 5 or higher on ffmpeg which means you cannot simply install using apt install ffmpeg as my Ubuntu desktop (22.04) only support up to version 4.4.2 so I'm working on a install.sh script for users that want to use wayland support.
+
 ### Security Warning
 
 LinuxPlay can be used over the internet, but it currently does **not** include built-in encryption. It is recommended to use a **VPN, SSH tunnel, or firewall rules** to secure your connection if accessing remotely. Future versions will include built-in encryption for enhanced security.
