@@ -14,8 +14,6 @@ LinuxPlay is a lightweight, low-latency, fully open-source remote desktop soluti
 
 ## Installation
 
-LinuxPlay requires Python 3, FFmpeg, xdotool, xclip, and PyQt5. Install them using:
-
 ```bash
 sudo apt-get update && sudo apt-get install -y python3-pip python3-pyqt5 ffmpeg xdotool xclip libgl1-mesa-dev mesa-utils && pip3 install av
 ```
