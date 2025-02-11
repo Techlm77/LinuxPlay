@@ -60,6 +60,16 @@ python3 client.py --decoder nvdec --host_ip 192.168.1.123 --remote_resolution 16
 | `--audio`             | Enable or disable audio playback (`enable`, `disable`)  | `disable`   |
 | `--password`          | Optional password for control events and handshake      | None        |
 
+## Why No Wayland Support?
+
+LinuxPlay does **not** support Wayland due to the following reasons:
+
+- **FFmpeg does not support Wayland for screen capture.** Even if I wanted to, there is no reliable FFmpeg-based solution.
+- **GStreamer relies on PipeWire for screen capture, but PipeWire does not work on any of my systems, making it unusable.**
+- **KMS/DRM does not work for screen capture, even with direct display output.**
+
+I have extensively tested all these alternatives and none of them worked reliably, which is why LinuxPlay remains X11-only.
+
 ## Contribute
 
 LinuxPlay is fully open-source and welcomes contributions. Whether you want to improve performance, add features, or report bugs, your input is appreciated.
@@ -70,16 +80,9 @@ LinuxPlay is licensed under the MIT License.
 
 ## Future Plans
 
-- **Wayland Support** – Extend compatibility to Wayland-based environments alongside X11.
 - **Full Encryption** – Implement TLS encryption for control messages and video streaming.
 - **Internet-Ready Security** – Enable secure remote connections with end-to-end encryption.
 
-## Testing
-
-- **Wayland Support** – Extend compatibility to Wayland-based environments alongside X11.
-
-I have noticed that you have to be version 5 or higher on ffmpeg which means you cannot simply install using apt install ffmpeg as my Ubuntu desktop (22.04) only support up to version 4.4.2 so I'm working on a install.sh script for users that want to use wayland support.
-
-### Security Warning
+## Security Warning
 
 LinuxPlay can be used over the internet, but it currently does **not** include built-in encryption. It is recommended to use a **VPN, SSH tunnel, or firewall rules** to secure your connection if accessing remotely. Future versions will include built-in encryption for enhanced security.
