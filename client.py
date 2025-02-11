@@ -8,12 +8,15 @@ import socket
 import time
 import threading
 import os
-from PyQt5.QtWidgets import QApplication, QLabel, QMainWindow, QSizePolicy, QMessageBox
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QMessageBox, QOpenGLWidget
+)
+from PyQt5.QtGui import QImage, QPainter
 from PyQt5.QtCore import QThread, pyqtSignal, Qt
 import atexit
 from shutil import which
 
+MOUSE_MOVE_THROTTLE = 0.0001
 DEFAULT_UDP_PORT = 5000
 DEFAULT_RESOLUTION = "1920x1080"
 MULTICAST_IP = "239.0.0.1"
@@ -21,13 +24,19 @@ CONTROL_PORT = 7000
 TCP_HANDSHAKE_PORT = 7001
 UDP_CLIPBOARD_PORT = 7002
 FILE_UPLOAD_PORT = 7003
-MOUSE_MOVE_THROTTLE = 0.02
 
 def has_nvidia():
     return which("nvidia-smi") is not None
 
 def has_vaapi():
     return os.path.exists("/dev/dri/renderD128")
+
+def is_intel_cpu():
+    try:
+        with open("/proc/cpuinfo", "r") as f:
+            return "GenuineIntel" in f.read()
+    except Exception:
+        return False
 
 def tcp_handshake_client(host_ip, password):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -88,9 +97,9 @@ class DecoderThread(QThread):
                 for frame in container.decode(video=0):
                     if not self._running:
                         break
-                    img = frame.to_image()
-                    data = img.tobytes("raw", "RGB")
-                    qimg = QImage(data, img.width, img.height, QImage.Format_RGB888)
+                    arr = frame.to_ndarray(format="rgb24")
+                    qimg = QImage(arr.data, frame.width, frame.height,
+                                  frame.width * 3, QImage.Format_RGB888).copy()
                     self.frame_ready.emit(qimg)
             except Exception as e:
                 logging.error("Decoding error: %s", e)
@@ -100,21 +109,22 @@ class DecoderThread(QThread):
     def stop(self):
         self._running = False
 
-class VideoWidget(QLabel):
+class VideoWidgetGL(QOpenGLWidget):
     def __init__(self, control_callback, rwidth, rheight, offset_x, offset_y, parent=None):
         super().__init__(parent)
-        self.setScaledContents(True)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setContentsMargins(0, 0, 0, 0)
-
+        self.setAutoFillBackground(False)
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self.setAttribute(Qt.WA_NoSystemBackground, True)
+        
         self.control_callback = control_callback
         self.remote_width = rwidth
         self.remote_height = rheight
         self.offset_x = offset_x
         self.offset_y = offset_y
         self.last_mouse_move = 0
+        self.image = None
 
         self.clipboard = QApplication.clipboard()
         self.clipboard.dataChanged.connect(self.on_clipboard_change)
@@ -130,6 +140,16 @@ class VideoWidget(QLabel):
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
             sock.sendto(msg.encode("utf-8"), (MULTICAST_IP, UDP_CLIPBOARD_PORT))
             logging.info("Client clipboard updated and broadcast.")
+
+    def paintGL(self):
+        painter = QPainter(self)
+        if self.image:
+            painter.drawImage(self.rect(), self.image)
+        painter.end()
+
+    def updateFrame(self, qimg):
+        self.image = qimg
+        self.update()
 
     def mouseMoveEvent(self, e):
         now = time.time()
@@ -170,12 +190,16 @@ class VideoWidget(QLabel):
             e.accept()
 
     def keyPressEvent(self, e):
+        if e.isAutoRepeat():
+            return
         key_name = self._get_key_name(e)
         if key_name:
             self.control_callback(f"KEY_PRESS {key_name}")
         e.accept()
 
     def keyReleaseEvent(self, e):
+        if e.isAutoRepeat():
+            return
         key_name = self._get_key_name(e)
         if key_name:
             self.control_callback(f"KEY_RELEASE {key_name}")
@@ -230,10 +254,9 @@ class MainWindow(QMainWindow):
         self.control_sock.setblocking(False)
         self.password = password
 
-        self.video_widget = VideoWidget(self.send_control, rwidth, rheight, offset_x, offset_y)
+        self.video_widget = VideoWidgetGL(self.send_control, rwidth, rheight, offset_x, offset_y)
         self.setCentralWidget(self.video_widget)
         self.video_widget.setFocus()
-        
         self.setAcceptDrops(True)
 
         logging.debug("Client selected decoder options: %s", decoder_opts)
@@ -253,12 +276,18 @@ class MainWindow(QMainWindow):
     def dropEvent(self, event):
         urls = event.mimeData().urls()
         if urls:
-            file_path = urls[0].toLocalFile()
-            if os.path.isfile(file_path):
-                threading.Thread(target=self.upload_file, args=(file_path,), daemon=True).start()
-                event.acceptProposedAction()
-            else:
-                event.ignore()
+            for url in urls:
+                file_path = url.toLocalFile()
+                if os.path.isdir(file_path):
+                    for root, dirs, files in os.walk(file_path):
+                        for f in files:
+                            full_path = os.path.join(root, f)
+                            threading.Thread(target=self.upload_file, args=(full_path,), daemon=True).start()
+                elif os.path.isfile(file_path):
+                    threading.Thread(target=self.upload_file, args=(file_path,), daemon=True).start()
+            event.acceptProposedAction()
+        else:
+            event.ignore()
 
     def upload_file(self, file_path):
         try:
@@ -283,7 +312,7 @@ class MainWindow(QMainWindow):
             logging.error("Error uploading file: %s", e)
 
     def update_image(self, qimg):
-        self.video_widget.setPixmap(QPixmap.fromImage(qimg))
+        self.video_widget.updateFrame(qimg)
 
     def send_control(self, msg):
         if self.password:
@@ -419,16 +448,22 @@ def main():
     if args.decoder == "h.264":
         if has_nvidia():
             decoder_opts["hwaccel"] = "h264_nvdec"
+        elif is_intel_cpu():
+            decoder_opts["hwaccel"] = "h264_qsv"
         elif has_vaapi():
             decoder_opts["hwaccel"] = "h264_vaapi"
     elif args.decoder == "h.265":
         if has_nvidia():
             decoder_opts["hwaccel"] = "hevc_nvdec"
+        elif is_intel_cpu():
+            decoder_opts["hwaccel"] = "hevc_qsv"
         elif has_vaapi():
             decoder_opts["hwaccel"] = "hevc_vaapi"
     elif args.decoder == "av1":
         if has_nvidia():
             decoder_opts["hwaccel"] = "av1_nvdec"
+        elif is_intel_cpu():
+            decoder_opts["hwaccel"] = "av1_qsv"
         elif has_vaapi():
             decoder_opts["hwaccel"] = "av1_vaapi"
 
@@ -445,7 +480,7 @@ def main():
             "-flags", "low_delay",
             "-autoexit",
             "-nodisp",
-            f"udp://@{MULTICAST_IP}:6001?fifo_size=100000&overrun_nonfatal=1"
+            f"udp://@{MULTICAST_IP}:6001?fifo_size=64K&pkt_size=1316&overrun_nonfatal=1"
         ]
         logging.info("Starting audio playback with ffplay...")
         audio_proc = subprocess.Popen(audio_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
