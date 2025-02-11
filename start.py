@@ -27,7 +27,7 @@ def check_encoder_support(codec):
     elif codec == "av1":
         return any(x in output for x in ["av1_nvenc", "av1_vaapi", "av1_qsv"])
     elif codec == "h.264":
-        return has_nvidia() or has_vaapi()
+        return any(x in output for x in ["h264_nvenc", "h264_vaapi", "h264_qsv"])
     return False
 
 def check_decoder_support(codec):
@@ -38,9 +38,9 @@ def check_decoder_support(codec):
     if codec == "h265":
         return any(x in output for x in ["hevc_nvdec", "hevc_vaapi", "hevc_qsv", "hevc_cuvid"])
     elif codec == "av1":
-        return "av1" in output
+        return any(x in output for x in ["av1_nvdec", "av1_vaapi", "av1_qsv"])
     elif codec == "h.264":
-        return has_nvidia() or has_vaapi()
+        return any(x in output for x in ["h264_nvdec", "h264_vaapi", "h264_qsv", "h264_cuvid"])
     return False
 
 class HostTab(QWidget):
@@ -322,6 +322,7 @@ class HelpTab(QWidget):
         <h2>Usage</h2>
         <p>Start the Host using the Host tab with your chosen settings. Then, launch the Client from the Client tab to view the stream. This Help tab describes the purpose of each configuration option.</p>
         """
+        from PyQt5.QtWidgets import QTextEdit
         help_view = QTextEdit()
         help_view.setReadOnly(True)
         help_view.setHtml(help_text)
@@ -351,6 +352,7 @@ class StartWindow(QWidget):
 def main():
     application = QApplication(sys.argv)
     application.setStyle("Fusion")
+    from PyQt5.QtGui import QPalette, QColor
     palette = application.palette()
     palette.setColor(QPalette.Window, QColor(53, 53, 53))
     palette.setColor(QPalette.WindowText, Qt.white)
