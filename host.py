@@ -46,6 +46,13 @@ def has_nvidia():
 def has_vaapi():
     return os.path.exists("/dev/dri/renderD128")
 
+def is_intel_cpu():
+    try:
+        with open("/proc/cpuinfo", "r") as f:
+            return "GenuineIntel" in f.read()
+    except Exception:
+        return False
+
 def stop_all():
     host_state.should_terminate = True
     with host_state.video_thread_lock:
@@ -169,6 +176,8 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
         "ffmpeg",
         "-hide_banner",
         "-loglevel", "error",
+        "-fflags", "nobuffer",
+        "-flags", "low_delay",
         "-threads", "0",
         "-f", "x11grab",
         "-framerate", args.framerate,
@@ -186,6 +195,17 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
         if has_nvidia():
             encode = [
                 "-c:v", "h264_nvenc",
+                "-preset", preset,
+                "-g", gop,
+                "-bf", "0",
+                "-b:v", bitrate,
+                "-pix_fmt", pix_fmt
+            ]
+            if qp:
+                encode.extend(["-qp", qp])
+        elif is_intel_cpu():
+            encode = [
+                "-c:v", "h264_qsv",
                 "-preset", preset,
                 "-g", gop,
                 "-bf", "0",
@@ -236,6 +256,17 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
             ]
             if qp:
                 encode.extend(["-qp", qp])
+        elif is_intel_cpu():
+            encode = [
+                "-c:v", "hevc_qsv",
+                "-preset", preset,
+                "-g", gop,
+                "-bf", "0",
+                "-b:v", bitrate,
+                "-pix_fmt", pix_fmt
+            ]
+            if qp:
+                encode.extend(["-qp", qp])
         elif has_vaapi():
             encode = [
                 "-vf", "format=nv12,hwupload",
@@ -269,6 +300,17 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
         if has_nvidia():
             encode = [
                 "-c:v", "av1_nvenc",
+                "-preset", preset,
+                "-g", gop,
+                "-bf", "0",
+                "-b:v", bitrate,
+                "-pix_fmt", pix_fmt
+            ]
+            if qp:
+                encode.extend(["-qp", qp])
+        elif is_intel_cpu():
+            encode = [
+                "-c:v", "av1_qsv",
                 "-preset", preset,
                 "-g", gop,
                 "-bf", "0",
@@ -406,14 +448,12 @@ def control_listener(sock):
         try:
             data, addr = sock.recvfrom(2048)
             msg = data.decode("utf-8", errors="replace").strip()
-
             if host_state.host_password:
                 prefix = f"PASSWORD:{host_state.host_password}:"
                 if not msg.startswith(prefix):
                     logging.warning("Rejected control message from %s due to password mismatch.", addr)
                     continue
                 msg = msg[len(prefix):].strip()
-
             tokens = msg.split()
             if not tokens:
                 continue
@@ -471,11 +511,6 @@ def clipboard_monitor_host():
     sock.close()
 
 def clipboard_listener_host(sock):
-    try:
-        mreq = socket.inet_aton(MULTICAST_IP) + socket.inet_aton("0.0.0.0")
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-    except Exception as e:
-        logging.error("Failed to join multicast group in clipboard_listener_host: %s", e)
     while not host_state.should_terminate:
         try:
             data, addr = sock.recvfrom(65535)
