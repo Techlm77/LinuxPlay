@@ -81,6 +81,11 @@ LinuxPlay is licensed under the MIT License.
 - **Full Encryption** – Implement TLS encryption for control messages and video streaming.
 - **Internet-Ready Security** – Enable secure remote connections with end-to-end encryption.
 
+## Testing
+
+- **Full Encryption** – Implement TLS encryption for control messages and video streaming.
+- **Internet-Ready Security** – Enable secure remote connections with end-to-end encryption.
+
 ## Security Warning
 
 LinuxPlay can be used over the internet, but it currently does **not** include built-in encryption. It is recommended to use a **VPN, SSH tunnel, or firewall rules** to secure your connection if accessing remotely. Future versions will include built-in encryption for enhanced security.
