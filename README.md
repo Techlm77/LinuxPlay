@@ -78,8 +78,7 @@ LinuxPlay is licensed under the MIT License.
 
 ## Future Plans
 
-- **Full Encryption** – Implement TLS encryption for control messages and video streaming.
-- **Internet-Ready Security** – Enable secure remote connections with end-to-end encryption.
+- **Xbox/PlayStation Controller**
 
 ## Testing
 
