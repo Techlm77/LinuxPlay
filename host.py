@@ -26,6 +26,7 @@ class HostState:
         self.video_threads = []
         self.audio_thread = None
         self.current_bitrate = DEFAULT_BITRATE
+        self.host_password = None
         self.last_clipboard_content = ""
         self.ignore_clipboard_update = False
         self.should_terminate = False
@@ -126,7 +127,7 @@ def detect_pulse_monitor():
     if monitor:
         return monitor
     if not shutil_which("pactl"):
-        logging.warning("pactl not found, using default monitor")
+        logging.warning("pactl not found, using default.monitor")
         return "default.monitor"
     try:
         output = subprocess.check_output(["pactl", "list", "short", "sources"], universal_newlines=True)
@@ -176,11 +177,9 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
         "-hide_banner",
         "-loglevel", "error",
         "-fflags", "nobuffer",
-        "-max_delay", "0",
         "-flags", "low_delay",
         "-threads", "0",
         "-f", "x11grab",
-        "-draw_mouse", "0",
         "-framerate", args.framerate,
         "-video_size", video_size,
         "-i", input_arg
@@ -360,9 +359,10 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
         ])
         if qp:
             encode.extend(["-qp", qp])
+    dest_ip = host_state.client_ip
     out = [
         "-f", "mpegts",
-        f"udp://{host_state.client_ip}:{video_port}?pkt_size=1316&buffer_size=2048"
+        f"udp://{dest_ip}:{video_port}?pkt_size=1316&buffer_size=65536"
     ]
     return cmd + encode + out
 
@@ -373,14 +373,13 @@ def build_audio_cmd():
         "-hide_banner",
         "-loglevel", "error",
         "-fflags", "nobuffer",
-        "-max_delay", "0",
         "-flags", "low_delay",
         "-f", "pulse",
         "-i", monitor_source,
         "-c:a", "libopus",
         "-b:a", "128k",
         "-f", "mpegts",
-        f"udp://{MULTICAST_IP}:{UDP_AUDIO_PORT}?pkt_size=1316&buffer_size=512"
+        f"udp://{MULTICAST_IP}:{UDP_AUDIO_PORT}?pkt_size=1316&buffer_size=65536"
     ]
 
 def adaptive_bitrate_manager(args):
@@ -397,6 +396,7 @@ def adaptive_bitrate_manager(args):
                     new_bitrate = DEFAULT_BITRATE
             else:
                 new_bitrate = DEFAULT_BITRATE
+
             if new_bitrate != host_state.current_bitrate:
                 logging.info("Adaptive ABR: Switching bitrate from %s to %s",
                              host_state.current_bitrate, new_bitrate)
@@ -418,21 +418,23 @@ def tcp_handshake_server(sock, encoder_str, args):
     while not host_state.should_terminate:
         try:
             conn, addr = sock.accept()
-            logging.info("Handshake connection from %s", addr)
+            logging.info("TCP handshake connection from %s", addr)
             host_state.client_ip = addr[0]
             data = conn.recv(1024).decode("utf-8", errors="replace").strip()
             logging.info("Received handshake: '%s'", data)
-            if data == "HELLO":
+            expected = f"PASSWORD:{host_state.host_password}" if host_state.host_password else "PASSWORD:"
+            if data == expected:
                 if host_state.monitors:
                     monitors_str = ";".join(f"{w}x{h}+{ox}+{oy}" for (w, h, ox, oy) in host_state.monitors)
                 else:
                     monitors_str = DEFAULT_RES
                 resp = f"OK:{encoder_str}:{monitors_str}"
                 conn.sendall(resp.encode("utf-8"))
-                logging.info("Handshake successful. Sent: %s", resp)
+                logging.info("Handshake from %s successful. Sent %s", addr, resp)
             else:
                 conn.sendall("FAIL".encode("utf-8"))
-                logging.error("Unexpected handshake message: %s", data)
+                logging.error("Handshake from %s failed. Expected '%s', got '%s'",
+                              addr, expected, data)
             conn.close()
         except OSError:
             break
@@ -446,6 +448,12 @@ def control_listener(sock):
         try:
             data, addr = sock.recvfrom(2048)
             msg = data.decode("utf-8", errors="replace").strip()
+            if host_state.host_password:
+                prefix = f"PASSWORD:{host_state.host_password}:"
+                if not msg.startswith(prefix):
+                    logging.warning("Rejected control message from %s due to password mismatch.", addr)
+                    continue
+                msg = msg[len(prefix):].strip()
             tokens = msg.split()
             if not tokens:
                 continue
@@ -493,7 +501,8 @@ def clipboard_monitor_host():
         except:
             current = ""
         with host_state.clipboard_lock:
-            if (not host_state.ignore_clipboard_update and current and current != host_state.last_clipboard_content):
+            if (not host_state.ignore_clipboard_update and
+               current and current != host_state.last_clipboard_content):
                 host_state.last_clipboard_content = current
                 msg = f"CLIPBOARD_UPDATE HOST {current}"
                 sock.sendto(msg.encode("utf-8"), (MULTICAST_IP, UDP_CLIPBOARD_PORT))
@@ -577,12 +586,13 @@ def file_upload_listener():
     s.close()
 
 def main():
-    parser = argparse.ArgumentParser(description="Remote Desktop Host (Optimized for Low Latency)")
+    parser = argparse.ArgumentParser(description="Remote Desktop Host (Production Ready)")
     parser.add_argument("--encoder", choices=["none", "h.264", "h.265", "av1"], default="none")
     parser.add_argument("--framerate", default=DEFAULT_FPS)
     parser.add_argument("--bitrate", default=DEFAULT_BITRATE)
     parser.add_argument("--audio", choices=["enable", "disable"], default="disable")
     parser.add_argument("--adaptive", action="store_true")
+    parser.add_argument("--password", default="")
     parser.add_argument("--display", default=":0")
     parser.add_argument("--preset", default="", help="Encoder preset (if empty, built-in default is used)")
     parser.add_argument("--gop", default="30", help="Group of Pictures size (keyframe interval)")
@@ -593,10 +603,19 @@ def main():
     args = parser.parse_args()
 
     if args.debug:
-        logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%H:%M:%S"
+        )
     else:
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%H:%M:%S"
+        )
 
+    host_state.host_password = args.password if args.password else None
     host_state.current_bitrate = args.bitrate
 
     host_state.monitors = detect_monitors()
@@ -651,7 +670,7 @@ def main():
     file_thread = threading.Thread(target=file_upload_listener, daemon=True)
     file_thread.start()
 
-    logging.info("Waiting for client connection for video streaming...")
+    logging.info("Waiting for client to connect for unicast video streaming...")
     while host_state.client_ip is None and not host_state.should_terminate:
         time.sleep(0.1)
     logging.info("Client connected from %s, starting video streams.", host_state.client_ip)
