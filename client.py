@@ -23,9 +23,6 @@ security_key = None
 cipher = None
 ssl_context = None
 
-latest_frame = None
-latest_lock = threading.Lock()
-
 MOUSE_MOVE_THROTTLE = 0.005  
 DEFAULT_UDP_PORT = 5000
 DEFAULT_RESOLUTION = "1920x1080"
@@ -97,15 +94,16 @@ def tcp_handshake_client(host_ip):
 
 class DecoderThread(QThread):
     frame_ready = pyqtSignal(object)
-    def __init__(self, input_url, decoder_opts, parent=None):
+    def __init__(self, input_url, decoder_opts, window, parent=None):
         super().__init__(parent)
         self.input_url = input_url
         self.decoder_opts = decoder_opts
+        self.window = window
         self.decoder_opts.setdefault("probesize", "32")
         self.decoder_opts.setdefault("analyzeduration", "0")
         self._running = True
+
     def run(self):
-        global latest_frame, latest_lock
         while self._running:
             container = None
             try:
@@ -114,8 +112,8 @@ class DecoderThread(QThread):
                     if not self._running:
                         break
                     arr = frame.to_ndarray(format="rgb24")
-                    with latest_lock:
-                        latest_frame = (arr, frame.width, frame.height)
+                    with self.window.latest_lock:
+                        self.window.latest_frame = (arr, frame.width, frame.height)
             except av.error.InvalidDataError as e:
                 logging.error("InvalidDataError in decoding: %s", e)
             except Exception as e:
@@ -127,6 +125,7 @@ class DecoderThread(QThread):
                     except Exception as e:
                         logging.error("Error closing container: %s", e)
             time.sleep(0.005)
+
     def stop(self):
         self._running = False
 
@@ -324,6 +323,10 @@ class MainWindow(QMainWindow):
         self.texture_height = rheight
         self.offset_x = offset_x
         self.offset_y = offset_y
+
+        self.latest_frame = None
+        self.latest_lock = threading.Lock()
+
         self.control_addr = (host_ip, CONTROL_PORT)
         self.control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.control_sock.setblocking(False)
@@ -334,22 +337,24 @@ class MainWindow(QMainWindow):
         logging.debug("Using decoder options: %s", decoder_opts)
         logging.debug("Connecting to host %s, resolution %sx%s", host_ip, rwidth, rheight)
         video_url = f"udp://0.0.0.0:{udp_port}?fifo_size=1024&max_delay=0&overrun_nonfatal=1"
-        self.decoder_thread = DecoderThread(video_url, decoder_opts)
+        self.decoder_thread = DecoderThread(video_url, decoder_opts, self)
         self.decoder_thread.start()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_frame)
         self.timer.start(16)
+
     def poll_frame(self):
-        global latest_frame, latest_lock
-        with latest_lock:
-            frame = latest_frame
+        with self.latest_lock:
+            frame = self.latest_frame
         if frame:
             self.video_widget.updateFrame(frame)
+
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
         else:
             event.ignore()
+
     def dropEvent(self, event):
         urls = event.mimeData().urls()
         if urls:
@@ -365,6 +370,7 @@ class MainWindow(QMainWindow):
             event.acceptProposedAction()
         else:
             event.ignore()
+
     def upload_file(self, file_path):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -387,13 +393,16 @@ class MainWindow(QMainWindow):
             logging.info("File %s uploaded successfully.", filename)
         except Exception as e:
             logging.error("Error uploading file: %s", e)
+
     def update_image(self, frame_tuple):
         self.video_widget.updateFrame(frame_tuple)
+
     def send_control(self, msg):
         try:
             secure_sendto(self.control_sock, msg, self.control_addr)
         except Exception as e:
             logging.error("Error sending control message: %s", e)
+
     def closeEvent(self, event):
         self.timer.stop()
         self.decoder_thread.stop()
