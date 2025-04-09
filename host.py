@@ -8,7 +8,14 @@ import time
 import threading
 import socket
 import atexit
+import ssl
 from shutil import which
+from cryptography.fernet import Fernet
+from cryptography import x509
+from cryptography.x509.oid import NameOID
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from datetime import datetime, timedelta, timezone
 
 UDP_VIDEO_PORT = 5000
 UDP_AUDIO_PORT = 6001
@@ -21,12 +28,17 @@ DEFAULT_FPS = "30"
 DEFAULT_BITRATE = "8M"
 DEFAULT_RES = "1920x1080"
 
+security_key = None
+cipher = None
+ssl_context = None
+CERT_FILE = "cert.pem"
+KEY_FILE = "key.pem"
+
 class HostState:
     def __init__(self):
         self.video_threads = []
         self.audio_thread = None
         self.current_bitrate = DEFAULT_BITRATE
-        self.host_password = None
         self.last_clipboard_content = ""
         self.ignore_clipboard_update = False
         self.should_terminate = False
@@ -127,7 +139,7 @@ def detect_pulse_monitor():
     if monitor:
         return monitor
     if not shutil_which("pactl"):
-        logging.warning("pactl not found, using default.monitor")
+        logging.warning("pactl not found, using default monitor")
         return "default.monitor"
     try:
         output = subprocess.check_output(["pactl", "list", "short", "sources"], universal_newlines=True)
@@ -177,9 +189,11 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
         "-hide_banner",
         "-loglevel", "error",
         "-fflags", "nobuffer",
+        "-max_delay", "0",
         "-flags", "low_delay",
         "-threads", "0",
         "-f", "x11grab",
+        "-draw_mouse", "0",
         "-framerate", args.framerate,
         "-video_size", video_size,
         "-i", input_arg
@@ -359,10 +373,9 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
         ])
         if qp:
             encode.extend(["-qp", qp])
-    dest_ip = host_state.client_ip
     out = [
         "-f", "mpegts",
-        f"udp://{dest_ip}:{video_port}?pkt_size=1316&buffer_size=65536"
+        f"udp://{host_state.client_ip}:{video_port}?pkt_size=1316&buffer_size=2048"
     ]
     return cmd + encode + out
 
@@ -373,13 +386,14 @@ def build_audio_cmd():
         "-hide_banner",
         "-loglevel", "error",
         "-fflags", "nobuffer",
+        "-max_delay", "0",
         "-flags", "low_delay",
         "-f", "pulse",
         "-i", monitor_source,
         "-c:a", "libopus",
         "-b:a", "128k",
         "-f", "mpegts",
-        f"udp://{MULTICAST_IP}:{UDP_AUDIO_PORT}?pkt_size=1316&buffer_size=65536"
+        f"udp://{MULTICAST_IP}:{UDP_AUDIO_PORT}?pkt_size=1316&buffer_size=512"
     ]
 
 def adaptive_bitrate_manager(args):
@@ -396,7 +410,6 @@ def adaptive_bitrate_manager(args):
                     new_bitrate = DEFAULT_BITRATE
             else:
                 new_bitrate = DEFAULT_BITRATE
-
             if new_bitrate != host_state.current_bitrate:
                 logging.info("Adaptive ABR: Switching bitrate from %s to %s",
                              host_state.current_bitrate, new_bitrate)
@@ -413,29 +426,67 @@ def adaptive_bitrate_manager(args):
                 host_state.video_threads = new_threads
                 host_state.current_bitrate = new_bitrate
 
+def generate_self_signed_cert(cert_file, key_file):
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.COUNTRY_NAME, u"US"),
+        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"State"),
+        x509.NameAttribute(NameOID.LOCALITY_NAME, u"Locality"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"MyOrganization"),
+        x509.NameAttribute(NameOID.COMMON_NAME, u"localhost"),
+    ])
+    now = datetime.now(timezone.utc)
+    cert = x509.CertificateBuilder().subject_name(subject)\
+            .issuer_name(issuer)\
+            .public_key(key.public_key())\
+            .serial_number(x509.random_serial_number())\
+            .not_valid_before(now)\
+            .not_valid_after(now + timedelta(days=365))\
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName(u"localhost")]), critical=False)\
+            .sign(key, hashes.SHA256())
+    with open(cert_file, "wb") as f:
+        f.write(cert.public_bytes(serialization.Encoding.PEM))
+    with open(key_file, "wb") as f:
+        f.write(key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption()
+        ))
+
+def secure_sendto(sock, message, addr):
+    encrypted = cipher.encrypt(message.encode("utf-8"))
+    sock.sendto(encrypted, addr)
+
+def secure_recvfrom(sock, bufsize):
+    data, addr = sock.recvfrom(bufsize)
+    try:
+        decrypted = cipher.decrypt(data).decode("utf-8")
+    except Exception as e:
+        decrypted = ""
+    return decrypted, addr
+
 def tcp_handshake_server(sock, encoder_str, args):
     logging.info("TCP Handshake server listening on port %s", TCP_HANDSHAKE_PORT)
     while not host_state.should_terminate:
         try:
             conn, addr = sock.accept()
-            logging.info("TCP handshake connection from %s", addr)
+            ssl_conn = ssl_context.wrap_socket(conn, server_side=True)
+            logging.info("Handshake connection from %s", addr)
             host_state.client_ip = addr[0]
-            data = conn.recv(1024).decode("utf-8", errors="replace").strip()
+            data = ssl_conn.recv(1024).decode("utf-8", errors="replace").strip()
             logging.info("Received handshake: '%s'", data)
-            expected = f"PASSWORD:{host_state.host_password}" if host_state.host_password else "PASSWORD:"
-            if data == expected:
+            if data == "HELLO":
                 if host_state.monitors:
                     monitors_str = ";".join(f"{w}x{h}+{ox}+{oy}" for (w, h, ox, oy) in host_state.monitors)
                 else:
                     monitors_str = DEFAULT_RES
                 resp = f"OK:{encoder_str}:{monitors_str}"
-                conn.sendall(resp.encode("utf-8"))
-                logging.info("Handshake from %s successful. Sent %s", addr, resp)
+                ssl_conn.sendall(resp.encode("utf-8"))
+                logging.info("Handshake successful. Sent: %s", resp)
             else:
-                conn.sendall("FAIL".encode("utf-8"))
-                logging.error("Handshake from %s failed. Expected '%s', got '%s'",
-                              addr, expected, data)
-            conn.close()
+                ssl_conn.sendall("FAIL".encode("utf-8"))
+                logging.error("Unexpected handshake message: %s", data)
+            ssl_conn.close()
         except OSError:
             break
         except Exception as e:
@@ -446,14 +497,7 @@ def control_listener(sock):
     logging.info("Control listener active on UDP port %s", UDP_CONTROL_PORT)
     while not host_state.should_terminate:
         try:
-            data, addr = sock.recvfrom(2048)
-            msg = data.decode("utf-8", errors="replace").strip()
-            if host_state.host_password:
-                prefix = f"PASSWORD:{host_state.host_password}:"
-                if not msg.startswith(prefix):
-                    logging.warning("Rejected control message from %s due to password mismatch.", addr)
-                    continue
-                msg = msg[len(prefix):].strip()
+            msg, addr = secure_recvfrom(sock, 2048)
             tokens = msg.split()
             if not tokens:
                 continue
@@ -501,11 +545,10 @@ def clipboard_monitor_host():
         except:
             current = ""
         with host_state.clipboard_lock:
-            if (not host_state.ignore_clipboard_update and
-               current and current != host_state.last_clipboard_content):
+            if (not host_state.ignore_clipboard_update and current and current != host_state.last_clipboard_content):
                 host_state.last_clipboard_content = current
                 msg = f"CLIPBOARD_UPDATE HOST {current}"
-                sock.sendto(msg.encode("utf-8"), (MULTICAST_IP, UDP_CLIPBOARD_PORT))
+                secure_sendto(sock, msg, (MULTICAST_IP, UDP_CLIPBOARD_PORT))
                 logging.info("Host clipboard updated and broadcast.")
         time.sleep(1)
     sock.close()
@@ -513,8 +556,7 @@ def clipboard_monitor_host():
 def clipboard_listener_host(sock):
     while not host_state.should_terminate:
         try:
-            data, addr = sock.recvfrom(65535)
-            msg = data.decode("utf-8", errors="replace")
+            msg, addr = secure_recvfrom(sock, 65535)
             tokens = msg.split(maxsplit=2)
             if len(tokens) >= 3 and tokens[0] == "CLIPBOARD_UPDATE" and tokens[1] == "CLIENT":
                 new_content = tokens[2]
@@ -556,15 +598,16 @@ def file_upload_listener():
     while not host_state.should_terminate:
         try:
             conn, addr = s.accept()
+            ssl_conn = ssl_context.wrap_socket(conn, server_side=True)
             logging.info("File upload connection from %s", addr)
-            header = recvall(conn, 4)
+            header = recvall(ssl_conn, 4)
             if not header:
-                conn.close()
+                ssl_conn.close()
                 continue
             filename_length = int.from_bytes(header, byteorder='big')
-            filename_bytes = recvall(conn, filename_length)
+            filename_bytes = recvall(ssl_conn, filename_length)
             filename = filename_bytes.decode('utf-8')
-            filesize_bytes = recvall(conn, 8)
+            filesize_bytes = recvall(ssl_conn, 8)
             file_size = int.from_bytes(filesize_bytes, byteorder='big')
             dest_dir = os.path.expanduser("~/LinuxPlayDrop")
             if not os.path.exists(dest_dir):
@@ -574,25 +617,24 @@ def file_upload_listener():
                 remaining = file_size
                 while remaining > 0:
                     chunk_size = 4096 if remaining >= 4096 else remaining
-                    chunk = conn.recv(chunk_size)
+                    chunk = ssl_conn.recv(chunk_size)
                     if not chunk:
                         break
                     f.write(chunk)
                     remaining -= len(chunk)
             logging.info("Received file %s (%d bytes)", dest_path, file_size)
-            conn.close()
+            ssl_conn.close()
         except Exception as e:
             logging.error("File upload error: %s", e)
     s.close()
 
 def main():
-    parser = argparse.ArgumentParser(description="Remote Desktop Host (Production Ready)")
+    parser = argparse.ArgumentParser(description="Remote Desktop Host (Optimized for Low Latency) with Security")
     parser.add_argument("--encoder", choices=["none", "h.264", "h.265", "av1"], default="none")
     parser.add_argument("--framerate", default=DEFAULT_FPS)
     parser.add_argument("--bitrate", default=DEFAULT_BITRATE)
     parser.add_argument("--audio", choices=["enable", "disable"], default="disable")
     parser.add_argument("--adaptive", action="store_true")
-    parser.add_argument("--password", default="")
     parser.add_argument("--display", default=":0")
     parser.add_argument("--preset", default="", help="Encoder preset (if empty, built-in default is used)")
     parser.add_argument("--gop", default="30", help="Group of Pictures size (keyframe interval)")
@@ -600,22 +642,22 @@ def main():
     parser.add_argument("--tune", default="", help="Tune option (e.g., zerolatency)")
     parser.add_argument("--pix_fmt", default="yuv420p", help="Pixel format (default: yuv420p)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--security-key", required=True, help="Base64-encoded 32-byte key for encryption (Fernet)")
     args = parser.parse_args()
 
-    if args.debug:
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(asctime)s [%(levelname)s] %(message)s",
-            datefmt="%H:%M:%S"
-        )
-    else:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s [%(levelname)s] %(message)s",
-            datefmt="%H:%M:%S"
-        )
+    global security_key, cipher, ssl_context
+    security_key = args.security_key.encode("utf-8")
+    cipher = Fernet(security_key)
+    if not os.path.exists(CERT_FILE) or not os.path.exists(KEY_FILE):
+        generate_self_signed_cert(CERT_FILE, KEY_FILE)
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ssl_context.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
 
-    host_state.host_password = args.password if args.password else None
+    if args.debug:
+        logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+    else:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+
     host_state.current_bitrate = args.bitrate
 
     host_state.monitors = detect_monitors()
@@ -670,7 +712,7 @@ def main():
     file_thread = threading.Thread(target=file_upload_listener, daemon=True)
     file_thread.start()
 
-    logging.info("Waiting for client to connect for unicast video streaming...")
+    logging.info("Waiting for client connection for video streaming...")
     while host_state.client_ip is None and not host_state.should_terminate:
         time.sleep(0.1)
     logging.info("Client connected from %s, starting video streams.", host_state.client_ip)
