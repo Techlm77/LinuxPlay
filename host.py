@@ -592,20 +592,59 @@ _key_map = {
     "F10": Key.f10 if HAVE_PYNPUT else None, "F11": Key.f11 if HAVE_PYNPUT else None, "F12": Key.f12 if HAVE_PYNPUT else None,
     "space": Key.space if HAVE_PYNPUT else None,
 }
+
+CHAR_TO_X11 = {
+    '-':'minus', '=':'equal', '[':'bracketleft', ']':'bracketright', '\\':'backslash',
+    ';':'semicolon', "'":'apostrophe', ',':'comma', '.':'period', '/':'slash', '`':'grave',
+    '!':'exclam', '"':'quotedbl', '#':'numbersign', '$':'dollar', '%':'percent',
+    '&':'ampersand', '*':'asterisk', '(':'parenleft', ')':'parenright', '_':'underscore',
+    '+':'plus', '{':'braceleft', '}':'braceright', '|':'bar', ':':'colon',
+    '<':'less', '>':'greater', '?':'question', '£':'sterling', '¬':'notsign', '¦':'brokenbar',
+}
+
+NAME_TO_CHAR = {
+    'minus':'-', 'equal':'=', 'bracketleft':'[', 'bracketright':']', 'backslash':'\\',
+    'semicolon':';', 'apostrophe':"'", 'comma':',', 'period':'.', 'slash':'/', 'grave':'`',
+    'exclam':'!', 'quotedbl':'"', 'numbersign':'#', 'dollar':'$', 'percent':'%',
+    'ampersand':'&', 'asterisk':'*', 'parenleft':'(', 'parenright':')', 'underscore':'_',
+    'plus':'+', 'braceleft':'{', 'braceright':'}', 'bar':'|', 'colon':':',
+    'less':'<', 'greater':'>', 'question':'?', 'sterling':'£', 'notsign':'¬', 'brokenbar':'¦',
+}
+
 def _inject_key(action, name):
+    """
+    action: "down" or "up"
+    name:   may be a special name (Escape, F1, Left...), a symbolic name (minus, braceleft),
+            or a single literal character ('-', '_', '{', '£', etc.)
+    """
     if HAVE_PYNPUT:
+        k = _key_map.get(name)
         try:
-            k = _key_map.get(name)
             if k:
-                (_keys.press if action=="down" else _keys.release)(k)
-            else:
-                if len(name) == 1:
-                    (_keys.press if action=="down" else _keys.release)(name)
+                (_keys.press if action == "down" else _keys.release)(k)
+                return
+
+            if isinstance(name, str) and len(name) == 1:
+                (_keys.press if action == "down" else _keys.release)(name)
+                return
+
+            ch = NAME_TO_CHAR.get(name)
+            if ch:
+                (_keys.press if action == "down" else _keys.release)(ch)
+                return
         except Exception as e:
-            logging.debug("pynput key %s failed: %s", action, e)
-    elif IS_LINUX:
-        subprocess.Popen(["xdotool", "keydown" if action=="down" else "keyup", name],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            logging.debug("pynput key %s failed for %r: %s", action, name, e)
+        return
+
+    if IS_LINUX:
+        try:
+            keyname = name
+            if isinstance(name, str) and len(name) == 1:
+                keyname = CHAR_TO_X11.get(name, name)
+            cmd = ["xdotool", "keydown" if action == "down" else "keyup", keyname]
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            logging.debug("xdotool key %s failed for %r: %s", action, name, e)
 
 def tcp_handshake_server(sock, encoder_str, args):
     logging.info("TCP handshake server on %d", TCP_HANDSHAKE_PORT)
