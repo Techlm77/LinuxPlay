@@ -305,6 +305,8 @@ class VideoWidgetGL(QOpenGLWidget):
 
         text = event.text()
         if text and len(text) == 1 and ord(text) >= 0x20:
+            if text == " ":
+                return "space"
             return text
 
         key = event.key()
@@ -331,7 +333,6 @@ class VideoWidgetGL(QOpenGLWidget):
 
         if text:
             return text
-
         return None
 
 class MainWindow(QMainWindow):
