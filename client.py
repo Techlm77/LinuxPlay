@@ -302,8 +302,12 @@ class VideoWidgetGL(QOpenGLWidget):
 
     def _get_key_name(self, event):
         from PyQt5.QtCore import Qt
-        key = event.key()
+
         text = event.text()
+        if text and len(text) == 1 and ord(text) >= 0x20:
+            return text
+
+        key = event.key()
         key_map = {
             Qt.Key_Escape:"Escape", Qt.Key_Tab:"Tab", Qt.Key_Backtab:"Tab", Qt.Key_Backspace:"BackSpace",
             Qt.Key_Return:"Return", Qt.Key_Enter:"Return", Qt.Key_Insert:"Insert", Qt.Key_Delete:"Delete",
@@ -314,24 +318,20 @@ class VideoWidgetGL(QOpenGLWidget):
             Qt.Key_NumLock:"Num_Lock", Qt.Key_ScrollLock:"Scroll_Lock",
             Qt.Key_F1:"F1", Qt.Key_F2:"F2", Qt.Key_F3:"F3", Qt.Key_F4:"F4", Qt.Key_F5:"F5", Qt.Key_F6:"F6",
             Qt.Key_F7:"F7", Qt.Key_F8:"F8", Qt.Key_F9:"F9", Qt.Key_F10:"F10", Qt.Key_F11:"F11", Qt.Key_F12:"F12",
-            Qt.Key_Space:"space", Qt.Key_QuoteLeft:"grave", Qt.Key_Minus:"minus", Qt.Key_Equal:"equal",
-            Qt.Key_BracketLeft:"bracketleft", Qt.Key_BracketRight:"bracketright", Qt.Key_Backslash:"backslash",
-            Qt.Key_Semicolon:"semicolon", Qt.Key_Apostrophe:"apostrophe", Qt.Key_Comma:"comma",
-            Qt.Key_Period:"period", Qt.Key_Slash:"slash", Qt.Key_Exclam:"exclam", Qt.Key_QuoteDbl:"quotedbl",
-            Qt.Key_NumberSign:"numbersign", Qt.Key_Dollar:"dollar", Qt.Key_Percent:"percent",
-            Qt.Key_Ampersand:"ampersand", Qt.Key_Asterisk:"asterisk", Qt.Key_ParenLeft:"parenleft",
-            Qt.Key_ParenRight:"parenright", Qt.Key_Underscore:"underscore", Qt.Key_Plus:"plus",
-            Qt.Key_BraceLeft:"braceleft", Qt.Key_BraceRight:"braceright", Qt.Key_Bar:"bar",
-            Qt.Key_Colon:"colon", Qt.Key_Less:"less", Qt.Key_Greater:"greater", Qt.Key_Question:"question"
+            Qt.Key_Space:"space",
         }
         if key in key_map:
             return key_map[key]
+
         if (Qt.Key_A <= key <= Qt.Key_Z) or (Qt.Key_0 <= key <= Qt.Key_9):
-            return chr(key).lower()
+            try:
+                return chr(key).lower()
+            except Exception:
+                pass
+
         if text:
-            if text == "£": return "sterling"
-            if text == "¬": return "notsign"
             return text
+
         return None
 
 class MainWindow(QMainWindow):
