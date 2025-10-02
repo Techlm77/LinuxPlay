@@ -5,9 +5,9 @@ import json
 import argparse
 import logging
 import subprocess
-import signal
 import platform
 import threading
+import uuid
 
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
@@ -31,6 +31,8 @@ WG_INFO_PATH = "/tmp/linuxplay_wg_info.json"  # {"host_tunnel_ip": "10.13.13.1"}
 WG_QR_PATH   = "/tmp/linuxplay_wg_peer.png"   # QR image for mobile client
 
 CFG_PATH = os.path.join(os.path.expanduser("~"), ".linuxplay_start_cfg.json")
+
+LINUXPLAY_MARKER = "LinuxPlayHost"
 
 def ffmpeg_ok():
     try:
@@ -59,6 +61,23 @@ def ffmpeg_supports_demuxer(name: str) -> bool:
             stderr=subprocess.STDOUT, universal_newlines=True
         )
         return (name in out.lower())
+    except Exception:
+        return False
+
+def ffmpeg_has_device(name: str) -> bool:
+    """Check ffmpeg -devices for an input device (e.g., 'kmsgrab', 'ddagrab')."""
+    try:
+        out = subprocess.check_output(
+            ["ffmpeg", "-hide_banner", "-devices"],
+            stderr=subprocess.STDOUT, universal_newlines=True
+        ).lower()
+        for line in out.splitlines():
+            s = line.strip().lower()
+            if s.startswith("d ") or s.startswith(" d "):
+                parts = s.split()
+                if len(parts) >= 2 and parts[1] == name.lower():
+                    return True
+        return False
     except Exception:
         return False
 
@@ -150,37 +169,36 @@ def backends_for_codec(codec: str):
     items = [f"{b} - {BACKEND_READABLE[b]}" for b in pruned]
     return pruned, items
 
-def _ffmpeg_running_anywhere() -> bool:
-    """Return True if any ffmpeg process is currently running on the system."""
-    if IS_WINDOWS:
-        try:
-            out = subprocess.check_output(
-                ["tasklist", "/FI", "IMAGENAME eq ffmpeg.exe"],
-                stderr=subprocess.DEVNULL, universal_newlines=True
-            )
-            return "ffmpeg.exe" in out.lower()
-        except Exception:
-            return False
-    else:
-        try:
-            rc = subprocess.call(
-                ["pgrep", "-x", "ffmpeg"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            if rc == 0:
-                return True
-        except Exception:
-            pass
-        try:
-            out = subprocess.check_output(["ps", "-A", "-o", "comm="], universal_newlines=True)
-            return any(line.strip() == "ffmpeg" for line in out.splitlines())
-        except Exception:
-            return False
-
 def _proc_is_running(p) -> bool:
     try:
         return (p is not None) and (p.poll() is None)
     except Exception:
+        return False
+
+def _ffmpeg_running_for_us(marker: str = LINUXPLAY_MARKER) -> bool:
+    """Return True only if an ffmpeg process spawned by LinuxPlay is running."""
+    if IS_WINDOWS:
+        try:
+            out = subprocess.check_output(
+                ["powershell", "-NoProfile", "-Command",
+                 "Get-CimInstance Win32_Process -Filter \"Name='ffmpeg.exe'\" | "
+                 "Select-Object -Expand CommandLine"],
+                stderr=subprocess.DEVNULL, universal_newlines=True
+            )
+            for line in out.splitlines():
+                if marker in line:
+                    return True
+        except Exception:
+            pass
+        return False
+    else:
+        try:
+            out = subprocess.check_output(["ps", "-eo", "pid,args"], universal_newlines=True)
+            for line in out.splitlines():
+                if "ffmpeg" in line and marker in line:
+                    return True
+        except Exception:
+            pass
         return False
 
 class HostTab(QWidget):
@@ -232,7 +250,9 @@ class HostTab(QWidget):
         self.hwencCombo = QComboBox()
 
         self.framerateCombo = QComboBox(); self.framerateCombo.addItems(["24","30","45","60","75","90","120","144","240"])
-        self.bitrateCombo  = QComboBox(); self.bitrateCombo.addItems(["250k","500k","1M","2M","4M","8M","12M","16M","20M","32M"])
+        self.bitrateCombo = QComboBox(); self.bitrateCombo.addItems([
+            "0","100k","200k","300k","400k","500k","750k","1M","1.5M","2M","3M","4M","5M","6M","8M","10M","12M","15M","20M","25M","30M","40M","50M","60M","80M","100M"
+        ])
         self.audioCombo    = QComboBox(); self.audioCombo.addItems(["enable","disable"])
         self.adaptiveCheck = QCheckBox("Enable Adaptive Bitrate")
         self.displayCombo  = QComboBox(); self.displayCombo.addItems([":0",":1",":2"])
@@ -241,7 +261,7 @@ class HostTab(QWidget):
              "llhq","p1","p2","p3","p4","p5","p6","p7"]
         )
         self.gopCombo      = QComboBox(); self.gopCombo.addItems(["5","10","15","20","30","45","60","90","120"])
-        self.qpCombo       = QComboBox(); self.qpCombo.addItems(["None","10","15","20","23","28","30","35","40","45","50"])
+        self.qpCombo       = QComboBox(); self.qpCombo.addItems(["None","5","10","15","18","20","23","25","28","30","32","35","38","40","42","45","48","50","55","60"])
         self.tuneCombo     = QComboBox(); self.tuneCombo.addItems(["None","zerolatency","film","animation","grain","psnr","ssim","fastdecode"])
         self.pixFmtCombo   = QComboBox(); self.pixFmtCombo.addItems(["yuv420p","nv12","yuv422p","yuv444p"])
         self.debugCheck    = QCheckBox("Enable Debug")
@@ -252,6 +272,11 @@ class HostTab(QWidget):
                 self.captureHint.setText("Capture: ddagrab (DXGI) available")
             else:
                 self.captureHint.setText("Capture: gdigrab (GDI) fallback")
+        elif IS_LINUX:
+            if ffmpeg_has_device("kmsgrab"):
+                self.captureHint.setText("Capture: kmsgrab available (requires CAP_SYS_ADMIN; cursor not shown). Fallback: x11grab.")
+            else:
+                self.captureHint.setText("Capture: x11grab (kmsgrab not detected).")
 
         if IS_WINDOWS:
             self.displayCombo.setEnabled(False)
@@ -262,15 +287,24 @@ class HostTab(QWidget):
         form_layout.addRow("Bitrate:", self.bitrateCombo)
         form_layout.addRow("Audio:", self.audioCombo)
         form_layout.addRow("Adaptive:", self.adaptiveCheck)
-        form_layout.addRow("X Display (Linux):", self.displayCombo)
+
+        if IS_LINUX:
+            self.linuxCaptureCombo = QComboBox()
+            self.linuxCaptureCombo.addItem("auto", userData="auto")
+            self.linuxCaptureCombo.addItem("kmsgrab", userData="kmsgrab")
+            self.linuxCaptureCombo.addItem("x11grab", userData="x11grab")
+            form_layout.addRow("Linux Capture:", self.linuxCaptureCombo)
+            form_layout.addRow("X Display (fallback):", self.displayCombo)
+        else:
+            form_layout.addRow("X Display (Linux):", self.displayCombo)
+
         form_layout.addRow("Preset:", self.presetCombo)
         form_layout.addRow("GOP:", self.gopCombo)
         form_layout.addRow("QP:", self.qpCombo)
         form_layout.addRow("Tune:", self.tuneCombo)
         form_layout.addRow("Pixel Format:", self.pixFmtCombo)
         form_layout.addRow("Debug:", self.debugCheck)
-        if IS_WINDOWS:
-            form_layout.addRow("Capture:", self.captureHint)
+        form_layout.addRow("Capture:", self.captureHint)
 
         form_group.setLayout(form_layout)
         main_layout.addWidget(form_group)
@@ -285,7 +319,6 @@ class HostTab(QWidget):
         self.statusLabel = QLabel("Ready")
         self.statusLabel.setStyleSheet("color: #bbb")
         main_layout.addWidget(self.statusLabel)
-
 
         main_layout.addStretch()
         self.setLayout(main_layout)
@@ -434,7 +467,7 @@ class HostTab(QWidget):
 
     def _update_buttons(self):
         running_host = _proc_is_running(self.host_process)
-        running_ffmpeg = _ffmpeg_running_anywhere()
+        running_ffmpeg = _ffmpeg_running_for_us()
 
         can_start = not (running_host or running_ffmpeg)
         self.startButton.setEnabled(can_start)
@@ -443,8 +476,8 @@ class HostTab(QWidget):
             self.startButton.setToolTip("Disabled: Host is running.")
             self.statusLabel.setText("Host running…")
         elif running_ffmpeg:
-            self.startButton.setToolTip("Disabled: ffmpeg is still running.")
-            self.statusLabel.setText("ffmpeg still running…")
+            self.startButton.setToolTip("Disabled: LinuxPlay FFmpeg still running.")
+            self.statusLabel.setText("LinuxPlay ffmpeg still running…")
         else:
             self.startButton.setToolTip("Start the host.")
             self.statusLabel.setText("Ready")
@@ -489,6 +522,14 @@ class HostTab(QWidget):
 
         self._save_current()
 
+        env = os.environ.copy()
+        env["LINUXPLAY_MARKER"] = LINUXPLAY_MARKER
+        env["LINUXPLAY_SID"] = env.get("LINUXPLAY_SID") or str(uuid.uuid4())
+        if IS_LINUX:
+            cap_mode = getattr(self, "linuxCaptureCombo", None)
+            cap_val = cap_mode.currentData() if cap_mode else "auto"
+            env["LINUXPLAY_CAPTURE"] = cap_val or "auto"
+
         try:
             if IS_WINDOWS:
                 self.host_process = subprocess.Popen(
@@ -498,14 +539,16 @@ class HostTab(QWidget):
                         getattr(subprocess, "CREATE_NO_WINDOW", 0)
                     ),
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
+                    stderr=subprocess.DEVNULL,
+                    env=env
                 )
             else:
                 self.host_process = subprocess.Popen(
                     cmd,
                     preexec_fn=os.setsid,
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
+                    stderr=subprocess.DEVNULL,
+                    env=env
                 )
         except Exception as e:
             logging.error("Failed to start host: %s", e)
@@ -551,7 +594,9 @@ class HostTab(QWidget):
             "qp": self.qpCombo.currentText(),
             "tune": self.tuneCombo.currentText(),
             "pix_fmt": self.pixFmtCombo.currentText(),
-            "wg": bool(getattr(self, "useWG", None) and self.useWG.isChecked())
+            "wg": bool(getattr(self, "useWG", None) and self.useWG.isChecked()),
+            "capture": (getattr(self, "linuxCaptureCombo", None).currentData()
+                        if IS_LINUX and hasattr(self, "linuxCaptureCombo") else "auto")
         }
         save_cfg(data)
 
@@ -581,6 +626,12 @@ class HostTab(QWidget):
         set_combo(self.pixFmtCombo, cfg.get("pix_fmt"))
         if IS_LINUX and hasattr(self, "useWG"):
             self.useWG.setChecked(bool(cfg.get("wg", False)))
+        if IS_LINUX and hasattr(self, "linuxCaptureCombo"):
+            cap_val = cfg.get("capture", "auto")
+            for i in range(self.linuxCaptureCombo.count()):
+                if self.linuxCaptureCombo.itemData(i) == cap_val:
+                    self.linuxCaptureCombo.setCurrentIndex(i)
+                    break
 
 class ClientTab(QWidget):
     def __init__(self, parent=None):
@@ -702,11 +753,11 @@ class HelpTab(QWidget):
         <p>For WAN use, enable <b>WireGuard</b> on Linux hosts and connect clients to the tunnel IP. On LAN you can skip it.</p>
         <h2>Notes</h2>
         <ul>
-          <li>Linux capture uses X11 (x11grab). Wayland is not supported.</li>
+          <li>Linux capture can use <b>kmsgrab</b> (KMS/DRM) or <b>x11grab</b>. kmsgrab generally requires <code>CAP_SYS_ADMIN</code> on the ffmpeg binary (e.g. <code>sudo setcap cap_sys_admin+ep $(which ffmpeg)</code>) and does not draw the cursor.</li>
           <li>Windows capture prefers DXGI (ddagrab) if available, otherwise GDI (gdigrab).</li>
           <li>Multi-monitor is supported; choose a monitor index or "all" on the client.</li>
           <li>For lowest latency try: h.264, preset llhq (or ultrafast), GOP 10, audio disabled, and keep bitrates modest.</li>
-          <li>Use the new <b>Encoder Backend</b> to select NVENC/QSV/AMF/VAAPI/CPU explicitly.</li>
+          <li>Use the <b>Encoder Backend</b> to select NVENC/QSV/AMF/VAAPI/CPU explicitly.</li>
           <li>The Host opens in its own window; use that window's Stop button (or close it) to end the session.</li>
         </ul>
         """
@@ -730,7 +781,7 @@ class StartWindow(QWidget):
         main_layout = QVBoxLayout()
         main_layout.addWidget(self.tabs)
         self.setLayout(main_layout)
-
+        
     def closeEvent(self, event):
         event.accept()
 
