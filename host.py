@@ -39,6 +39,17 @@ DEFAULT_RES = "1920x1080"
 IS_WINDOWS = py_platform.system() == "Windows"
 IS_LINUX   = py_platform.system() == "Linux"
 
+def _marker_value() -> str:
+    marker = os.environ.get("LINUXPLAY_MARKER", "LinuxPlayHost")
+    sid = os.environ.get("LINUXPLAY_SID", "")
+    return f"{marker}:{sid}" if sid else marker
+
+def _ffmpeg_base_cmd() -> list:
+    return ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+
+def _marker_opt() -> list:
+    return ["-metadata", f"comment={_marker_value()}"]
+
 try:
     from pynput.mouse import Controller as MouseCtl, Button
     from pynput.keyboard import Controller as KeyCtl, Key
@@ -233,7 +244,8 @@ def _detect_monitors_linux():
     try:
         out = subprocess.check_output(["xrandr", "--listmonitors"], universal_newlines=True)
     except Exception as e:
-        logging.error("xrandr failed: %s", e); return []
+        logging.warning("xrandr failed (%s); using default single monitor.", e)
+        return []
     mons = []
     for line in out.strip().splitlines()[1:]:
         parts = line.split()
@@ -426,6 +438,13 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
 
     return extra_filters, enc
 
+def _pick_kms_device():
+    for cand in ("card0","card1","card2"):
+        p = f"/dev/dri/{cand}"
+        if os.path.exists(p):
+            return p
+    return "/dev/dri/card0"
+
 def build_video_cmd(args, bitrate, monitor_info, video_port):
     w, h, ox, oy = monitor_info
     preset = args.preset.strip().lower() if args.preset else ""
@@ -438,7 +457,7 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
             windows_demux = "ddagrab" if (ffmpeg_has_demuxer("ddagrab") or ffmpeg_has_device("ddagrab")) else "gdigrab"
 
         input_side = [
-            "ffmpeg","-hide_banner","-loglevel","error",
+            *(_ffmpeg_base_cmd()),
             *(_input_ll_flags()),
             "-f", windows_demux,
             "-framerate", args.framerate,
@@ -447,29 +466,84 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
             "-draw_mouse","0",
             "-i","desktop",
         ]
+
+        extra_filters, encode = _pick_encoder_args(
+            codec=args.encoder, hwenc=args.hwenc, preset=preset,
+            gop=gop, qp=qp, tune=tune, bitrate=bitrate, pix_fmt=pix_fmt
+        )
+
     else:
         disp = args.display
         if "." not in disp:
             disp = f"{disp}.0"
-        input_arg = f"{disp}+{ox},{oy}"
-        input_side = [
-            "ffmpeg","-hide_banner","-loglevel","error",
-            *(_input_ll_flags()),
-            "-f","x11grab","-draw_mouse","0",
-            "-framerate", args.framerate, "-video_size", f"{w}x{h}",
-            "-i", input_arg,
-        ]
+
+        capture_pref = (os.environ.get("LINUXPLAY_CAPTURE","auto") or "auto").lower()
+        kms_available = ffmpeg_has_device("kmsgrab")
+        vaapi_available = has_vaapi()
+
+        def _vaapi_possible_for_codec():
+            enc = (args.encoder or "h.264").lower()
+            return (
+                (enc == "h.264" and ffmpeg_has_encoder("h264_vaapi")) or
+                (enc == "h.265" and ffmpeg_has_encoder("hevc_vaapi")) or
+                (enc == "av1"   and ffmpeg_has_encoder("av1_vaapi"))
+            )
+
+        use_kms = False
+        if capture_pref == "kmsgrab":
+            use_kms = True
+        elif capture_pref == "auto" and kms_available:
+            if (args.hwenc in ("auto","vaapi") and vaapi_available and _vaapi_possible_for_codec()) or (args.hwenc == "cpu"):
+                use_kms = True
+
+        if use_kms:
+            kms_dev = os.environ.get("LINUXPLAY_KMS_DEVICE", _pick_kms_device())
+            logging.info("Linux capture: kmsgrab (%s) selected (pref=%s).", kms_dev, capture_pref)
+
+            input_side = [
+                *(_ffmpeg_base_cmd()),
+                *(_input_ll_flags()),
+                "-f","kmsgrab",
+                "-framerate", args.framerate,
+                "-device", kms_dev,
+                "-i","-",
+            ]
+
+            _k_extra_filters, encode = _pick_encoder_args(
+                codec=args.encoder, hwenc=args.hwenc, preset=preset,
+                gop=gop, qp=qp, tune=tune, bitrate=bitrate, pix_fmt=pix_fmt
+            )
+
+            if any(x in encode for x in ("h264_vaapi","hevc_vaapi","av1_vaapi")):
+                extra_filters = ["-vf", f"hwmap=derive_device=vaapi,scale_vaapi=w={w}:h={h}:format=nv12",
+                                 "-vaapi_device","/dev/dri/renderD128"]
+            elif args.hwenc == "cpu":
+                extra_filters = ["-vf", "hwdownload,format=bgr0"]
+            else:
+                logging.warning("kmsgrab requested but encoder backend '%s' not supported with kmsgrab; using x11grab.", args.hwenc)
+                use_kms = False
+
+        if not use_kms:
+            logging.info("Linux capture: x11grab selected (pref=%s, kms=%s).", capture_pref, kms_available)
+            input_arg = f"{disp}+{ox},{oy}"
+            input_side = [
+                *(_ffmpeg_base_cmd()),
+                *(_input_ll_flags()),
+                "-f","x11grab","-draw_mouse","0",
+                "-framerate", args.framerate, "-video_size", f"{w}x{h}",
+                "-i", input_arg,
+            ]
+            extra_filters, encode = _pick_encoder_args(
+                codec=args.encoder, hwenc=args.hwenc, preset=preset,
+                gop=gop, qp=qp, tune=tune, bitrate=bitrate, pix_fmt=pix_fmt
+            )
 
     output_side = _output_sync_flags()
-
-    extra_filters, encode = _pick_encoder_args(
-        codec=args.encoder, hwenc=args.hwenc, preset=preset,
-        gop=gop, qp=qp, tune=tune, bitrate=bitrate, pix_fmt=pix_fmt
-    )
 
     out = [
         *(_mpegts_ll_mux_flags()),
         "-f","mpegts",
+        *_marker_opt(),
         f"udp://{host_state.client_ip}:{video_port}?pkt_size=1316&buffer_size=2048&overrun_nonfatal=1&max_delay=0"
     ]
     return input_side + output_side + (extra_filters or []) + encode + out
@@ -508,7 +582,7 @@ def build_audio_cmd():
             logging.error("No dshow audio device found; audio disabled.")
             return None
         input_side = [
-            "ffmpeg","-hide_banner","-loglevel","error",
+            *(_ffmpeg_base_cmd()),
             *(_input_ll_flags()),
             "-f","dshow","-i", f"audio={pick}",
         ]
@@ -526,7 +600,7 @@ def build_audio_cmd():
         if not mon:
             mon = "default.monitor"
         input_side = [
-            "ffmpeg","-hide_banner","-loglevel","error",
+            *(_ffmpeg_base_cmd()),
             *(_input_ll_flags()),
             "-f","pulse","-i", mon,
         ]
@@ -538,6 +612,7 @@ def build_audio_cmd():
     ]
     out = [
         *(_mpegts_ll_mux_flags()),
+        *_marker_opt(),
         "-f","mpegts", f"udp://{host_state.client_ip}:{UDP_AUDIO_PORT}?pkt_size=1316&buffer_size=512&overrun_nonfatal=1&max_delay=0"
     ]
     return input_side + output_side + encode + out
@@ -834,6 +909,8 @@ def core_main(args, use_signals=True) -> int:
                 signal.signal(_sig, _signal_handler)
         except Exception:
             pass
+
+    logging.debug("FFmpeg marker in use: %s", _marker_value())
 
     host_state.current_bitrate = args.bitrate
     host_state.monitors = detect_monitors() or [(1920,1080,0,0)]
