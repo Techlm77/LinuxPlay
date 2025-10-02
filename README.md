@@ -129,6 +129,101 @@ The GUI can run helper scripts to bring up a WireGuard interface for WAN use and
 
 > These scripts are optional and not bundled; adapt them to your environment.
 
+### `linuxplay-wg-setup-host.sh`
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# deps: wg, wg-quick, qrencode, iproute2
+WG_IF="linuxplay0"
+WG_DIR="/etc/wireguard"
+CONF="${WG_DIR}/${WG_IF}.conf"
+PEER_QR="/tmp/linuxplay_wg_peer.png"
+INFO="/tmp/linuxplay_wg_info.json"
+
+# simple /24
+HOST_IP="10.13.13.1/24"
+PEER_IP="10.13.13.2/32"
+PORT="51820"
+
+# keys
+umask 077
+mkdir -p "$WG_DIR"
+
+# host keys (generate if missing)
+if [ ! -f "${WG_DIR}/${WG_IF}_hostkey" ]; then
+  wg genkey | tee "${WG_DIR}/${WG_IF}_hostkey" >/dev/null
+fi
+wg pubkey < "${WG_DIR}/${WG_IF}_hostkey" > "${WG_DIR}/${WG_IF}_hostpub"
+
+host_priv=$(cat "${WG_DIR}/${WG_IF}_hostkey")
+host_pub=$(cat "${WG_DIR}/${WG_IF}_hostpub")
+
+# peer keys (one peer for quick start)
+wg genkey | tee /tmp/linuxplay_peerkey >/dev/null
+wg pubkey < /tmp/linuxplay_peerkey > /tmp/linuxplay_peerpub
+peer_priv=$(cat /tmp/linuxplay_peerkey)
+peer_pub=$(cat /tmp/linuxplay_peerpub)
+rm -f /tmp/linuxplay_peerkey /tmp/linuxplay_peerpub
+
+# write host conf
+cat > "$CONF" <<EOF
+[Interface]
+PrivateKey = ${host_priv}
+Address = ${HOST_IP}
+ListenPort = ${PORT}
+SaveConfig = true
+
+[Peer]
+PublicKey = ${peer_pub}
+AllowedIPs = ${PEER_IP}
+EOF
+
+chmod 600 "$CONF"
+
+# bring up
+wg-quick down "$WG_IF" 2>/dev/null || true
+wg-quick up "$WG_IF"
+
+# peer config (for client)
+HOST_IP_ONLY="${HOST_IP%/*}"
+cat > /tmp/linuxplay_peer.conf <<EOF
+[Interface]
+PrivateKey = ${peer_priv}
+Address = ${PEER_IP}
+
+[Peer]
+PublicKey = ${host_pub}
+AllowedIPs = ${HOST_IP_ONLY}/24
+Endpoint = $(hostname -I | awk '{print $1}'):${PORT}
+PersistentKeepalive = 25
+EOF
+
+# QR for mobile WG client
+qrencode -o "$PEER_QR" < /tmp/linuxplay_peer.conf
+
+# info for GUI
+echo "{\"host_tunnel_ip\":\"${HOST_IP_ONLY}\"}" > "$INFO"
+chmod 644 "$PEER_QR" "$INFO"
+echo "WireGuard ready: ${WG_IF} ${HOST_IP_ONLY}"
+```
+
+### `linuxplay-wg-teardown.sh`
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+WG_IF="linuxplay0"
+wg-quick down "$WG_IF" 2>/dev/null || true
+rm -f /tmp/linuxplay_wg_peer.png /tmp/linuxplay_wg_info.json /tmp/linuxplay_peer.conf
+echo "WireGuard torn down."
+```
+
+**Install the helpers** (optional):
+```bash
+sudo install -m 0755 linuxplay-wg-setup-host.sh /usr/local/bin/linuxplay-wg-setup-host.sh
+sudo install -m 0755 linuxplay-wg-teardown.sh   /usr/local/bin/linuxplay-wg-teardown.sh
+```
+
 ---
 
 ## Capture & Encoder Backends
@@ -136,7 +231,7 @@ The GUI can run helper scripts to bring up a WireGuard interface for WAN use and
 - **Backends:** `auto`, `cpu` (`libx264`/`libx265`/`libaom-av1`), `nvenc`, `qsv`, `amf` (Windows), `vaapi` (Linux).
 - The GUI filters backends to what your FFmpeg actually supports.
 - On Linux `vaapi` requires `/dev/dri/renderD128` access.
-- Auto-selection in `host.py` tries NVENC ? QSV ? AMF/VAAPI ? CPU depending on platform and availability.
+- Auto-selection in `host.py` tries NVENC → QSV → AMF/VAAPI → CPU depending on platform and availability.
 
 ---
 
@@ -247,6 +342,6 @@ Clipboard is bi-directional. Updates are sent over UDP 7002. (Linux requires `py
 
 Useful logs:
 - Start Host with **Debug** checked (or `--debug`) to see encoder selection, capture mode, and ABR events.
-- Client **--debug** logs decoder opts and any fallback from HW ? SW.
+- Client **--debug** logs decoder opts and any fallback from HW → SW.
 
 Contributions welcome. If you add a new capture/encoder path, include a short note in **Help** tab text in `start.py`.
