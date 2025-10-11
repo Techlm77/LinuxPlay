@@ -34,6 +34,7 @@ CONTROL_PORT = 7000
 TCP_HANDSHAKE_PORT = 7001
 UDP_CLIPBOARD_PORT = 7002
 UDP_AUDIO_PORT = 6001
+UDP_HEARTBEAT_PORT = 7004
 
 IS_WINDOWS = py_platform.system() == "Windows"
 IS_LINUX   = py_platform.system() == "Linux"
@@ -69,6 +70,47 @@ def choose_auto_hwaccel():
             if cand in accels:
                 return cand
         return "cpu"
+
+
+def detect_network_mode(host_ip: str) -> str:
+    try:
+        if IS_LINUX:
+            import subprocess, re, os
+            out = subprocess.check_output(["ip", "route", "get", host_ip], universal_newlines=True, stderr=subprocess.STDOUT)
+            m = re.search(r"\bdev\s+(\S+)", out)
+            iface = m.group(1) if m else ""
+            if iface and os.path.exists(f"/sys/class/net/{iface}/wireless"):
+                return "wifi"
+            if iface.startswith("wl"):
+                return "wifi"
+            return "lan"
+        elif IS_WINDOWS:
+            import subprocess
+            ps = ["powershell", "-NoProfile", "-Command",
+                  "(Get-NetRoute -DestinationPrefix %s/32 | Sort-Object -Property RouteMetric | Select-Object -First 1).InterfaceAlias" % host_ip]
+            try:
+                alias = subprocess.check_output(ps, universal_newlines=True, stderr=subprocess.DEVNULL).strip()
+            except Exception:
+                alias = ""
+            if alias:
+                ps2 = ["powershell", "-NoProfile", "-Command",
+                       "($a = Get-NetAdapter -Name '%s' -ErrorAction SilentlyContinue) | Select-Object -Expand NdisPhysicalMedium" % alias.replace("'", "''")]
+                try:
+                    medium = subprocess.check_output(ps2, universal_newlines=True, stderr=subprocess.DEVNULL).strip().lower()
+                    if "wireless" in medium or "802.11" in medium:
+                        return "wifi"
+                except Exception:
+                    pass
+            ps3 = ["powershell", "-NoProfile", "-Command", "(Get-NetAdapter -Physical | ? {$_.Status -eq 'Up'} | ? {$_.NdisPhysicalMedium -like '*Wireless*'}).Name | Select-Object -First 1"]
+            try:
+                any_wifi = subprocess.check_output(ps3, universal_newlines=True, stderr=subprocess.DEVNULL).strip()
+                if any_wifi: return "wifi"
+            except Exception:
+                pass
+            return "lan"
+    except Exception:
+        return "lan"
+
 
 def tcp_handshake_client(host_ip):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -336,7 +378,7 @@ class VideoWidgetGL(QOpenGLWidget):
         return None
 
 class MainWindow(QMainWindow):
-    def __init__(self, decoder_opts, rwidth, rheight, host_ip, udp_port, offset_x, offset_y, parent=None):
+    def __init__(self, decoder_opts, rwidth, rheight, host_ip, udp_port, offset_x, offset_y, net_mode='lan', parent=None):
         super().__init__(parent)
         self.setWindowTitle("LinuxPlay")
         self.texture_width = rwidth
@@ -348,13 +390,18 @@ class MainWindow(QMainWindow):
         self.control_addr = (host_ip, CONTROL_PORT)
         self.control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.control_sock.setblocking(False)
+        
+        try:
+            self.control_sock.sendto(f"NET {net_mode}".encode("utf-8"), self.control_addr)
+        except Exception as e:
+            logging.debug(f"NET announce failed: {e}")
 
         self.video_widget = VideoWidgetGL(self.send_control, rwidth, rheight, offset_x, offset_y, host_ip)
         self.setCentralWidget(self.video_widget)
         self.video_widget.setFocus()
         self.setAcceptDrops(True)
 
-        video_url = f"udp://0.0.0.0:{udp_port}?fifo_size=50000&buffer_size=262144&max_delay=0&overrun_nonfatal=1"
+        video_url = (f"udp://0.0.0.0:{udp_port}?fifo_size=1000000&buffer_size=8388608&max_delay=200000&overrun_nonfatal=1" if net_mode == "wifi" else f"udp://0.0.0.0:{udp_port}?fifo_size=50000&buffer_size=262144&max_delay=0&overrun_nonfatal=1")
         logging.debug("Decoder options: %s", decoder_opts)
 
         self.decoder_thread = DecoderThread(video_url, decoder_opts)
@@ -457,6 +504,26 @@ def clipboard_listener_client(_host_ip):
                 CLIPBOARD_INBOX.put(new_content)
         except Exception as e:
             logging.error("Clipboard client error: %s", e)
+            
+def heartbeat_responder_client(host_ip):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("", UDP_HEARTBEAT_PORT))
+        logging.info("Heartbeat responder listening on UDP %d", UDP_HEARTBEAT_PORT)
+    except Exception as e:
+        logging.error("Heartbeat responder bind failed: %s", e)
+        return
+    while True:
+        try:
+            data, addr = sock.recvfrom(1024)
+            if data.startswith(b"PING"):
+                try:
+                    sock.sendto(b"PONG", (host_ip, UDP_HEARTBEAT_PORT))
+                except Exception as e:
+                    logging.debug("Heartbeat send error: %s", e)
+        except Exception as e:
+            logging.debug("Heartbeat recv error: %s", e)
 
 def main():
     p = argparse.ArgumentParser(description="LinuxPlay Client (Linux/Windows)")
@@ -467,6 +534,7 @@ def main():
     p.add_argument("--hwaccel", choices=["auto","cpu","cuda","qsv","d3d11va","dxva2","vaapi"], default="auto",
                    help="Force a specific hardware decoder (Auto picks best for your OS/GPU).")
     p.add_argument("--debug", action="store_true")
+    p.add_argument("--net", choices=["auto","lan","wifi"], default="auto")
     args = p.parse_args()
 
     fmt = QSurfaceFormat()
@@ -480,10 +548,19 @@ def main():
                         datefmt="%H:%M:%S")
 
     ok, host_info = tcp_handshake_client(args.host_ip)
+    threading.Thread(target=heartbeat_responder_client, args=(args.host_ip,), daemon=True).start()
     if not ok:
         QMessageBox.critical(None, "Handshake Failed", "Could not negotiate with host.")
         sys.exit(1)
     host_encoder, monitor_info_str = host_info
+
+    net_mode = args.net
+    if net_mode == "auto":
+        try:
+            net_mode = detect_network_mode(args.host_ip)
+        except Exception:
+            net_mode = "lan"
+    logging.info(f"Network mode: {net_mode}")
 
     try:
         monitors = []
@@ -524,9 +601,9 @@ def main():
     if args.audio == "enable":
         audio_cmd = [
             "ffplay","-hide_banner","-loglevel","error",
-            "-fflags","nobuffer","-flags","low_delay",
+            *([] if net_mode == "wifi" else ["-fflags","nobuffer"]), "-flags","low_delay",
             "-autoexit","-nodisp",
-            "-i", f"udp://@0.0.0.0:{UDP_AUDIO_PORT}?fifo_size=40000&max_delay=0&pkt_size=1316&overrun_nonfatal=1"
+            "-i", (f"udp://@0.0.0.0:{UDP_AUDIO_PORT}?fifo_size=800000&buffer_size=4194304&max_delay=150000&pkt_size=1316&overrun_nonfatal=1" if net_mode == "wifi" else f"udp://@0.0.0.0:{UDP_AUDIO_PORT}?fifo_size=40000&max_delay=0&pkt_size=1316&overrun_nonfatal=1")
         ]
         logging.info("Audio with ffplay…")
         try:
