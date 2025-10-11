@@ -65,7 +65,6 @@ def ffmpeg_supports_demuxer(name: str) -> bool:
         return False
 
 def ffmpeg_has_device(name: str) -> bool:
-    """Check ffmpeg -devices for an input device (e.g., 'kmsgrab', 'ddagrab')."""
     try:
         out = subprocess.check_output(
             ["ffmpeg", "-hide_banner", "-devices"],
@@ -176,7 +175,6 @@ def _proc_is_running(p) -> bool:
         return False
 
 def _ffmpeg_running_for_us(marker: str = LINUXPLAY_MARKER) -> bool:
-    """Return True only if an ffmpeg process spawned by LinuxPlay is running."""
     if IS_WINDOWS:
         try:
             out = subprocess.check_output(
@@ -460,7 +458,6 @@ class HostTab(QWidget):
         self.hwencCombo.setCurrentIndex(idx)
 
     def _poll_process_state(self):
-        """Run every second: detect host process exit and ffmpeg presence, then update Start button."""
         if self.host_process is not None and self.host_process.poll() is not None:
             self.host_process = None
         self._update_buttons()
