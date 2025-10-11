@@ -32,6 +32,7 @@ UDP_CONTROL_PORT = 7000
 UDP_CLIPBOARD_PORT = 7002
 TCP_HANDSHAKE_PORT = 7001
 FILE_UPLOAD_PORT = 7003
+UDP_HEARTBEAT_PORT = 7004
 DEFAULT_FPS = "30"
 DEFAULT_BITRATE = "8M"
 DEFAULT_RES = "1920x1080"
@@ -79,12 +80,16 @@ class HostState:
         self.control_sock = None
         self.clipboard_listener_sock = None
         self.file_upload_sock = None
+        self.heartbeat_sock = None
+        self.last_pong_ts = 0.0
         self.client_ip = None
         self.monitors = []
         self.shutdown_lock = threading.Lock()
         self.shutdown_reason = None
+        self.net_mode = "lan"
 
 host_state = HostState()
+HOST_ARGS = None
 
 def trigger_shutdown(reason: str):
     with host_state.shutdown_lock:
@@ -189,6 +194,23 @@ def stop_all():
             if s: s.close()
         except Exception:
             pass
+
+def stop_streams_only():
+    with host_state.video_thread_lock:
+        for thread in host_state.video_threads:
+            try:
+                thread.stop()
+                thread.join(timeout=2)
+            except Exception:
+                pass
+        host_state.video_threads.clear()
+    if host_state.audio_thread:
+        try:
+            host_state.audio_thread.stop()
+            host_state.audio_thread.join(timeout=2)
+        except Exception:
+            pass
+        host_state.audio_thread = None
 
 def cleanup():
     stop_all()
@@ -446,6 +468,8 @@ def _pick_kms_device():
     return "/dev/dri/card0"
 
 def build_video_cmd(args, bitrate, monitor_info, video_port):
+    udp_buf = "8388608" if getattr(host_state, "net_mode", "lan") == "wifi" else "2048"
+    udp_delay = "200000" if getattr(host_state, "net_mode", "lan") == "wifi" else "0"
     w, h, ox, oy = monitor_info
     preset = args.preset.strip().lower() if args.preset else ""
     gop, qp, tune, pix_fmt = args.gop, args.qp, args.tune, args.pix_fmt
@@ -564,6 +588,8 @@ def _list_dshow_audio():
     return devs
 
 def build_audio_cmd():
+    aud_buf = "4194304" if getattr(host_state, "net_mode", "lan") == "wifi" else "512"
+    aud_delay = "150000" if getattr(host_state, "net_mode", "lan") == "wifi" else "0"
     if IS_WINDOWS:
         want = os.environ.get("LINUXPLAY_DSHOW_AUDIO", "").strip()
         devs = _list_dshow_audio()
@@ -687,11 +713,6 @@ NAME_TO_CHAR = {
 }
 
 def _inject_key(action, name):
-    """
-    action: "down" or "up"
-    name:   may be a special name (Escape, F1, Left...), a symbolic name (minus, braceleft),
-            or a single literal character ('-', '_', '{', '£', etc.)
-    """
     if HAVE_PYNPUT:
         k = _key_map.get(name)
         try:
@@ -753,6 +774,20 @@ def control_listener(sock):
             if not msg: continue
             tokens = msg.split()
             cmd = tokens[0] if tokens else ""
+            if cmd.upper() == "NET" and len(tokens) >= 2:
+                mode = tokens[1].strip().lower()
+                if mode in ("wifi","lan"):
+                    old = getattr(host_state, 'net_mode', 'lan')
+                    if mode != old:
+                        logging.info("Network mode switch requested: %s -> %s", old, mode)
+                        host_state.net_mode = mode
+                        try:
+                            stop_streams_only()
+                            if HOST_ARGS:
+                                start_streams_for_current_client(HOST_ARGS)
+                        except Exception as e:
+                            logging.error("Restart after NET failed: %s", e)
+                continue
             if cmd == "MOUSE_MOVE" and len(tokens) == 3:
                 _inject_mouse_move(tokens[1], tokens[2])
             elif cmd == "MOUSE_PRESS" and len(tokens) == 4:
@@ -893,6 +928,70 @@ def adaptive_bitrate_manager(args):
                 host_state.video_threads = new_threads
                 host_state.current_bitrate = new_bitrate
 
+
+def start_streams_for_current_client(args):
+    if not host_state.client_ip:
+        return
+    if host_state.video_threads:
+        return
+    with host_state.video_thread_lock:
+        host_state.video_threads = []
+        for i, mon in enumerate(host_state.monitors):
+            cmd = build_video_cmd(args, host_state.current_bitrate, mon, UDP_VIDEO_PORT + i)
+            logging.info("Starting Video %d: %s", i, " ".join(cmd))
+            t = StreamThread(cmd, f"Video {i}")
+            t.start(); host_state.video_threads.append(t)
+    if args.audio == "enable":
+        ac = build_audio_cmd()
+        if ac:
+            logging.info("Starting Audio: %s", " ".join(ac))
+            host_state.audio_thread = StreamThread(ac, "Audio")
+            host_state.audio_thread.start()
+
+def heartbeat_manager(args):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("", UDP_HEARTBEAT_PORT))
+        host_state.heartbeat_sock = s
+    except Exception as e:
+        trigger_shutdown(f"Heartbeat socket error: {e}")
+        return
+    last_ping = 0.0
+    host_state.last_pong_ts = time.time()
+    while not host_state.should_terminate:
+        now = time.time()
+        if host_state.client_ip:
+            if now - last_ping >= 5.0:
+                try:
+                    s.sendto(b"PING", (host_state.client_ip, UDP_HEARTBEAT_PORT))
+                except Exception as e:
+                    logging.warning("Heartbeat send error: %s", e)
+                last_ping = now
+            s.settimeout(0.5)
+            try:
+                data, addr = s.recvfrom(1024)
+                if data.startswith(b"PONG") and host_state.client_ip and addr[0] == host_state.client_ip:
+                    host_state.last_pong_ts = now
+            except socket.timeout:
+                pass
+            except Exception as e:
+                logging.debug("Heartbeat recv error: %s", e)
+            if now - host_state.last_pong_ts > 10.0:
+                logging.warning("Heartbeat timeout from %s — stopping streams and waiting for reconnection.", host_state.client_ip)
+                stop_streams_only()
+                host_state.client_ip = None
+                set_status("Client disconnected — waiting for connection…")
+                host_state.last_pong_ts = now
+        else:
+            time.sleep(0.5)
+
+def session_manager(args):
+    while not host_state.should_terminate:
+        if host_state.client_ip and not host_state.video_threads:
+            set_status(f"Client: {host_state.client_ip}")
+            start_streams_for_current_client(args)
+        time.sleep(0.2)
 def _signal_handler(signum, frame):
     logging.info("Signal %s received, shutting down…", signum)
     trigger_shutdown(f"Signal {signum}")
@@ -914,6 +1013,9 @@ def core_main(args, use_signals=True) -> int:
 
     host_state.current_bitrate = args.bitrate
     host_state.monitors = detect_monitors() or [(1920,1080,0,0)]
+
+    global HOST_ARGS
+    HOST_ARGS = args
 
     try:
         host_state.handshake_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -946,37 +1048,10 @@ def core_main(args, use_signals=True) -> int:
     threading.Thread(target=file_upload_listener, daemon=True).start()
 
     logging.info("Waiting for client handshake…")
-    while host_state.client_ip is None and not host_state.should_terminate:
-        time.sleep(0.1)
-
-    if host_state.should_terminate:
-        reason = host_state.shutdown_reason or "Unknown error"
-        logging.critical("Exiting before start: %s", reason)
-        stop_all()
-        return 1
-
-    logging.info("Client: %s", host_state.client_ip)
-
-    with host_state.video_thread_lock:
-        host_state.video_threads = []
-        for i, mon in enumerate(host_state.monitors):
-            cmd = build_video_cmd(args, host_state.current_bitrate, mon, UDP_VIDEO_PORT + i)
-            logging.info("Starting Video %d: %s", i, " ".join(cmd))
-            t = StreamThread(cmd, f"Video {i}")
-            t.start(); host_state.video_threads.append(t)
-
-    if args.audio == "enable":
-        ac = build_audio_cmd()
-        if ac:
-            logging.info("Starting Audio: %s", " ".join(ac))
-            host_state.audio_thread = StreamThread(ac, "Audio")
-            host_state.audio_thread.start()
-
-    if args.adaptive:
-        threading.Thread(target=adaptive_bitrate_manager, args=(args,), daemon=True).start()
-
+    
+    threading.Thread(target=heartbeat_manager, args=(args,), daemon=True).start()
+    threading.Thread(target=session_manager, args=(args,), daemon=True).start()
     threading.Thread(target=control_listener, args=(host_state.control_sock,), daemon=True).start()
-
     logging.info("Host running. Close window or Ctrl+C to quit.")
     try:
         while not host_state.should_terminate:
