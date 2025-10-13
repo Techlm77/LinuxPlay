@@ -71,6 +71,12 @@ def choose_auto_hwaccel():
                 return cand
         return "cpu"
 
+def _best_ts_pkt_size(mtu_guess: int, ipv6: bool) -> int:
+    if mtu_guess <= 0:
+        mtu_guess = 1500
+    overhead = 48 if ipv6 else 28
+    max_payload = max(512, mtu_guess - overhead)
+    return max(188, (max_payload // 188) * 188)
 
 def detect_network_mode(host_ip: str) -> str:
     try:
@@ -111,7 +117,6 @@ def detect_network_mode(host_ip: str) -> str:
     except Exception:
         return "lan"
 
-
 def tcp_handshake_client(host_ip):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -138,18 +143,19 @@ class DecoderThread(QThread):
         super().__init__()
         self.input_url = input_url
         self.decoder_opts = dict(decoder_opts) if decoder_opts else {}
-        self.decoder_opts.setdefault("probesize", "32")
+        self.decoder_opts.setdefault("probesize", "64k")
         self.decoder_opts.setdefault("analyzeduration", "0")
+        self.decoder_opts.setdefault("scan_all_pmts", "1")
         self.decoder_opts.setdefault("fflags", "nobuffer")
         self.decoder_opts.setdefault("flags", "low_delay")
         self.decoder_opts.setdefault("reorder_queue_size", "0")
-        self.decoder_opts.setdefault("rtbufsize", "256k")
+        self.decoder_opts.setdefault("rtbufsize", "8M")
         self._running = True
         self._sw_fallback_done = False
 
     def _open_container(self):
         logging.debug("Opening stream with opts: %s", self.decoder_opts)
-        return av.open(self.input_url, options=self.decoder_opts)
+        return av.open(self.input_url, format="mpegts", options=self.decoder_opts)
 
     def run(self):
         while self._running:
@@ -400,8 +406,13 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.video_widget)
         self.video_widget.setFocus()
         self.setAcceptDrops(True)
+        mtu_guess = int(os.environ.get("LINUXPLAY_MTU", "1500"))
+        ipv6 = False
+        pkt = _best_ts_pkt_size(mtu_guess, ipv6)
 
-        video_url = (f"udp://0.0.0.0:{udp_port}?fifo_size=1000000&buffer_size=8388608&max_delay=200000&overrun_nonfatal=1" if net_mode == "wifi" else f"udp://0.0.0.0:{udp_port}?fifo_size=50000&buffer_size=262144&max_delay=0&overrun_nonfatal=1")
+        video_url = (f"udp://@0.0.0.0:{udp_port}?pkt_size={pkt}&reuse=1&buffer_size=8388608&fifo_size=1000000&overrun_nonfatal=1&max_delay=200000"
+                     if net_mode == "wifi"
+                     else f"udp://@0.0.0.0:{udp_port}?pkt_size={pkt}&reuse=1&buffer_size=4194304&fifo_size=400000&overrun_nonfatal=1&max_delay=50000")
         logging.debug("Decoder options: %s", decoder_opts)
 
         self.decoder_thread = DecoderThread(video_url, decoder_opts)
@@ -615,7 +626,7 @@ def main():
         windows = []
         for i, mon in enumerate(monitors):
             w,h,ox,oy = mon
-            win = MainWindow(decoder_opts, w, h, args.host_ip, DEFAULT_UDP_PORT + i, ox, oy)
+            win = MainWindow(decoder_opts, w, h, args.host_ip, DEFAULT_UDP_PORT + i, ox, oy, net_mode)
             win.setWindowTitle(f"LinuxPlay - Monitor {i}")
             win.show()
             windows.append(win)
@@ -628,7 +639,7 @@ def main():
         if mon_index < 0 or mon_index >= len(monitors):
             mon_index = 0
         w,h,ox,oy = monitors[mon_index]
-        win = MainWindow(decoder_opts, w, h, args.host_ip, DEFAULT_UDP_PORT + mon_index, ox, oy)
+        win = MainWindow(decoder_opts, w, h, args.host_ip, DEFAULT_UDP_PORT + mon_index, ox, oy, net_mode)
         win.setWindowTitle(f"LinuxPlay - Monitor {mon_index}")
         win.show()
         ret = app.exec_()
@@ -642,3 +653,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
