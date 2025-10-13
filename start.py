@@ -258,7 +258,7 @@ class HostTab(QWidget):
             ["Default","ultrafast","superfast","veryfast","fast","medium","slow","veryslow",
              "llhq","p1","p2","p3","p4","p5","p6","p7"]
         )
-        self.gopCombo      = QComboBox(); self.gopCombo.addItems(["5","10","15","20","30","45","60","90","120"])
+        self.gopCombo      = QComboBox(); self.gopCombo.addItems(["5","8","10","15","20","30","45","60","90","120"])
         self.qpCombo       = QComboBox(); self.qpCombo.addItems(["None","5","10","15","18","20","23","25","28","30","32","35","38","40","42","45","48","50","55","60"])
         self.tuneCombo     = QComboBox(); self.tuneCombo.addItems(["None","zerolatency","film","animation","grain","psnr","ssim","fastdecode"])
         self.pixFmtCombo   = QComboBox(); self.pixFmtCombo.addItems(["yuv420p","nv12","yuv422p","yuv444p"])
@@ -384,7 +384,7 @@ class HostTab(QWidget):
             self.adaptiveCheck.setChecked(False)
             self.displayCombo.setCurrentText(":0")
             self.presetCombo.setCurrentText("llhq" if self.presetCombo.findText("llhq") != -1 else "ultrafast")
-            self.gopCombo.setCurrentText("10")
+            self.gopCombo.setCurrentText("8")
             self.qpCombo.setCurrentText("None")
             self.tuneCombo.setCurrentText("zerolatency")
             self.pixFmtCombo.setCurrentText("yuv420p")
@@ -416,7 +416,7 @@ class HostTab(QWidget):
             self.pixFmtCombo.setCurrentText("yuv444p")
             self._refresh_backend_choices(preselect="auto")
         else:
-            self.encoderCombo.setCurrentText("none")
+            self.encoderCombo.setCurrentText("h.264" if self.encoderCombo.findText("h.264") != -1 else ("h.265" if self.encoderCombo.findText("h.265") != -1 else ("av1" if self.encoderCombo.findText("av1") != -1 else "none")))
             self.framerateCombo.setCurrentText("30")
             self.bitrateCombo.setCurrentText("8M")
             self.audioCombo.setCurrentText("enable")
@@ -486,6 +486,12 @@ class HostTab(QWidget):
             return
 
         encoder  = self.encoderCombo.currentText()
+
+        if encoder == "none":
+            QMessageBox.warning(self, "Select an encoder", "Encoder is set to 'none'. Pick h.264/h.265/av1 before starting the host.")
+            self._update_buttons()
+            return
+
         framerate= self.framerateCombo.currentText()
         bitrate  = self.bitrateCombo.currentText()
         audio    = self.audioCombo.currentText()
@@ -751,7 +757,7 @@ class HelpTab(QWidget):
         <h2>Notes</h2>
         <ul>
           <li>Linux capture can use <b>kmsgrab</b> (KMS/DRM) or <b>x11grab</b>. kmsgrab generally requires <code>CAP_SYS_ADMIN</code> on the ffmpeg binary (e.g. <code>sudo setcap cap_sys_admin+ep $(which ffmpeg)</code>) and does not draw the cursor.</li>
-          <li>Windows capture prefers DXGI (ddagrab) if available, otherwise GDI (gdigrab).</li>
+          <li>Hosting is Linux-only. Windows and macOS can run the client and connect to a Linux host.</li>
           <li>Multi-monitor is supported; choose a monitor index or "all" on the client.</li>
           <li>For lowest latency try: h.264, preset llhq (or ultrafast), GOP 10, audio disabled, and keep bitrates modest.</li>
           <li>Use the <b>Encoder Backend</b> to select NVENC/QSV/AMF/VAAPI/CPU explicitly.</li>
@@ -769,10 +775,13 @@ class StartWindow(QWidget):
         super().__init__()
         self.setWindowTitle("LinuxPlay")
         self.tabs = QTabWidget()
-        self.hostTab = HostTab()
         self.clientTab = ClientTab()
         self.helpTab = HelpTab()
-        self.tabs.addTab(self.hostTab, "Host")
+        if IS_LINUX:
+            self.hostTab = HostTab()
+            self.tabs.addTab(self.hostTab, "Host")
+        else:
+            pass
         self.tabs.addTab(self.clientTab, "Client")
         self.tabs.addTab(self.helpTab, "Help")
         main_layout = QVBoxLayout()
