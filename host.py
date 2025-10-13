@@ -87,6 +87,7 @@ class HostState:
         self.shutdown_lock = threading.Lock()
         self.shutdown_reason = None
         self.net_mode = "lan"
+        self.starting_streams = False
 
 host_state = HostState()
 HOST_ARGS = None
@@ -194,6 +195,7 @@ def stop_all():
             if s: s.close()
         except Exception:
             pass
+    host_state.starting_streams = False
 
 def stop_streams_only():
     with host_state.video_thread_lock:
@@ -211,6 +213,7 @@ def stop_streams_only():
         except Exception:
             pass
         host_state.audio_thread = None
+    host_state.starting_streams = False
 
 def cleanup():
     stop_all()
@@ -325,7 +328,45 @@ def _output_sync_flags():
     return ["-vsync","0", "-fps_mode","passthrough"]
 
 def _mpegts_ll_mux_flags():
-    return ["-flush_packets","1", "-max_interleave_delta","0", "-muxdelay","0", "-muxpreload","0"]
+    return ["-flush_packets","1","-max_interleave_delta","0","-muxdelay","0","-muxpreload","0","-mpegts_flags","resend_headers"]
+
+def _best_ts_pkt_size(mtu_guess: int, ipv6: bool) -> int:
+    if mtu_guess <= 0:
+        mtu_guess = 1500
+    overhead = 48 if ipv6 else 28
+    max_payload = max(512, mtu_guess - overhead)
+    return max(188, (max_payload // 188) * 188)
+
+def _parse_bitrate_bits(bstr: str) -> int:
+    if not bstr: return 0
+    s = str(bstr).strip().lower()
+    try:
+        if s.endswith("k"):
+            return int(float(s[:-1]) * 1000)
+        if s.endswith("m"):
+            return int(float(s[:-1]) * 1_000_000)
+        if s.endswith("g"):
+            return int(float(s[:-1]) * 1_000_000_000)
+        return int(float(s))
+    except Exception:
+        return 0
+
+def _format_bits(bits: int) -> str:
+    if bits >= 1_000_000:
+        return f"{max(1, int(bits/1_000_000))}M"
+    if bits >= 1000:
+        return f"{max(1, int(bits/1000))}k"
+    return str(max(1, bits))
+
+def _target_bpp(codec: str, fps: int) -> float:
+    c = (codec or "h.264").lower()
+    if c in ("h.265","hevc","av1"):
+        base = 0.045
+    else:
+        base = 0.07
+    if fps >= 90:
+        base += 0.02
+    return base
 
 def _safe_nvenc_preset(preset):
     allowed = {"default","fast","medium","slow","hp","hq","bd","ll","llhq","llhp",
@@ -392,45 +433,45 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
     if codec == "h.264":
         if hwenc == "nvenc" and ensure("h264_nvenc"):
             enc = ["-c:v","h264_nvenc","-preset", _safe_nvenc_preset(preset_l or "llhq"),
-                   "-g", gop, "-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt]
+                   "-g", gop, "-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt, "-bsf:v","h264_mp4toannexb"]
             if not tune: enc += ["-tune","ll"]
             if qp: enc += ["-qp", qp]
         elif hwenc == "qsv" and ensure("h264_qsv"):
-            enc = ["-c:v","h264_qsv","-g", gop, "-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt]
+            enc = ["-c:v","h264_qsv","-g", gop, "-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt, "-bsf:v","h264_mp4toannexb"]
             if qp: enc += ["-global_quality", qp]
         elif hwenc == "amf" and IS_WINDOWS and ensure("h264_amf"):
             enc = ["-c:v","h264_amf","-quality", _amf_quality_from_preset(preset_l),
-                   "-g", gop,"-b:v",bitrate,"-pix_fmt",pix_fmt]
+                   "-g", gop,"-b:v",bitrate,"-pix_fmt",pix_fmt, "-bsf:v","h264_mp4toannexb"]
         elif hwenc == "vaapi" and has_vaapi() and ensure("h264_vaapi"):
             extra_filters += ["-vf","format=nv12,hwupload","-vaapi_device","/dev/dri/renderD128"]
-            enc = ["-c:v","h264_vaapi","-g", gop,"-bf","0","-b:v",bitrate]
+            enc = ["-c:v","h264_vaapi","-g", gop,"-bf","0","-b:v",bitrate, "-bsf:v","h264_mp4toannexb"]
             enc += ["-qp", qp or "20"]
         else:
             enc = ["-c:v","libx264","-preset",(preset_l or "ultrafast"),
                    "-g", gop,"-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt,
-                   "-tune", (tune or "zerolatency")]
+                   "-tune", (tune or "zerolatency"), "-bsf:v","h264_mp4toannexb"]
             if qp: enc += ["-qp", qp]
 
     elif codec == "h.265":
         if hwenc == "nvenc" and ensure("hevc_nvenc"):
             enc = ["-c:v","hevc_nvenc","-preset", _safe_nvenc_preset(preset_l or "p5"),
-                   "-g", gop, "-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt]
+                   "-g", gop, "-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt, "-bsf:v","hevc_mp4toannexb"]
             if not tune: enc += ["-tune","ll"]
             if qp: enc += ["-qp", qp]
         elif hwenc == "qsv" and ensure("hevc_qsv"):
-            enc = ["-c:v","hevc_qsv","-g", gop,"-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt]
+            enc = ["-c:v","hevc_qsv","-g", gop,"-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt, "-bsf:v","hevc_mp4toannexb"]
             if qp: enc += ["-global_quality", qp]
         elif hwenc == "amf" and IS_WINDOWS and ensure("hevc_amf"):
             enc = ["-c:v","hevc_amf","-quality", _amf_quality_from_preset(preset_l),
-                   "-g", gop,"-b:v",bitrate,"-pix_fmt",pix_fmt]
+                   "-g", gop,"-b:v",bitrate,"-pix_fmt",pix_fmt, "-bsf:v","hevc_mp4toannexb"]
         elif hwenc == "vaapi" and has_vaapi() and ensure("hevc_vaapi"):
             extra_filters += ["-vf","format=nv12,hwupload","-vaapi_device","/dev/dri/renderD128"]
-            enc = ["-c:v","hevc_vaapi","-g", gop,"-bf","0","-b:v",bitrate]
+            enc = ["-c:v","hevc_vaapi","-g", gop,"-bf","0","-b:v",bitrate, "-bsf:v","hevc_mp4toannexb"]
             enc += ["-qp", qp or "20"]
         else:
             enc = ["-c:v","libx265","-preset",(preset_l or "ultrafast"),
                    "-g", gop,"-bf","0","-b:v",bitrate,
-                   "-tune", (tune or "zerolatency")]
+                   "-tune", (tune or "zerolatency"), "-bsf:v","hevc_mp4toannexb"]
             if qp: enc += ["-qp", qp]
 
     elif codec == "av1":
@@ -455,7 +496,7 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
     else:
         enc = ["-c:v","libx264","-preset",(preset_l or "ultrafast"),
                "-g", gop,"-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt,
-               "-tune", (tune or "zerolatency")]
+               "-tune", (tune or "zerolatency"), "-bsf:v","h264_mp4toannexb"]
         if qp: enc += ["-qp", qp]
 
     return extra_filters, enc
@@ -468,11 +509,30 @@ def _pick_kms_device():
     return "/dev/dri/card0"
 
 def build_video_cmd(args, bitrate, monitor_info, video_port):
-    udp_buf = "8388608" if getattr(host_state, "net_mode", "lan") == "wifi" else "2048"
-    udp_delay = "200000" if getattr(host_state, "net_mode", "lan") == "wifi" else "0"
+    try:
+        fps_i = int(str(args.framerate))
+    except Exception:
+        fps_i = 60
     w, h, ox, oy = monitor_info
     preset = args.preset.strip().lower() if args.preset else ""
     gop, qp, tune, pix_fmt = args.gop, args.qp, args.tune, args.pix_fmt
+
+    wifi_or_highfps = (getattr(host_state, "net_mode", "lan") == "wifi") or (fps_i >= 90)
+    udp_buf = "8388608" if wifi_or_highfps else "2048"
+    udp_delay = "200000" if wifi_or_highfps else "0"
+
+    codec_name = (args.encoder if args.encoder and args.encoder.lower() != "none" else "h.264")
+    min_bits = int(w) * int(h) * max(1, fps_i) * _target_bpp(codec_name, fps_i)
+    cur_bits = _parse_bitrate_bits(bitrate)
+    if cur_bits < min_bits:
+        safe_bits = int(min_bits)
+        safe_str = _format_bits(safe_bits)
+        logging.warning("Bitrate too low for %dx%d@%dfps (%s < %s). Bumping to %s.",
+                        w, h, fps_i, str(bitrate), _format_bits(cur_bits), safe_str)
+        bitrate = safe_str
+        host_state.current_bitrate = safe_str
+
+    base_in = [*(_ffmpeg_base_cmd()), *(_input_ll_flags())]
 
     if IS_WINDOWS:
         if args.capture != "auto":
@@ -481,10 +541,9 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
             windows_demux = "ddagrab" if (ffmpeg_has_demuxer("ddagrab") or ffmpeg_has_device("ddagrab")) else "gdigrab"
 
         input_side = [
-            *(_ffmpeg_base_cmd()),
-            *(_input_ll_flags()),
+            *base_in,
             "-f", windows_demux,
-            "-framerate", args.framerate,
+            "-framerate", str(fps_i),
             "-offset_x", str(ox), "-offset_y", str(oy),
             "-video_size", f"{w}x{h}",
             "-draw_mouse","0",
@@ -525,10 +584,9 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
             logging.info("Linux capture: kmsgrab (%s) selected (pref=%s).", kms_dev, capture_pref)
 
             input_side = [
-                *(_ffmpeg_base_cmd()),
-                *(_input_ll_flags()),
+                *base_in,
                 "-f","kmsgrab",
-                "-framerate", args.framerate,
+                "-framerate", str(fps_i),
                 "-device", kms_dev,
                 "-i","-",
             ]
@@ -551,10 +609,9 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
             logging.info("Linux capture: x11grab selected (pref=%s, kms=%s).", capture_pref, kms_available)
             input_arg = f"{disp}+{ox},{oy}"
             input_side = [
-                *(_ffmpeg_base_cmd()),
-                *(_input_ll_flags()),
+                *base_in,
                 "-f","x11grab","-draw_mouse","0",
-                "-framerate", args.framerate, "-video_size", f"{w}x{h}",
+                "-framerate", str(fps_i), "-video_size", f"{w}x{h}",
                 "-i", input_arg,
             ]
             extra_filters, encode = _pick_encoder_args(
@@ -563,14 +620,14 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
             )
 
     output_side = _output_sync_flags()
-
     out = [
         *(_mpegts_ll_mux_flags()),
         "-f","mpegts",
         *_marker_opt(),
-        f"udp://{host_state.client_ip}:{video_port}?pkt_size=1316&buffer_size=2048&overrun_nonfatal=1&max_delay=0"
+        f"udp://{host_state.client_ip}:{video_port}?pkt_size=1316&buffer_size={udp_buf}&overrun_nonfatal=1&max_delay={udp_delay}"
     ]
     return input_side + output_side + (extra_filters or []) + encode + out
+
 
 def _list_dshow_audio():
     try:
@@ -639,7 +696,7 @@ def build_audio_cmd():
     out = [
         *(_mpegts_ll_mux_flags()),
         *_marker_opt(),
-        "-f","mpegts", f"udp://{host_state.client_ip}:{UDP_AUDIO_PORT}?pkt_size=1316&buffer_size=512&overrun_nonfatal=1&max_delay=0"
+        "-f","mpegts", f"udp://{host_state.client_ip}:{UDP_AUDIO_PORT}?pkt_size=1316&buffer_size={aud_buf}&overrun_nonfatal=1&max_delay={aud_delay}"
     ]
     return input_side + output_side + encode + out
 
@@ -930,23 +987,30 @@ def adaptive_bitrate_manager(args):
 
 
 def start_streams_for_current_client(args):
+
     if not host_state.client_ip:
         return
-    if host_state.video_threads:
-        return
     with host_state.video_thread_lock:
-        host_state.video_threads = []
-        for i, mon in enumerate(host_state.monitors):
-            cmd = build_video_cmd(args, host_state.current_bitrate, mon, UDP_VIDEO_PORT + i)
-            logging.info("Starting Video %d: %s", i, " ".join(cmd))
-            t = StreamThread(cmd, f"Video {i}")
-            t.start(); host_state.video_threads.append(t)
-    if args.audio == "enable":
-        ac = build_audio_cmd()
-        if ac:
-            logging.info("Starting Audio: %s", " ".join(ac))
-            host_state.audio_thread = StreamThread(ac, "Audio")
-            host_state.audio_thread.start()
+        if host_state.starting_streams:
+            logging.debug("start_streams_for_current_client: already starting; skipping duplicate call.")
+            return
+        if host_state.video_threads:
+            return
+        host_state.starting_streams = True
+        try:
+            host_state.video_threads = []
+            for i, mon in enumerate(host_state.monitors):
+                cmd = build_video_cmd(args, host_state.current_bitrate, mon, UDP_VIDEO_PORT + i)
+                t = StreamThread(cmd, f"Video {i}")
+                t.start()
+                host_state.video_threads.append(t)
+            if args.audio == "enable" and not host_state.audio_thread:
+                ac = build_audio_cmd()
+                if ac:
+                    host_state.audio_thread = StreamThread(ac, "Audio")
+                    host_state.audio_thread.start()
+        finally:
+            host_state.starting_streams = False
 
 def heartbeat_manager(args):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1201,18 +1265,16 @@ class HostWindow(QWidget):
         event.accept()
 
 def parse_args():
-    p = argparse.ArgumentParser(description="LinuxPlay Host (Linux/Windows)")
+    p = argparse.ArgumentParser(description="LinuxPlay Host (Linux only)")
     p.add_argument("--gui", action="store_true", help="Show host GUI window.")
     p.add_argument("--encoder", choices=["none","h.264","h.265","av1"], default="none")
     p.add_argument("--hwenc", choices=["auto","cpu","nvenc","qsv","amf","vaapi"], default="auto",
                    help="Manual encoder backend selection (auto=heuristic).")
-    p.add_argument("--capture", choices=["auto","ddagrab","gdigrab"], default="auto",
-                   help="Windows capture: auto chooses ddagrab if available, else gdigrab.")
     p.add_argument("--framerate", default=DEFAULT_FPS)
     p.add_argument("--bitrate", default=DEFAULT_BITRATE)
     p.add_argument("--audio", choices=["enable","disable"], default="disable")
     p.add_argument("--adaptive", action="store_true")
-    p.add_argument("--display", default=":0")  # ignored on Windows
+    p.add_argument("--display", default=":0")
     p.add_argument("--preset", default="")
     p.add_argument("--gop", default="30")
     p.add_argument("--qp", default="")
@@ -1228,6 +1290,10 @@ def main():
     logging.basicConfig(level=(logging.DEBUG if args.debug else logging.INFO),
                         format="%(asctime)s [%(levelname)s] %(message)s",
                         datefmt="%H:%M:%S")
+
+    if IS_WINDOWS:
+        logging.critical("Windows hosting is disabled. Host from Linux and use the Windows client to connect.")
+        return 2
 
     if args.gui:
         app = QApplication(sys.argv)
