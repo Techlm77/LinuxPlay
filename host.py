@@ -6,6 +6,7 @@ import sys
 import logging
 import time
 import threading
+import psutil
 import socket
 import atexit
 import signal
@@ -18,14 +19,6 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QFont, QPalette, QColor, QKeySequence
 from PyQt5.QtCore import Qt, QTimer, QObject, pyqtSignal
 
-try:
-    HERE = os.path.dirname(os.path.abspath(__file__))
-    ffbin = os.path.join(HERE, "ffmpeg", "bin")
-    if os.name == "nt" and os.path.exists(os.path.join(ffbin, "ffmpeg.exe")):
-        os.environ["PATH"] = ffbin + os.pathsep + os.environ.get("PATH", "")
-except Exception:
-    pass
-
 UDP_VIDEO_PORT = 5000
 UDP_AUDIO_PORT = 6001
 UDP_CONTROL_PORT = 7000
@@ -36,8 +29,6 @@ UDP_HEARTBEAT_PORT = 7004
 DEFAULT_FPS = "30"
 DEFAULT_BITRATE = "8M"
 DEFAULT_RES = "1920x1080"
-
-IS_WINDOWS = py_platform.system() == "Windows"
 IS_LINUX   = py_platform.system() == "Linux"
 
 def _marker_value() -> str:
@@ -124,9 +115,6 @@ def is_intel_cpu():
     except Exception:
         return False
 
-def is_amd_gpu_windows():
-    if not IS_WINDOWS:
-        return False
     return os.environ.get("LINUXPLAY_FORCE_AMF","0") == "1"
 
 def has_vaapi():
@@ -285,34 +273,7 @@ def _detect_monitors_linux():
                     continue
     return mons
 
-def _detect_monitors_windows():
-    try:
-        import ctypes
-        from ctypes import wintypes
-        user32 = ctypes.windll.user32
-        MONITORENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.POINTER(wintypes.RECT), ctypes.c_double)
-        result = []
-        def cb(hMonitor, hdc, lprc, lparam):
-            r = lprc.contents
-            w = r.right - r.left; h = r.bottom - r.top
-            result.append((int(w), int(h), int(r.left), int(r.top)))
-            return 1
-        user32.EnumDisplayMonitors(0, 0, MONITORENUMPROC(cb), 0)
-        if not result:
-            SM_XVIRTUALSCREEN = 76; SM_YVIRTUALSCREEN = 77; SM_CXVIRTUALSCREEN = 78; SM_CYVIRTUALSCREEN = 79
-            x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
-            y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
-            w = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
-            h = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
-            result = [(int(w), int(h), int(x), int(y))]
-        return result
-    except Exception as e:
-        logging.error("EnumDisplayMonitors failed: %s", e)
-        return []
-
 def detect_monitors():
-    if IS_WINDOWS:
-        return _detect_monitors_windows()
     return _detect_monitors_linux()
 
 def _input_ll_flags():
@@ -401,8 +362,6 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
                 hwenc = "nvenc"
             elif is_intel_cpu() and ffmpeg_has_encoder("h264_qsv"):
                 hwenc = "qsv"
-            elif IS_WINDOWS and is_amd_gpu_windows() and ffmpeg_has_encoder("h264_amf"):
-                hwenc = "amf"
             elif has_vaapi() and ffmpeg_has_encoder("h264_vaapi"):
                 hwenc = "vaapi"
             else:
@@ -412,8 +371,6 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
                 hwenc = "nvenc"
             elif is_intel_cpu() and ffmpeg_has_encoder("hevc_qsv"):
                 hwenc = "qsv"
-            elif IS_WINDOWS and is_amd_gpu_windows() and ffmpeg_has_encoder("hevc_amf"):
-                hwenc = "amf"
             elif has_vaapi() and ffmpeg_has_encoder("hevc_vaapi"):
                 hwenc = "vaapi"
             else:
@@ -425,8 +382,6 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
                 hwenc = "qsv"
             elif has_vaapi() and ffmpeg_has_encoder("av1_vaapi"):
                 hwenc = "vaapi"
-            elif IS_WINDOWS and is_amd_gpu_windows() and ffmpeg_has_encoder("av1_amf"):
-                hwenc = "amf"
             else:
                 hwenc = "cpu"
 
@@ -439,9 +394,7 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
         elif hwenc == "qsv" and ensure("h264_qsv"):
             enc = ["-c:v","h264_qsv","-g", gop, "-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt, "-bsf:v","h264_mp4toannexb"]
             if qp: enc += ["-global_quality", qp]
-        elif hwenc == "amf" and IS_WINDOWS and ensure("h264_amf"):
-            enc = ["-c:v","h264_amf","-quality", _amf_quality_from_preset(preset_l),
-                   "-g", gop,"-b:v",bitrate,"-pix_fmt",pix_fmt, "-bsf:v","h264_mp4toannexb"]
+        
         elif hwenc == "vaapi" and has_vaapi() and ensure("h264_vaapi"):
             extra_filters += ["-vf","format=nv12,hwupload","-vaapi_device","/dev/dri/renderD128"]
             enc = ["-c:v","h264_vaapi","-g", gop,"-bf","0","-b:v",bitrate, "-bsf:v","h264_mp4toannexb"]
@@ -461,9 +414,7 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
         elif hwenc == "qsv" and ensure("hevc_qsv"):
             enc = ["-c:v","hevc_qsv","-g", gop,"-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt, "-bsf:v","hevc_mp4toannexb"]
             if qp: enc += ["-global_quality", qp]
-        elif hwenc == "amf" and IS_WINDOWS and ensure("hevc_amf"):
-            enc = ["-c:v","hevc_amf","-quality", _amf_quality_from_preset(preset_l),
-                   "-g", gop,"-b:v",bitrate,"-pix_fmt",pix_fmt, "-bsf:v","hevc_mp4toannexb"]
+        
         elif hwenc == "vaapi" and has_vaapi() and ensure("hevc_vaapi"):
             extra_filters += ["-vf","format=nv12,hwupload","-vaapi_device","/dev/dri/renderD128"]
             enc = ["-c:v","hevc_vaapi","-g", gop,"-bf","0","-b:v",bitrate, "-bsf:v","hevc_mp4toannexb"]
@@ -482,9 +433,7 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
         elif hwenc == "qsv" and ensure("av1_qsv"):
             enc = ["-c:v","av1_qsv","-g", gop,"-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt]
             if qp: enc += ["-global_quality", qp]
-        elif hwenc == "amf" and IS_WINDOWS and ensure("av1_amf"):
-            enc = ["-c:v","av1_amf","-g", gop,"-b:v",bitrate,"-pix_fmt",pix_fmt]
-            if qp: enc += ["-qp", qp]
+        
         elif hwenc == "vaapi" and has_vaapi() and ensure("av1_vaapi"):
             extra_filters += ["-vf","format=nv12,hwupload","-vaapi_device","/dev/dri/renderD128"]
             enc = ["-c:v","av1_vaapi","-g", gop,"-bf","0","-b:v",bitrate]
@@ -513,6 +462,7 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
         fps_i = int(str(args.framerate))
     except Exception:
         fps_i = 60
+
     w, h, ox, oy = monitor_info
     preset = args.preset.strip().lower() if args.preset else ""
     gop, qp, tune, pix_fmt = args.gop, args.qp, args.tune, args.pix_fmt
@@ -527,177 +477,144 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
     if cur_bits < min_bits:
         safe_bits = int(min_bits)
         safe_str = _format_bits(safe_bits)
-        logging.warning("Bitrate too low for %dx%d@%dfps (%s < %s). Bumping to %s.",
-                        w, h, fps_i, str(bitrate), _format_bits(cur_bits), safe_str)
+        logging.warning(
+            "Bitrate too low for %dx%d@%dfps (%s < %s). Bumping to %s.",
+            w, h, fps_i, str(bitrate), _format_bits(cur_bits), safe_str
+        )
         bitrate = safe_str
         host_state.current_bitrate = safe_str
 
     base_in = [*(_ffmpeg_base_cmd()), *(_input_ll_flags())]
+    disp = args.display
+    if "." not in disp:
+        disp = f"{disp}.0"
 
-    if IS_WINDOWS:
-        if args.capture != "auto":
-            windows_demux = args.capture
-        else:
-            windows_demux = "ddagrab" if (ffmpeg_has_demuxer("ddagrab") or ffmpeg_has_device("ddagrab")) else "gdigrab"
+    capture_pref = (os.environ.get("LINUXPLAY_CAPTURE", "auto") or "auto").lower()
+    kms_available = ffmpeg_has_device("kmsgrab")
+    vaapi_available = has_vaapi()
+
+    def _vaapi_possible_for_codec():
+        enc = (args.encoder or "h.264").lower()
+        return (
+            (enc == "h.264" and ffmpeg_has_encoder("h264_vaapi")) or
+            (enc == "h.265" and ffmpeg_has_encoder("hevc_vaapi")) or
+            (enc == "av1"   and ffmpeg_has_encoder("av1_vaapi"))
+        )
+
+    use_kms = False
+    if capture_pref == "kmsgrab":
+        use_kms = True
+    elif capture_pref == "auto" and kms_available:
+        if (
+            (args.hwenc in ("auto", "vaapi") and vaapi_available and _vaapi_possible_for_codec())
+            or (args.hwenc == "cpu")
+        ):
+            use_kms = True
+
+    if use_kms:
+        kms_dev = os.environ.get("LINUXPLAY_KMS_DEVICE", _pick_kms_device())
+        logging.info("Linux capture: kmsgrab (%s) selected (pref=%s).", kms_dev, capture_pref)
 
         input_side = [
             *base_in,
-            "-f", windows_demux,
+            "-f", "kmsgrab",
             "-framerate", str(fps_i),
-            "-offset_x", str(ox), "-offset_y", str(oy),
-            "-video_size", f"{w}x{h}",
-            "-draw_mouse","0",
-            "-i","desktop",
+            "-device", kms_dev,
+            "-i", "-",
         ]
 
+        _k_extra_filters, encode = _pick_encoder_args(
+            codec=args.encoder, hwenc=args.hwenc, preset=preset,
+            gop=gop, qp=qp, tune=tune, bitrate=bitrate, pix_fmt=pix_fmt
+        )
+
+        if any(x in encode for x in ("h264_vaapi", "hevc_vaapi", "av1_vaapi")):
+            extra_filters = [
+                "-vf", f"hwmap=derive_device=vaapi,scale_vaapi=w={w}:h={h}:format=nv12",
+                "-vaapi_device", "/dev/dri/renderD128"
+            ]
+        elif args.hwenc == "cpu":
+            extra_filters = ["-vf", "hwdownload,format=bgr0"]
+        else:
+            logging.warning(
+                "kmsgrab requested but encoder backend '%s' not supported; falling back to x11grab.",
+                args.hwenc
+            )
+            use_kms = False
+
+    if not use_kms:
+        logging.info("Linux capture: x11grab selected (pref=%s, kms=%s).", capture_pref, kms_available)
+        input_arg = f"{disp}+{ox},{oy}"
+        input_side = [
+            *base_in,
+            "-f", "x11grab", "-draw_mouse", "0",
+            "-framerate", str(fps_i), "-video_size", f"{w}x{h}",
+            "-i", input_arg,
+        ]
         extra_filters, encode = _pick_encoder_args(
             codec=args.encoder, hwenc=args.hwenc, preset=preset,
             gop=gop, qp=qp, tune=tune, bitrate=bitrate, pix_fmt=pix_fmt
         )
 
-    else:
-        disp = args.display
-        if "." not in disp:
-            disp = f"{disp}.0"
-
-        capture_pref = (os.environ.get("LINUXPLAY_CAPTURE","auto") or "auto").lower()
-        kms_available = ffmpeg_has_device("kmsgrab")
-        vaapi_available = has_vaapi()
-
-        def _vaapi_possible_for_codec():
-            enc = (args.encoder or "h.264").lower()
-            return (
-                (enc == "h.264" and ffmpeg_has_encoder("h264_vaapi")) or
-                (enc == "h.265" and ffmpeg_has_encoder("hevc_vaapi")) or
-                (enc == "av1"   and ffmpeg_has_encoder("av1_vaapi"))
-            )
-
-        use_kms = False
-        if capture_pref == "kmsgrab":
-            use_kms = True
-        elif capture_pref == "auto" and kms_available:
-            if (args.hwenc in ("auto","vaapi") and vaapi_available and _vaapi_possible_for_codec()) or (args.hwenc == "cpu"):
-                use_kms = True
-
-        if use_kms:
-            kms_dev = os.environ.get("LINUXPLAY_KMS_DEVICE", _pick_kms_device())
-            logging.info("Linux capture: kmsgrab (%s) selected (pref=%s).", kms_dev, capture_pref)
-
-            input_side = [
-                *base_in,
-                "-f","kmsgrab",
-                "-framerate", str(fps_i),
-                "-device", kms_dev,
-                "-i","-",
-            ]
-
-            _k_extra_filters, encode = _pick_encoder_args(
-                codec=args.encoder, hwenc=args.hwenc, preset=preset,
-                gop=gop, qp=qp, tune=tune, bitrate=bitrate, pix_fmt=pix_fmt
-            )
-
-            if any(x in encode for x in ("h264_vaapi","hevc_vaapi","av1_vaapi")):
-                extra_filters = ["-vf", f"hwmap=derive_device=vaapi,scale_vaapi=w={w}:h={h}:format=nv12",
-                                 "-vaapi_device","/dev/dri/renderD128"]
-            elif args.hwenc == "cpu":
-                extra_filters = ["-vf", "hwdownload,format=bgr0"]
-            else:
-                logging.warning("kmsgrab requested but encoder backend '%s' not supported with kmsgrab; using x11grab.", args.hwenc)
-                use_kms = False
-
-        if not use_kms:
-            logging.info("Linux capture: x11grab selected (pref=%s, kms=%s).", capture_pref, kms_available)
-            input_arg = f"{disp}+{ox},{oy}"
-            input_side = [
-                *base_in,
-                "-f","x11grab","-draw_mouse","0",
-                "-framerate", str(fps_i), "-video_size", f"{w}x{h}",
-                "-i", input_arg,
-            ]
-            extra_filters, encode = _pick_encoder_args(
-                codec=args.encoder, hwenc=args.hwenc, preset=preset,
-                gop=gop, qp=qp, tune=tune, bitrate=bitrate, pix_fmt=pix_fmt
-            )
-
     output_side = _output_sync_flags()
     out = [
         *(_mpegts_ll_mux_flags()),
-        "-f","mpegts",
+        "-f", "mpegts",
         *_marker_opt(),
         f"udp://{host_state.client_ip}:{video_port}?pkt_size=1316&buffer_size={udp_buf}&overrun_nonfatal=1&max_delay={udp_delay}"
     ]
+
     return input_side + output_side + (extra_filters or []) + encode + out
 
-
-def _list_dshow_audio():
-    try:
-        out = subprocess.check_output(
-            ["ffmpeg","-hide_banner","-f","dshow","-list_devices","true","-i","dummy"],
-            stderr=subprocess.STDOUT, universal_newlines=True
-        )
-    except Exception:
-        return []
-    devs = []
-    for line in out.splitlines():
-        line = line.strip()
-        if line.startswith('"') and line.endswith('"'):
-            devs.append(line.strip('"'))
-    return devs
-
 def build_audio_cmd():
-    aud_buf = "4194304" if getattr(host_state, "net_mode", "lan") == "wifi" else "512"
-    aud_delay = "150000" if getattr(host_state, "net_mode", "lan") == "wifi" else "0"
-    if IS_WINDOWS:
-        want = os.environ.get("LINUXPLAY_DSHOW_AUDIO", "").strip()
-        devs = _list_dshow_audio()
-        pick = None
-        if want and any(want.lower() == d.lower() for d in devs):
-            pick = want
-        else:
-            for cand in ["virtual-audio-capturer","Stereo Mix","CABLE Output","Line (VB-Audio)"]:
-                for d in devs:
-                    if cand.lower() in d.lower():
-                        pick = d; break
-                if pick: break
-        if not pick and devs:
-            pick = devs[0]
-        if not pick:
-            logging.error("No dshow audio device found; audio disabled.")
-            return None
-        input_side = [
-            *(_ffmpeg_base_cmd()),
-            *(_input_ll_flags()),
-            "-f","dshow","-i", f"audio={pick}",
-        ]
-    else:
-        mon = os.environ.get("PULSE_MONITOR","")
-        if not mon and which("pactl"):
-            try:
-                out = subprocess.check_output(["pactl","list","short","sources"], universal_newlines=True)
-                for line in out.splitlines():
-                    parts = line.split()
-                    if len(parts) >= 2 and ".monitor" in parts[1]:
-                        mon = parts[1]; break
-            except Exception:
-                pass
-        if not mon:
-            mon = "default.monitor"
-        input_side = [
-            *(_ffmpeg_base_cmd()),
-            *(_input_ll_flags()),
-            "-f","pulse","-i", mon,
-        ]
+    net_mode = getattr(host_state, "net_mode", "lan")
+    aud_buf = "4194304" if net_mode == "wifi" else "512"
+    aud_delay = "150000" if net_mode == "wifi" else "0"
+
+    mon = os.environ.get("PULSE_MONITOR", "")
+    if not mon and which("pactl"):
+        try:
+            out = subprocess.check_output(
+                ["pactl", "list", "short", "sources"],
+                text=True,
+                stderr=subprocess.DEVNULL
+            )
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and ".monitor" in parts[1]:
+                    mon = parts[1]
+                    break
+        except Exception as e:
+            logging.warning("PulseAudio monitor detection failed: %s", e)
+
+    if not mon:
+        mon = "default.monitor"
+
+    logging.info("Using PulseAudio source: %s", mon)
+
+    input_side = [
+        *(_ffmpeg_base_cmd()),
+        *(_input_ll_flags()),
+        "-f", "pulse",
+        "-i", mon,
+    ]
 
     output_side = _output_sync_flags()
+
     encode = [
-        "-c:a","libopus","-b:a","128k",
-        "-application","voip","-frame_duration","10"
+        "-c:a", "libopus",
+        "-b:a", "128k",
+        "-application", "voip",
+        "-frame_duration", "10",
     ]
+
     out = [
         *(_mpegts_ll_mux_flags()),
         *_marker_opt(),
-        "-f","mpegts", f"udp://{host_state.client_ip}:{UDP_AUDIO_PORT}?pkt_size=1316&buffer_size={aud_buf}&overrun_nonfatal=1&max_delay={aud_delay}"
+        "-f", "mpegts",
+        f"udp://{host_state.client_ip}:{UDP_AUDIO_PORT}?pkt_size=1316&buffer_size={aud_buf}&overrun_nonfatal=1&max_delay={aud_delay}"
     ]
+
     return input_side + output_side + encode + out
 
 def _inject_mouse_move(x,y):
@@ -985,7 +902,6 @@ def adaptive_bitrate_manager(args):
                 host_state.video_threads = new_threads
                 host_state.current_bitrate = new_bitrate
 
-
 def start_streams_for_current_client(args):
 
     if not host_state.client_ip:
@@ -1049,6 +965,49 @@ def heartbeat_manager(args):
                 host_state.last_pong_ts = now
         else:
             time.sleep(0.5)
+
+def resource_monitor():
+    p = psutil.Process(os.getpid())
+
+    def read_gpu_usage():
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            return f"GPU: {util.gpu}% VRAM: {util.memory}% (NVENC)"
+        except Exception:
+            pass
+
+        try:
+            for card in os.listdir("/sys/class/drm"):
+                busy_path = f"/sys/class/drm/{card}/device/gpu_busy_percent"
+                if os.path.exists(busy_path):
+                    with open(busy_path, "r") as f:
+                        val = f.read().strip()
+                        return f"GPU: {val}% (VAAPI)"
+        except Exception:
+            pass
+
+        try:
+            cmd = ["timeout", "0.5", "intel_gpu_top", "-J"]
+            out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode()
+            if '"Busy"' in out:
+                import json
+                j = json.loads(out)
+                busy = j["engines"]["Render/3D/0"]["busy"]
+                return f"GPU: {busy}% (iGPU)"
+        except Exception:
+            pass
+
+        return ""
+
+    while not host_state.should_terminate:
+        cpu = p.cpu_percent(interval=1)
+        mem = p.memory_info().rss / (1024*1024)
+        gpu_info = read_gpu_usage()
+        logging.info(f"[MONITOR] CPU: {cpu:.1f}% | RAM: {mem:.1f} MB" + (f" | {gpu_info}" if gpu_info else ""))
+        time.sleep(5)
 
 def session_manager(args):
     while not host_state.should_terminate:
@@ -1116,6 +1075,7 @@ def core_main(args, use_signals=True) -> int:
     threading.Thread(target=heartbeat_manager, args=(args,), daemon=True).start()
     threading.Thread(target=session_manager, args=(args,), daemon=True).start()
     threading.Thread(target=control_listener, args=(host_state.control_sock,), daemon=True).start()
+    threading.Thread(target=resource_monitor, daemon=True).start()
     logging.info("Host running. Close window or Ctrl+C to quit.")
     try:
         while not host_state.should_terminate:
@@ -1268,7 +1228,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="LinuxPlay Host (Linux only)")
     p.add_argument("--gui", action="store_true", help="Show host GUI window.")
     p.add_argument("--encoder", choices=["none","h.264","h.265","av1"], default="none")
-    p.add_argument("--hwenc", choices=["auto","cpu","nvenc","qsv","amf","vaapi"], default="auto",
+    p.add_argument("--hwenc", choices=["auto","cpu","nvenc","qsv","vaapi"], default="auto",
                    help="Manual encoder backend selection (auto=heuristic).")
     p.add_argument("--framerate", default=DEFAULT_FPS)
     p.add_argument("--bitrate", default=DEFAULT_BITRATE)
@@ -1291,8 +1251,8 @@ def main():
                         format="%(asctime)s [%(levelname)s] %(message)s",
                         datefmt="%H:%M:%S")
 
-    if IS_WINDOWS:
-        logging.critical("Windows hosting is disabled. Host from Linux and use the Windows client to connect.")
+    if not IS_LINUX:
+        logging.critical("Hosting is Linux-only. Run this on a Linux machine.")
         return 2
 
     if args.gui:
