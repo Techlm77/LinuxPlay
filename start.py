@@ -26,6 +26,7 @@ except Exception:
 
 IS_WINDOWS = platform.system() == "Windows"
 IS_LINUX   = platform.system() == "Linux"
+IS_MAC     = platform.system() == "Darwin"
 
 WG_INFO_PATH = "/tmp/linuxplay_wg_info.json"  # {"host_tunnel_ip": "10.13.13.1"}
 WG_QR_PATH   = "/tmp/linuxplay_wg_peer.png"   # QR image for mobile client
@@ -205,27 +206,26 @@ class HostTab(QWidget):
 
         main_layout = QVBoxLayout()
 
-        if IS_LINUX:
-            wg_group = QGroupBox("Secure (WireGuard)")
-            wg_layout = QVBoxLayout()
-            self.useWG = QCheckBox("Launch with WireGuard (recommended for WAN)")
-            self.useWG.setChecked(False)
-            self.wgStatus = QLabel("WireGuard: idle")
-            self.wgStatus.setWordWrap(True)
-            self.wgQR = QLabel()
-            self.wgQR.setAlignment(Qt.AlignCenter)
-            self.wgQR.setVisible(False)
-            self.btnWGSetup = QPushButton("Set up WireGuard (show QR)")
-            self.btnWGTeardown = QPushButton("Tear down WireGuard")
-            self.btnWGSetup.clicked.connect(self.setup_wireguard)
-            self.btnWGTeardown.clicked.connect(self.teardown_wireguard)
-            wg_layout.addWidget(self.useWG)
-            wg_layout.addWidget(self.wgStatus)
-            wg_layout.addWidget(self.btnWGSetup)
-            wg_layout.addWidget(self.btnWGTeardown)
-            wg_layout.addWidget(self.wgQR)
-            wg_group.setLayout(wg_layout)
-            main_layout.addWidget(wg_group)
+        wg_group = QGroupBox("Secure (WireGuard)")
+        wg_layout = QVBoxLayout()
+        self.useWG = QCheckBox("Launch with WireGuard (recommended for WAN)")
+        self.useWG.setChecked(False)
+        self.wgStatus = QLabel("WireGuard: idle")
+        self.wgStatus.setWordWrap(True)
+        self.wgQR = QLabel()
+        self.wgQR.setAlignment(Qt.AlignCenter)
+        self.wgQR.setVisible(False)
+        self.btnWGSetup = QPushButton("Set up WireGuard (show QR)")
+        self.btnWGTeardown = QPushButton("Tear down WireGuard")
+        self.btnWGSetup.clicked.connect(self.setup_wireguard)
+        self.btnWGTeardown.clicked.connect(self.teardown_wireguard)
+        wg_layout.addWidget(self.useWG)
+        wg_layout.addWidget(self.wgStatus)
+        wg_layout.addWidget(self.btnWGSetup)
+        wg_layout.addWidget(self.btnWGTeardown)
+        wg_layout.addWidget(self.wgQR)
+        wg_group.setLayout(wg_layout)
+        main_layout.addWidget(wg_group)
 
         form_group = QGroupBox("Host Configuration")
         form_layout = QFormLayout()
@@ -265,19 +265,10 @@ class HostTab(QWidget):
         self.debugCheck    = QCheckBox("Enable Debug")
 
         self.captureHint = QLabel("")
-        if IS_WINDOWS:
-            if ffmpeg_supports_demuxer("ddagrab"):
-                self.captureHint.setText("Capture: ddagrab (DXGI) available")
-            else:
-                self.captureHint.setText("Capture: gdigrab (GDI) fallback")
-        elif IS_LINUX:
-            if ffmpeg_has_device("kmsgrab"):
-                self.captureHint.setText("Capture: kmsgrab available (requires CAP_SYS_ADMIN; cursor not shown). Fallback: x11grab.")
-            else:
-                self.captureHint.setText("Capture: x11grab (kmsgrab not detected).")
-
-        if IS_WINDOWS:
-            self.displayCombo.setEnabled(False)
+        if ffmpeg_has_device("kmsgrab"):
+            self.captureHint.setText("Capture: kmsgrab available (requires CAP_SYS_ADMIN; cursor not shown). Fallback: x11grab.")
+        else:
+            self.captureHint.setText("Capture: x11grab (kmsgrab not detected).")
 
         form_layout.addRow("Encoder (codec):", self.encoderCombo)
         form_layout.addRow("Encoder Backend:", self.hwencCombo)
@@ -286,15 +277,12 @@ class HostTab(QWidget):
         form_layout.addRow("Audio:", self.audioCombo)
         form_layout.addRow("Adaptive:", self.adaptiveCheck)
 
-        if IS_LINUX:
-            self.linuxCaptureCombo = QComboBox()
-            self.linuxCaptureCombo.addItem("auto", userData="auto")
-            self.linuxCaptureCombo.addItem("kmsgrab", userData="kmsgrab")
-            self.linuxCaptureCombo.addItem("x11grab", userData="x11grab")
-            form_layout.addRow("Linux Capture:", self.linuxCaptureCombo)
-            form_layout.addRow("X Display (fallback):", self.displayCombo)
-        else:
-            form_layout.addRow("X Display (Linux):", self.displayCombo)
+        self.linuxCaptureCombo = QComboBox()
+        self.linuxCaptureCombo.addItem("auto", userData="auto")
+        self.linuxCaptureCombo.addItem("kmsgrab", userData="kmsgrab")
+        self.linuxCaptureCombo.addItem("x11grab", userData="x11grab")
+        form_layout.addRow("Linux Capture:", self.linuxCaptureCombo)
+        form_layout.addRow("X Display (fallback):", self.displayCombo)
 
         form_layout.addRow("Preset:", self.presetCombo)
         form_layout.addRow("GOP:", self.gopCombo)
@@ -317,17 +305,15 @@ class HostTab(QWidget):
         self.statusLabel = QLabel("Ready")
         self.statusLabel.setStyleSheet("color: #bbb")
         main_layout.addWidget(self.statusLabel)
-
         main_layout.addStretch()
         self.setLayout(main_layout)
 
         self.host_process = None
         self._exit_watcher_thread = None
 
-        if IS_LINUX:
-            self.pollTimerWG = QTimer(self)
-            self.pollTimerWG.timeout.connect(self.refresh_wg_status)
-            self.pollTimerWG.start(1500)
+        self.pollTimerWG = QTimer(self)
+        self.pollTimerWG.timeout.connect(self.refresh_wg_status)
+        self.pollTimerWG.start(1500)
 
         self.procTimer = QTimer(self)
         self.procTimer.timeout.connect(self._poll_process_state)
@@ -480,6 +466,14 @@ class HostTab(QWidget):
             self.statusLabel.setText("Ready")
 
     def start_host(self):
+        if not IS_LINUX:
+            QMessageBox.critical(
+                self,
+                "Unsupported OS",
+                "Hosting is only supported on Linux. Use the Client tab instead."
+            )
+            return
+
         if not ffmpeg_ok():
             self._warn_ffmpeg()
             self._update_buttons()
@@ -488,22 +482,26 @@ class HostTab(QWidget):
         encoder  = self.encoderCombo.currentText()
 
         if encoder == "none":
-            QMessageBox.warning(self, "Select an encoder", "Encoder is set to 'none'. Pick h.264/h.265/av1 before starting the host.")
+            QMessageBox.warning(
+                self,
+                "Select an encoder",
+                "Encoder is set to 'none'. Pick h.264, h.265, or av1 before starting the host."
+            )
             self._update_buttons()
             return
 
-        framerate= self.framerateCombo.currentText()
-        bitrate  = self.bitrateCombo.currentText()
-        audio    = self.audioCombo.currentText()
-        adaptive = self.adaptiveCheck.isChecked()
-        display  = self.displayCombo.currentText()
-        preset   = "" if self.presetCombo.currentText() == "Default" else self.presetCombo.currentText()
-        gop      = self.gopCombo.currentText()
-        qp       = "" if self.qpCombo.currentText() == "None" else self.qpCombo.currentText()
-        tune     = "" if self.tuneCombo.currentText() == "None" else self.tuneCombo.currentText()
-        pix_fmt  = self.pixFmtCombo.currentText()
-        debug    = self.debugCheck.isChecked()
-        hwenc    = self.hwencCombo.currentData() or "auto"
+        framerate = self.framerateCombo.currentText()
+        bitrate   = self.bitrateCombo.currentText()
+        audio     = self.audioCombo.currentText()
+        adaptive  = self.adaptiveCheck.isChecked()
+        display   = self.displayCombo.currentText()
+        preset    = "" if self.presetCombo.currentText() == "Default" else self.presetCombo.currentText()
+        gop       = self.gopCombo.currentText()
+        qp        = "" if self.qpCombo.currentText() == "None" else self.qpCombo.currentText()
+        tune      = "" if self.tuneCombo.currentText() == "None" else self.tuneCombo.currentText()
+        pix_fmt   = self.pixFmtCombo.currentText()
+        debug     = self.debugCheck.isChecked()
+        hwenc     = self.hwencCombo.currentData() or "auto"
 
         cmd = [
             sys.executable, os.path.join(HERE, "host.py"),
@@ -516,43 +514,36 @@ class HostTab(QWidget):
             "--pix_fmt", pix_fmt,
             "--hwenc", hwenc,
         ]
-        if adaptive: cmd.append("--adaptive")
-        if preset:   cmd.extend(["--preset", preset])
-        if qp:       cmd.extend(["--qp", qp])
-        if tune:     cmd.extend(["--tune", tune])
-        if debug:    cmd.append("--debug")
-        if IS_LINUX: cmd.extend(["--display", display])
+        if adaptive:
+            cmd.append("--adaptive")
+        if preset:
+            cmd.extend(["--preset", preset])
+        if qp:
+            cmd.extend(["--qp", qp])
+        if tune:
+            cmd.extend(["--tune", tune])
+        if debug:
+            cmd.append("--debug")
+        cmd.extend(["--display", display])
 
         self._save_current()
 
         env = os.environ.copy()
         env["LINUXPLAY_MARKER"] = LINUXPLAY_MARKER
         env["LINUXPLAY_SID"] = env.get("LINUXPLAY_SID") or str(uuid.uuid4())
-        if IS_LINUX:
-            cap_mode = getattr(self, "linuxCaptureCombo", None)
-            cap_val = cap_mode.currentData() if cap_mode else "auto"
-            env["LINUXPLAY_CAPTURE"] = cap_val or "auto"
+
+        cap_mode = getattr(self, "linuxCaptureCombo", None)
+        cap_val = cap_mode.currentData() if cap_mode else "auto"
+        env["LINUXPLAY_CAPTURE"] = cap_val or "auto"
 
         try:
-            if IS_WINDOWS:
-                self.host_process = subprocess.Popen(
-                    cmd,
-                    creationflags=(
-                        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) |
-                        getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                    ),
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    env=env
-                )
-            else:
-                self.host_process = subprocess.Popen(
-                    cmd,
-                    preexec_fn=os.setsid,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    env=env
-                )
+            self.host_process = subprocess.Popen(
+                cmd,
+                preexec_fn=os.setsid,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env
+            )
         except Exception as e:
             logging.error("Failed to start host: %s", e)
             QMessageBox.critical(self, "Start Host Failed", str(e))
@@ -570,7 +561,11 @@ class HostTab(QWidget):
                 self._update_buttons()
             QTimer.singleShot(0, done)
 
-        self._exit_watcher_thread = threading.Thread(target=_watch, name="HostExitWatcher", daemon=True)
+        self._exit_watcher_thread = threading.Thread(
+            target=_watch,
+            name="HostExitWatcher",
+            daemon=True
+        )
         self._exit_watcher_thread.start()
 
         self._update_buttons()
