@@ -16,11 +16,11 @@ Ultra‑low‑latency desktop streaming over UDP using FFmpeg, with a Qt GUI for
 ### Python deps (pip, one‑liner)
 
 ```bash
-python -m pip install -U pip wheel setuptools && \
-python -m pip install PyQt5 PyOpenGL PyOpenGL_accelerate av numpy pynput pyperclip
+python3 -m pip install -U pip wheel setuptools && \
+python3 -m pip install PyQt5 PyOpenGL PyOpenGL_accelerate av numpy pynput pyperclip
 ```
 
-> Tip: Use a venv (`python -m venv .venv && source .venv/bin/activate` on Linux/macOS; `.\.venv\Scripts\activate` on Windows).
+> Tip: Use a venv (`python3 -m venv .venv && source .venv/bin/activate` on Linux/macOS; `.\.venv\Scripts\activate` on Windows).
 
 ### Ubuntu 24.04 Desktop (apt, one‑liner)
 
@@ -51,7 +51,7 @@ sudo apt update && sudo apt install -y \
 ## Quick start
 
 ```bash
-python start.py
+python3 start.py
 ```
 
 - Use the **Host** tab on the capture machine, pick a preset (Lowest Latency / Balanced / High Quality), then **Start Host**.
