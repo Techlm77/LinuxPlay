@@ -139,7 +139,7 @@ def tcp_handshake_client(host_ip):
 class DecoderThread(QThread):
     frame_ready = pyqtSignal(object)
 
-    def __init__(self, input_url, decoder_opts):
+    def __init__(self, input_url, decoder_opts, ultra=False):
         super().__init__()
         self.input_url = input_url
         self.decoder_opts = dict(decoder_opts) if decoder_opts else {}
@@ -149,9 +149,10 @@ class DecoderThread(QThread):
         self.decoder_opts.setdefault("fflags", "nobuffer")
         self.decoder_opts.setdefault("flags", "low_delay")
         self.decoder_opts.setdefault("reorder_queue_size", "0")
-        self.decoder_opts.setdefault("rtbufsize", "8M")
+        self.decoder_opts.setdefault("rtbufsize", "2M")
         self._running = True
         self._sw_fallback_done = False
+        self.ultra = ultra
 
     def _open_container(self):
         logging.debug("Opening stream with opts: %s", self.decoder_opts)
@@ -166,7 +167,7 @@ class DecoderThread(QThread):
                 try:
                     vstream = next(s for s in container.streams if s.type == "video")
                     cc = vstream.codec_context
-                    cc.thread_count = 1
+                    cc.thread_count = 1 if self.ultra else 2
                 except Exception:
                     pass
 
@@ -202,6 +203,7 @@ class VideoWidgetGL(QOpenGLWidget):
         self.setAttribute(Qt.WA_NoSystemBackground, True)
 
         self.host_ip = host_ip
+        this = self
         self.control_callback = control_callback
         self.texture_width = rwidth
         self.texture_height = rheight
@@ -384,7 +386,7 @@ class VideoWidgetGL(QOpenGLWidget):
         return None
 
 class MainWindow(QMainWindow):
-    def __init__(self, decoder_opts, rwidth, rheight, host_ip, udp_port, offset_x, offset_y, net_mode='lan', parent=None):
+    def __init__(self, decoder_opts, rwidth, rheight, host_ip, udp_port, offset_x, offset_y, net_mode='lan', parent=None, ultra=False):
         super().__init__(parent)
         self.setWindowTitle("LinuxPlay")
         self.texture_width = rwidth
@@ -392,6 +394,7 @@ class MainWindow(QMainWindow):
         self.offset_x = offset_x
         self.offset_y = offset_y
         self.host_ip = host_ip
+        self.ultra = ultra
 
         self.control_addr = (host_ip, CONTROL_PORT)
         self.control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -412,10 +415,11 @@ class MainWindow(QMainWindow):
 
         video_url = (f"udp://@0.0.0.0:{udp_port}?pkt_size={pkt}&reuse=1&buffer_size=8388608&fifo_size=1000000&overrun_nonfatal=1&max_delay=200000"
                      if net_mode == "wifi"
-                     else f"udp://@0.0.0.0:{udp_port}?pkt_size={pkt}&reuse=1&buffer_size=4194304&fifo_size=400000&overrun_nonfatal=1&max_delay=50000")
+                     else f"udp://@0.0.0.0:{udp_port}?pkt_size={pkt}&reuse=1&buffer_size=262144&fifo_size=65536&overrun_nonfatal=1&max_delay=0")
+
         logging.debug("Decoder options: %s", decoder_opts)
 
-        self.decoder_thread = DecoderThread(video_url, decoder_opts)
+        self.decoder_thread = DecoderThread(video_url, decoder_opts, ultra=self.ultra)
         self.decoder_thread.frame_ready.connect(self.video_widget.updateFrame, Qt.QueuedConnection)
         self.decoder_thread.start()
 
@@ -538,18 +542,28 @@ def heartbeat_responder_client(host_ip):
 
 def main():
     p = argparse.ArgumentParser(description="LinuxPlay Client (Linux/Windows)")
-    p.add_argument("--decoder", choices=["none","h.264","h.265","av1"], default="none")
+    p.add_argument("--decoder", choices=["none","h.264","h.265"], default="none")
     p.add_argument("--host_ip", required=True)
     p.add_argument("--audio", choices=["enable","disable"], default="disable")
     p.add_argument("--monitor", default="0", help="Index or 'all'")
-    p.add_argument("--hwaccel", choices=["auto","cpu","cuda","qsv","d3d11va","dxva2","vaapi"], default="auto",
-                   help="Force a specific hardware decoder (Auto picks best for your OS/GPU).")
+    p.add_argument("--hwaccel", choices=["auto","cpu","cuda","qsv","d3d11va","dxva2","vaapi"], default="auto")
     p.add_argument("--debug", action="store_true")
     p.add_argument("--net", choices=["auto","lan","wifi"], default="auto")
+    p.add_argument("--ultra", action="store_true",
+                   help="Enable ultra-low-latency (LAN only). Auto-disabled on Wi-Fi/WAN.")
     args = p.parse_args()
+
+    os.environ["vblank_mode"] = "0"
+    os.environ["__GL_SYNC_TO_VBLANK"] = "0"
+    os.environ["__GL_SYNC_DISPLAY_DEVICE"] = "none"
+    os.environ["QT_XCB_GL_INTEGRATION"] = "xcb_egl"
+    os.environ["QT_OPENGL"] = "angle" if IS_WINDOWS else "desktop"
+    os.environ["QT_ANGLE_PLATFORM"] = "d3d11"
+    os.environ["QT_LOGGING_RULES"] = "qt.qpa.*=false"
 
     fmt = QSurfaceFormat()
     fmt.setSwapInterval(0)
+    fmt.setSwapBehavior(QSurfaceFormat.SingleBuffer)
     QSurfaceFormat.setDefaultFormat(fmt)
 
     app = QApplication(sys.argv)
@@ -572,6 +586,14 @@ def main():
         except Exception:
             net_mode = "lan"
     logging.info(f"Network mode: {net_mode}")
+
+    ultra_requested = args.ultra
+    ultra_active = bool(ultra_requested and net_mode == "lan")
+
+    if ultra_requested and not ultra_active:
+        logging.info("Ultra requested but disabled on %s; using safe buffering.", net_mode)
+    elif ultra_active:
+        logging.info("⚡ Ultra mode enabled (LAN): minimal buffering, no B-frame reordering.")
 
     try:
         monitors = []
@@ -606,6 +628,19 @@ def main():
         if chosen == "vaapi":
             decoder_opts["hwaccel_device"] = "/dev/dri/renderD128"
 
+    if ultra_active:
+        decoder_opts.update({
+            "fflags": "nobuffer",
+            "flags": "low_delay",
+            "flags2": "+fast",
+            "probesize": "32",
+            "analyzeduration": "0",
+            "rtbufsize": "512k",
+            "threads": "1",
+            "skip_frame": "noref",
+            "vsync": "0",
+        })
+
     threading.Thread(target=clipboard_listener_client, args=(args.host_ip,), daemon=True).start()
 
     global audio_proc
@@ -614,7 +649,9 @@ def main():
             "ffplay","-hide_banner","-loglevel","error",
             *([] if net_mode == "wifi" else ["-fflags","nobuffer"]), "-flags","low_delay",
             "-autoexit","-nodisp",
-            "-i", (f"udp://@0.0.0.0:{UDP_AUDIO_PORT}?fifo_size=800000&buffer_size=4194304&max_delay=150000&pkt_size=1316&overrun_nonfatal=1" if net_mode == "wifi" else f"udp://@0.0.0.0:{UDP_AUDIO_PORT}?fifo_size=40000&max_delay=0&pkt_size=1316&overrun_nonfatal=1")
+            "-i", (f"udp://@0.0.0.0:{UDP_AUDIO_PORT}?fifo_size=800000&buffer_size=4194304&max_delay=150000&pkt_size=1316&overrun_nonfatal=1"
+                   if net_mode == "wifi"
+                   else f"udp://@0.0.0.0:{UDP_AUDIO_PORT}?fifo_size=40000&max_delay=0&pkt_size=1316&overrun_nonfatal=1")
         ]
         logging.info("Audio with ffplay…")
         try:
@@ -626,7 +663,7 @@ def main():
         windows = []
         for i, mon in enumerate(monitors):
             w,h,ox,oy = mon
-            win = MainWindow(decoder_opts, w, h, args.host_ip, DEFAULT_UDP_PORT + i, ox, oy, net_mode)
+            win = MainWindow(decoder_opts, w, h, args.host_ip, DEFAULT_UDP_PORT + i, ox, oy, net_mode, ultra=ultra_active)
             win.setWindowTitle(f"LinuxPlay - Monitor {i}")
             win.show()
             windows.append(win)
@@ -639,7 +676,7 @@ def main():
         if mon_index < 0 or mon_index >= len(monitors):
             mon_index = 0
         w,h,ox,oy = monitors[mon_index]
-        win = MainWindow(decoder_opts, w, h, args.host_ip, DEFAULT_UDP_PORT + mon_index, ox, oy, net_mode)
+        win = MainWindow(decoder_opts, w, h, args.host_ip, DEFAULT_UDP_PORT + mon_index, ox, oy, net_mode, ultra=ultra_active)
         win.setWindowTitle(f"LinuxPlay - Monitor {mon_index}")
         win.show()
         ret = app.exec_()
@@ -653,4 +690,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
