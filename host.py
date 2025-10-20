@@ -321,7 +321,7 @@ def _format_bits(bits: int) -> str:
 
 def _target_bpp(codec: str, fps: int) -> float:
     c = (codec or "h.264").lower()
-    if c in ("h.265","hevc","av1"):
+    if c in ("h.265","hevc"):
         base = 0.045
     else:
         base = 0.07
@@ -375,78 +375,116 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
                 hwenc = "vaapi"
             else:
                 hwenc = "cpu"
-        elif codec == "av1":
-            if has_nvidia() and ffmpeg_has_encoder("av1_nvenc"):
-                hwenc = "nvenc"
-            elif is_intel_cpu() and ffmpeg_has_encoder("av1_qsv"):
-                hwenc = "qsv"
-            elif has_vaapi() and ffmpeg_has_encoder("av1_vaapi"):
-                hwenc = "vaapi"
-            else:
-                hwenc = "cpu"
+        else:
+            hwenc = "cpu"
 
     if codec == "h.264":
         if hwenc == "nvenc" and ensure("h264_nvenc"):
-            enc = ["-c:v","h264_nvenc","-preset", _safe_nvenc_preset(preset_l or "llhq"),
-                   "-g", gop, "-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt, "-bsf:v","h264_mp4toannexb"]
-            if not tune: enc += ["-tune","ll"]
-            if qp: enc += ["-qp", qp]
+            enc = [
+                "-c:v", "h264_nvenc",
+                "-preset", _safe_nvenc_preset(preset_l or "llhq"),
+                "-g", gop, "-bf", "0",
+                "-b:v", bitrate,
+                "-pix_fmt", pix_fmt,
+                "-bsf:v", "h264_mp4toannexb"
+            ]
+            if not tune:
+                enc += ["-tune", "ll"]
+            if qp:
+                enc += ["-qp", qp]
+
         elif hwenc == "qsv" and ensure("h264_qsv"):
-            enc = ["-c:v","h264_qsv","-g", gop, "-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt, "-bsf:v","h264_mp4toannexb"]
-            if qp: enc += ["-global_quality", qp]
-        
+            enc = [
+                "-c:v", "h264_qsv",
+                "-g", gop, "-bf", "0",
+                "-b:v", bitrate,
+                "-pix_fmt", pix_fmt,
+                "-bsf:v", "h264_mp4toannexb"
+            ]
+            if qp:
+                enc += ["-global_quality", qp]
+
         elif hwenc == "vaapi" and has_vaapi() and ensure("h264_vaapi"):
-            extra_filters += ["-vf","format=nv12,hwupload","-vaapi_device","/dev/dri/renderD128"]
-            enc = ["-c:v","h264_vaapi","-g", gop,"-bf","0","-b:v",bitrate, "-bsf:v","h264_mp4toannexb"]
-            enc += ["-qp", qp or "20"]
+            extra_filters += ["-vf", "format=nv12,hwupload", "-vaapi_device", "/dev/dri/renderD128"]
+            enc = [
+                "-c:v", "h264_vaapi",
+                "-g", gop, "-bf", "0",
+                "-b:v", bitrate,
+                "-bsf:v", "h264_mp4toannexb",
+                "-qp", qp or "20"
+            ]
         else:
-            enc = ["-c:v","libx264","-preset",(preset_l or "ultrafast"),
-                   "-g", gop,"-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt,
-                   "-tune", (tune or "zerolatency"), "-bsf:v","h264_mp4toannexb"]
-            if qp: enc += ["-qp", qp]
+            enc = [
+                "-c:v", "libx264",
+                "-preset", (preset_l or "ultrafast"),
+                "-g", gop, "-bf", "0",
+                "-b:v", bitrate,
+                "-pix_fmt", pix_fmt,
+                "-tune", (tune or "zerolatency"),
+                "-bsf:v", "h264_mp4toannexb"
+            ]
+            if qp:
+                enc += ["-qp", qp]
 
     elif codec == "h.265":
         if hwenc == "nvenc" and ensure("hevc_nvenc"):
-            enc = ["-c:v","hevc_nvenc","-preset", _safe_nvenc_preset(preset_l or "p5"),
-                   "-g", gop, "-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt, "-bsf:v","hevc_mp4toannexb"]
-            if not tune: enc += ["-tune","ll"]
-            if qp: enc += ["-qp", qp]
-        elif hwenc == "qsv" and ensure("hevc_qsv"):
-            enc = ["-c:v","hevc_qsv","-g", gop,"-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt, "-bsf:v","hevc_mp4toannexb"]
-            if qp: enc += ["-global_quality", qp]
-        
-        elif hwenc == "vaapi" and has_vaapi() and ensure("hevc_vaapi"):
-            extra_filters += ["-vf","format=nv12,hwupload","-vaapi_device","/dev/dri/renderD128"]
-            enc = ["-c:v","hevc_vaapi","-g", gop,"-bf","0","-b:v",bitrate, "-bsf:v","hevc_mp4toannexb"]
-            enc += ["-qp", qp or "20"]
-        else:
-            enc = ["-c:v","libx265","-preset",(preset_l or "ultrafast"),
-                   "-g", gop,"-bf","0","-b:v",bitrate,
-                   "-tune", (tune or "zerolatency"), "-bsf:v","hevc_mp4toannexb"]
-            if qp: enc += ["-qp", qp]
+            enc = [
+                "-c:v", "hevc_nvenc",
+                "-preset", _safe_nvenc_preset(preset_l or "p5"),
+                "-g", gop, "-bf", "0",
+                "-b:v", bitrate,
+                "-pix_fmt", pix_fmt,
+                "-bsf:v", "hevc_mp4toannexb"
+            ]
+            if not tune:
+                enc += ["-tune", "ll"]
+            if qp:
+                enc += ["-qp", qp]
 
-    elif codec == "av1":
-        if hwenc == "nvenc" and ensure("av1_nvenc"):
-            enc = ["-c:v","av1_nvenc","-preset", _safe_nvenc_preset(preset_l or "p5"),
-                   "-g", gop,"-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt]
-            if qp: enc += ["-qp", qp]
-        elif hwenc == "qsv" and ensure("av1_qsv"):
-            enc = ["-c:v","av1_qsv","-g", gop,"-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt]
-            if qp: enc += ["-global_quality", qp]
-        
-        elif hwenc == "vaapi" and has_vaapi() and ensure("av1_vaapi"):
-            extra_filters += ["-vf","format=nv12,hwupload","-vaapi_device","/dev/dri/renderD128"]
-            enc = ["-c:v","av1_vaapi","-g", gop,"-bf","0","-b:v",bitrate]
-            enc += ["-qp", qp or "20"]
+        elif hwenc == "qsv" and ensure("hevc_qsv"):
+            enc = [
+                "-c:v", "hevc_qsv",
+                "-g", gop, "-bf", "0",
+                "-b:v", bitrate,
+                "-pix_fmt", pix_fmt,
+                "-bsf:v", "hevc_mp4toannexb"
+            ]
+            if qp:
+                enc += ["-global_quality", qp]
+
+        elif hwenc == "vaapi" and has_vaapi() and ensure("hevc_vaapi"):
+            extra_filters += ["-vf", "format=nv12,hwupload", "-vaapi_device", "/dev/dri/renderD128"]
+            enc = [
+                "-c:v", "hevc_vaapi",
+                "-g", gop, "-bf", "0",
+                "-b:v", bitrate,
+                "-bsf:v", "hevc_mp4toannexb",
+                "-qp", qp or "20"
+            ]
         else:
-            enc = ["-c:v","libaom-av1","-cpu-used","4","-g", gop,"-b:v",bitrate]
-            if qp: enc += ["-qp", qp]
+            enc = [
+                "-c:v", "libx265",
+                "-preset", (preset_l or "ultrafast"),
+                "-g", gop, "-bf", "0",
+                "-b:v", bitrate,
+                "-tune", (tune or "zerolatency"),
+                "-bsf:v", "hevc_mp4toannexb"
+            ]
+            if qp:
+                enc += ["-qp", qp]
 
     else:
-        enc = ["-c:v","libx264","-preset",(preset_l or "ultrafast"),
-               "-g", gop,"-bf","0","-b:v",bitrate,"-pix_fmt",pix_fmt,
-               "-tune", (tune or "zerolatency"), "-bsf:v","h264_mp4toannexb"]
-        if qp: enc += ["-qp", qp]
+        enc = [
+            "-c:v", "libx264",
+            "-preset", (preset_l or "ultrafast"),
+            "-g", gop, "-bf", "0",
+            "-b:v", bitrate,
+            "-pix_fmt", pix_fmt,
+            "-tune", (tune or "zerolatency"),
+            "-bsf:v", "h264_mp4toannexb"
+        ]
+        if qp:
+            enc += ["-qp", qp]
 
     return extra_filters, enc
 
@@ -497,8 +535,7 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
         enc = (args.encoder or "h.264").lower()
         return (
             (enc == "h.264" and ffmpeg_has_encoder("h264_vaapi")) or
-            (enc == "h.265" and ffmpeg_has_encoder("hevc_vaapi")) or
-            (enc == "av1"   and ffmpeg_has_encoder("av1_vaapi"))
+            (enc == "h.265" and ffmpeg_has_encoder("hevc_vaapi"))
         )
 
     use_kms = False
@@ -528,7 +565,7 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
             gop=gop, qp=qp, tune=tune, bitrate=bitrate, pix_fmt=pix_fmt
         )
 
-        if any(x in encode for x in ("h264_vaapi", "hevc_vaapi", "av1_vaapi")):
+        if any(x in encode for x in ("h264_vaapi", "hevc_vaapi")):
             extra_filters = [
                 "-vf", f"hwmap=derive_device=vaapi,scale_vaapi=w={w}:h={h}:format=nv12",
                 "-vaapi_device", "/dev/dri/renderD128"
@@ -579,16 +616,27 @@ def build_audio_cmd():
                 text=True,
                 stderr=subprocess.DEVNULL
             )
+
+            best = None
             for line in out.splitlines():
-                parts = line.split()
-                if len(parts) >= 2 and ".monitor" in parts[1]:
-                    mon = parts[1]
-                    break
+                parts = line.split("\t")
+                if len(parts) >= 5:
+                    name, state = parts[1], parts[4].upper()
+                    if ".monitor" in name:
+                        if state == "RUNNING":
+                            best = name
+                            break
+                        elif state == "IDLE" and not best:
+                            best = name
+            if best:
+                mon = best
         except Exception as e:
             logging.warning("PulseAudio monitor detection failed: %s", e)
 
     if not mon:
         mon = "default.monitor"
+    elif not mon.endswith(".monitor"):
+        mon += ".monitor"
 
     logging.info("Using PulseAudio source: %s", mon)
 
@@ -1227,7 +1275,7 @@ class HostWindow(QWidget):
 def parse_args():
     p = argparse.ArgumentParser(description="LinuxPlay Host (Linux only)")
     p.add_argument("--gui", action="store_true", help="Show host GUI window.")
-    p.add_argument("--encoder", choices=["none","h.264","h.265","av1"], default="none")
+    p.add_argument("--encoder", choices=["none","h.264","h.265"], default="none")
     p.add_argument("--hwenc", choices=["auto","cpu","nvenc","qsv","vaapi"], default="auto",
                    help="Manual encoder backend selection (auto=heuristic).")
     p.add_argument("--framerate", default=DEFAULT_FPS)
