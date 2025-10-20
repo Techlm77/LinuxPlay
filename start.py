@@ -26,7 +26,6 @@ except Exception:
 
 IS_WINDOWS = platform.system() == "Windows"
 IS_LINUX   = platform.system() == "Linux"
-IS_MAC     = platform.system() == "Darwin"
 
 WG_INFO_PATH = "/tmp/linuxplay_wg_info.json"  # {"host_tunnel_ip": "10.13.13.1"}
 WG_QR_PATH   = "/tmp/linuxplay_wg_peer.png"   # QR image for mobile client
@@ -87,8 +86,6 @@ def check_encoder_support(codec):
         names = ["h264_nvenc", "h264_qsv", "h264_amf", "libx264", "h264_vaapi"]
     elif key == "h265":
         names = ["hevc_nvenc", "hevc_qsv", "hevc_amf", "libx265", "hevc_vaapi"]
-    elif key == "av1":
-        names = ["av1_nvenc", "av1_qsv", "av1_amf", "libaom-av1", "av1_vaapi"]
     else:
         return False
     return any(ffmpeg_has_encoder(n) for n in names)
@@ -106,8 +103,6 @@ def check_decoder_support(codec):
         return " h264 " in output or "\nh264\n" in output
     if key == "h265":
         return " hevc " in output or "\nhevc\n" in output
-    if key == "av1":
-        return " av1 " in output or "\nav1\n" in output
     return False
 
 def load_cfg():
@@ -136,12 +131,6 @@ ENCODER_NAME_MAP = {
     ("h.265", "amf"):   "hevc_amf",
     ("h.265", "vaapi"): "hevc_vaapi",
     ("h.265", "cpu"):   "libx265",
-
-    ("av1",   "nvenc"): "av1_nvenc",
-    ("av1",   "qsv"):   "av1_qsv",
-    ("av1",   "amf"):   "av1_amf",
-    ("av1",   "vaapi"): "av1_vaapi",
-    ("av1",   "cpu"):   "libaom-av1",
 }
 
 BACKEND_READABLE = {
@@ -241,28 +230,81 @@ class HostTab(QWidget):
             self.encoderCombo.addItem("h.264")
         if check_encoder_support("h.265"):
             self.encoderCombo.addItem("h.265")
-        if check_encoder_support("av1"):
-            self.encoderCombo.addItem("av1")
         self.encoderCombo.currentIndexChanged.connect(self._refresh_backend_choices)
 
         self.hwencCombo = QComboBox()
 
-        self.framerateCombo = QComboBox(); self.framerateCombo.addItems(["24","30","45","60","75","90","120","144","240"])
-        self.bitrateCombo = QComboBox(); self.bitrateCombo.addItems([
-            "0","100k","200k","300k","400k","500k","750k","1M","1.5M","2M","3M","4M","5M","6M","8M","10M","12M","15M","20M","25M","30M","40M","50M","60M","80M","100M"
+        self.framerateCombo = QComboBox()
+        self.framerateCombo.addItems([
+            "15","24","30","45","60","75","90","100","120","144","165","200","240","300","360"
         ])
-        self.audioCombo    = QComboBox(); self.audioCombo.addItems(["enable","disable"])
+
+        self.bitrateCombo = QComboBox()
+        self.bitrateCombo.addItems([
+            "0","50k","100k","200k","300k","400k","500k","750k",
+            "1M","1.5M","2M","3M","4M","5M","6M","8M","10M","12M",
+            "15M","20M","25M","30M","35M","40M","45M","50M",
+            "60M","70M","80M","90M","100M","125M","150M","200M","250M","300M"
+        ])
+
+        self.audioCombo = QComboBox()
+        self.audioCombo.addItems([
+            "enable",
+            "disable"
+        ])
+
         self.adaptiveCheck = QCheckBox("Enable Adaptive Bitrate")
-        self.displayCombo  = QComboBox(); self.displayCombo.addItems([":0",":1",":2"])
-        self.presetCombo   = QComboBox(); self.presetCombo.addItems(
-            ["Default","ultrafast","superfast","veryfast","fast","medium","slow","veryslow",
-             "llhq","p1","p2","p3","p4","p5","p6","p7"]
-        )
-        self.gopCombo      = QComboBox(); self.gopCombo.addItems(["5","8","10","15","20","30","45","60","90","120"])
-        self.qpCombo       = QComboBox(); self.qpCombo.addItems(["None","5","10","15","18","20","23","25","28","30","32","35","38","40","42","45","48","50","55","60"])
-        self.tuneCombo     = QComboBox(); self.tuneCombo.addItems(["None","zerolatency","film","animation","grain","psnr","ssim","fastdecode"])
-        self.pixFmtCombo   = QComboBox(); self.pixFmtCombo.addItems(["yuv420p","nv12","yuv422p","yuv444p"])
-        self.debugCheck    = QCheckBox("Enable Debug")
+
+        self.displayCombo = QComboBox()
+        self.displayCombo.addItems([":0",":1",":2",":3",":4"])
+
+        self.presetCombo = QComboBox()
+        self.presetCombo.addItems([
+            "Default",
+            "ultrafast","superfast","veryfast","faster","fast","medium","slow","slower","veryslow",
+            "llhp","llhq","hp","hq","p1","p2","p3","p4","p5","p6","p7",
+            "lossless","speed","balanced","quality"
+        ])
+
+        self.gopCombo = QComboBox()
+        self.gopCombo.addItems([
+            "1","2","3","5","8","10","12","15","20","30","45","60","90","120","180","240","360"
+        ])
+
+        self.qpCombo = QComboBox()
+        self.qpCombo.addItems([
+            "None","0","3","5","8","10","12","15","18","20","22","23","25","28","30","32","35",
+            "38","40","42","45","48","50","52","55","58","60"
+        ])
+
+        self.tuneCombo = QComboBox()
+        self.tuneCombo.addItems([
+            "None",
+            "zerolatency",
+            "film",
+            "animation",
+            "grain",
+            "psnr",
+            "ssim",
+            "fastdecode",
+            "stillimage",
+            "stupidlyfast"
+        ])
+
+        self.pixFmtCombo = QComboBox()
+        self.pixFmtCombo.addItems([
+            "yuv420p",
+            "nv12",
+            "yuv422p",
+            "yuv444p",
+            "p010le",
+            "p016le",
+            "rgb0",
+            "bgr0",
+            "rgba"
+        ])
+
+        self.debugCheck = QCheckBox("Enable Debug")
 
         self.captureHint = QLabel("")
         if ffmpeg_has_device("kmsgrab"):
@@ -362,21 +404,29 @@ class HostTab(QWidget):
 
     def profileChanged(self, idx):
         profile = self.profileCombo.currentText()
+
         if profile == "Lowest Latency":
-            self.encoderCombo.setCurrentText("h.264" if self.encoderCombo.findText("h.264") != -1 else "none")
+            self.encoderCombo.setCurrentText(
+                "h.264" if self.encoderCombo.findText("h.264") != -1 else "none"
+            )
             self.framerateCombo.setCurrentText("60")
             self.bitrateCombo.setCurrentText("2M")
             self.audioCombo.setCurrentText("disable")
             self.adaptiveCheck.setChecked(False)
             self.displayCombo.setCurrentText(":0")
-            self.presetCombo.setCurrentText("llhq" if self.presetCombo.findText("llhq") != -1 else "ultrafast")
+            self.presetCombo.setCurrentText(
+                "llhq" if self.presetCombo.findText("llhq") != -1 else "ultrafast"
+            )
             self.gopCombo.setCurrentText("8")
             self.qpCombo.setCurrentText("None")
             self.tuneCombo.setCurrentText("zerolatency")
             self.pixFmtCombo.setCurrentText("yuv420p")
             self._refresh_backend_choices(preselect="auto")
+
         elif profile == "Balanced":
-            self.encoderCombo.setCurrentText("h.264" if self.encoderCombo.findText("h.264") != -1 else "none")
+            self.encoderCombo.setCurrentText(
+                "h.264" if self.encoderCombo.findText("h.264") != -1 else "none"
+            )
             self.framerateCombo.setCurrentText("45")
             self.bitrateCombo.setCurrentText("4M")
             self.audioCombo.setCurrentText("enable")
@@ -388,8 +438,11 @@ class HostTab(QWidget):
             self.tuneCombo.setCurrentText("film")
             self.pixFmtCombo.setCurrentText("yuv420p")
             self._refresh_backend_choices(preselect="auto")
+
         elif profile == "High Quality":
-            self.encoderCombo.setCurrentText("h.265" if self.encoderCombo.findText("h.265") != -1 else "h.264")
+            self.encoderCombo.setCurrentText(
+                "h.265" if self.encoderCombo.findText("h.265") != -1 else "h.264"
+            )
             self.framerateCombo.setCurrentText("30")
             self.bitrateCombo.setCurrentText("16M")
             self.audioCombo.setCurrentText("enable")
@@ -401,8 +454,13 @@ class HostTab(QWidget):
             self.tuneCombo.setCurrentText("None")
             self.pixFmtCombo.setCurrentText("yuv444p")
             self._refresh_backend_choices(preselect="auto")
+
         else:
-            self.encoderCombo.setCurrentText("h.264" if self.encoderCombo.findText("h.264") != -1 else ("h.265" if self.encoderCombo.findText("h.265") != -1 else ("av1" if self.encoderCombo.findText("av1") != -1 else "none")))
+            self.encoderCombo.setCurrentText(
+                "h.265"
+                if self.encoderCombo.findText("h.265") != -1
+                else ("h.264" if self.encoderCombo.findText("h.264") != -1 else "none")
+            )
             self.framerateCombo.setCurrentText("30")
             self.bitrateCombo.setCurrentText("8M")
             self.audioCombo.setCurrentText("enable")
@@ -485,7 +543,7 @@ class HostTab(QWidget):
             QMessageBox.warning(
                 self,
                 "Select an encoder",
-                "Encoder is set to 'none'. Pick h.264, h.265, or av1 before starting the host."
+                "Encoder is set to 'none'. Pick h.264 or h.265 before starting the host."
             )
             self._update_buttons()
             return
@@ -643,7 +701,6 @@ class ClientTab(QWidget):
         self.decoderCombo.addItem("none")
         if check_decoder_support("h.264"): self.decoderCombo.addItem("h.264")
         if check_decoder_support("h.265"): self.decoderCombo.addItem("h.265")
-        if check_decoder_support("av1"):   self.decoderCombo.addItem("av1")
 
         self.hwaccelCombo = QComboBox()
         self.hwaccelCombo.addItems(["auto","cpu","cuda","qsv","d3d11va","dxva2","vaapi"])
@@ -674,13 +731,19 @@ class ClientTab(QWidget):
 
         self.audioCombo = QComboBox(); self.audioCombo.addItems(["enable","disable"])
         self.monitorField = QLineEdit("0")
+        self.netCombo = QComboBox(); self.netCombo.addItems(["auto","lan","wifi"])
+        self.ultraCheck = QCheckBox("Ultra (LAN only)")
         self.debugCheck = QCheckBox("Enable Debug")
+
+        self._load_saved_client_extras()
 
         form_layout.addRow("Decoder:", self.decoderCombo)
         form_layout.addRow("HW accel:", self.hwaccelCombo)
         form_layout.addRow("Host IP:", self.hostIPEdit)
         form_layout.addRow("Audio:", self.audioCombo)
         form_layout.addRow("Monitor (index or 'all'):", self.monitorField)
+        form_layout.addRow("Network Mode:", self.netCombo)
+        form_layout.addRow("Ultra Mode:", self.ultraCheck)
         form_layout.addRow("Debug:", self.debugCheck)
         form_group.setLayout(form_layout)
 
@@ -694,6 +757,19 @@ class ClientTab(QWidget):
         main_layout.addStretch()
         self.setLayout(main_layout)
 
+    def _load_saved_client_extras(self):
+        cfg = load_cfg().get("client", {})
+        def set_combo_text(c: QComboBox, val: str):
+            if not val: return
+            idx = c.findText(val)
+            if idx != -1: c.setCurrentIndex(idx)
+        set_combo_text(self.audioCombo, cfg.get("audio", "disable"))
+        set_combo_text(self.hwaccelCombo, cfg.get("hwaccel", "auto"))
+        set_combo_text(self.decoderCombo, cfg.get("decoder", "none"))
+        set_combo_text(self.netCombo, cfg.get("net", "auto"))
+        self.ultraCheck.setChecked(bool(cfg.get("ultra", False)))
+        self.monitorField.setText(cfg.get("monitor", "0"))
+
     def start_client(self):
         if not ffmpeg_ok():
             self._warn_ffmpeg()
@@ -705,17 +781,30 @@ class ClientTab(QWidget):
         monitor = self.monitorField.text().strip() or "0"
         debug   = self.debugCheck.isChecked()
         hwaccel = self.hwaccelCombo.currentText()
+        net     = self.netCombo.currentText()
+        ultra   = self.ultraCheck.isChecked()
 
         if not host_ip:
             self.hostIPEdit.setEditText("Enter host IP or WG tunnel IP")
             return
 
         cfg = load_cfg()
-        rec = cfg.get("client", {}).get("recent_ips", [])
+        client_cfg = cfg.get("client", {})
+        rec = client_cfg.get("recent_ips", [])
         if host_ip and host_ip not in rec:
             rec = [host_ip] + rec
             rec = rec[:5]
-        cfg["client"] = {"recent_ips": rec}
+        client_cfg.update({
+            "recent_ips": rec,
+            "decoder": decoder,
+            "hwaccel": hwaccel,
+            "audio": audio,
+            "monitor": monitor,
+            "debug": bool(debug),
+            "net": net,
+            "ultra": bool(ultra),
+        })
+        cfg["client"] = client_cfg
         save_cfg(cfg)
 
         cmd = [
@@ -724,8 +813,12 @@ class ClientTab(QWidget):
             "--host_ip", host_ip,
             "--audio", audio,
             "--monitor", monitor,
-            "--hwaccel", hwaccel
+            "--hwaccel", hwaccel,
+            "--net", net
         ]
+        
+        if ultra:
+            cmd.append("--ultra")
         if debug:
             cmd.append("--debug")
         try:
@@ -754,6 +847,7 @@ class HelpTab(QWidget):
           <li>Linux capture can use <b>kmsgrab</b> (KMS/DRM) or <b>x11grab</b>. kmsgrab generally requires <code>CAP_SYS_ADMIN</code> on the ffmpeg binary (e.g. <code>sudo setcap cap_sys_admin+ep $(which ffmpeg)</code>) and does not draw the cursor.</li>
           <li>Hosting is Linux-only. Windows and macOS can run the client and connect to a Linux host.</li>
           <li>Multi-monitor is supported; choose a monitor index or "all" on the client.</li>
+          <li><b>Ultra mode</b>: tick "Ultra (LAN only)" in Client; the client auto-disables it on Wi-Fi/WAN.</li>
           <li>For lowest latency try: h.264, preset llhq (or ultrafast), GOP 10, audio disabled, and keep bitrates modest.</li>
           <li>Use the <b>Encoder Backend</b> to select NVENC/QSV/AMF/VAAPI/CPU explicitly.</li>
           <li>The Host opens in its own window; use that window's Stop button (or close it) to end the session.</li>
@@ -775,8 +869,6 @@ class StartWindow(QWidget):
         if IS_LINUX:
             self.hostTab = HostTab()
             self.tabs.addTab(self.hostTab, "Host")
-        else:
-            pass
         self.tabs.addTab(self.clientTab, "Client")
         self.tabs.addTab(self.helpTab, "Help")
         main_layout = QVBoxLayout()
