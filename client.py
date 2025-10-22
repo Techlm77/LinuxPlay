@@ -9,6 +9,9 @@ import threading
 import subprocess
 import platform as py_platform
 from queue import Queue
+import psutil
+import statistics
+import shutil
 
 try:
     HERE = os.path.dirname(os.path.abspath(__file__))
@@ -22,12 +25,11 @@ import av
 import numpy as np
 
 from PyQt5.QtWidgets import QApplication, QMainWindow, QMessageBox, QOpenGLWidget
-from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer
-from PyQt5.QtGui import QSurfaceFormat
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QPoint
+from PyQt5.QtGui import QSurfaceFormat, QPainter, QFont, QColor
 
 from OpenGL.GL import *
 
-MOUSE_MOVE_THROTTLE = 0.003
 DEFAULT_UDP_PORT = 5000
 DEFAULT_RESOLUTION = "1920x1080"
 CONTROL_PORT = 7000
@@ -143,7 +145,7 @@ class DecoderThread(QThread):
         super().__init__()
         self.input_url = input_url
         self.decoder_opts = dict(decoder_opts) if decoder_opts else {}
-        self.decoder_opts.setdefault("probesize", "64k")
+        self.decoder_opts.setdefault("probesize", "32")
         self.decoder_opts.setdefault("analyzeduration", "0")
         self.decoder_opts.setdefault("scan_all_pmts", "1")
         self.decoder_opts.setdefault("fflags", "nobuffer")
@@ -153,6 +155,8 @@ class DecoderThread(QThread):
         self._running = True
         self._sw_fallback_done = False
         self.ultra = ultra
+        self._emit_interval = 0.0
+        self._last_emit = 0.0
 
     def _open_container(self):
         logging.debug("Opening stream with opts: %s", self.decoder_opts)
@@ -163,7 +167,6 @@ class DecoderThread(QThread):
             container = None
             try:
                 container = self._open_container()
-
                 try:
                     vstream = next(s for s in container.streams if s.type == "video")
                     cc = vstream.codec_context
@@ -174,20 +177,32 @@ class DecoderThread(QThread):
                 for frame in container.decode(video=0):
                     if not self._running:
                         break
+
+                    now_emit = time.time()
+                    if self._emit_interval > 0 and (now_emit - self._last_emit) < self._emit_interval:
+                        continue
+                    self._last_emit = now_emit
+
                     arr = frame.to_ndarray(format="rgb24")
                     self.frame_ready.emit((arr, frame.width, frame.height))
+
             except Exception as e:
                 logging.error("Decoding error: %s", e)
                 if not self._sw_fallback_done and "hwaccel" in self.decoder_opts:
-                    logging.warning("Falling back to software decoding…")
+                    logging.warning("Hardware decoder failed — switching to software mode")
                     self.decoder_opts.pop("hwaccel", None)
                     self.decoder_opts.pop("hwaccel_device", None)
                     self._sw_fallback_done = True
+                    continue
                 time.sleep(0.03)
+
             finally:
                 if container:
-                    try: container.close()
-                    except Exception: pass
+                    try:
+                        container.close()
+                    except Exception:
+                        pass
+
             time.sleep(0.002)
 
     def stop(self):
@@ -203,7 +218,6 @@ class VideoWidgetGL(QOpenGLWidget):
         self.setAttribute(Qt.WA_NoSystemBackground, True)
 
         self.host_ip = host_ip
-        this = self
         self.control_callback = control_callback
         self.texture_width = rwidth
         self.texture_height = rheight
@@ -220,6 +234,13 @@ class VideoWidgetGL(QOpenGLWidget):
         self.texture_id = None
         self.pbo_ids = []
         self.current_pbo = 0
+
+        self._proc = psutil.Process(os.getpid())
+        self._frame_times = []
+        self._fps = 0.0
+        self._cpu = 0.0
+        self._ram = 0.0
+        self._last_stats_update = 0.0
 
     def on_clipboard_change(self):
         new_text = self.clipboard.text()
@@ -249,7 +270,7 @@ class VideoWidgetGL(QOpenGLWidget):
 
         if self.pbo_ids:
             glDeleteBuffers(len(self.pbo_ids), self.pbo_ids)
-        self.pbo_ids = list(glGenBuffers(2))
+        self.pbo_ids = list(glGenBuffers(3))
         buf_size = w * h * 3
         for pbo in self.pbo_ids:
             glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo)
@@ -264,64 +285,132 @@ class VideoWidgetGL(QOpenGLWidget):
 
     def paintGL(self):
         glClear(GL_COLOR_BUFFER_BIT)
-        if self.frame_data:
-            arr, fw, fh = self.frame_data
-            if (fw != self.texture_width) or (fh != self.texture_height):
-                self.resizeTexture(fw, fh)
-            data = np.ascontiguousarray(arr, dtype=np.uint8)
-            size = data.nbytes
-            current_pbo = self.pbo_ids[self.current_pbo]
-            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, current_pbo)
-            ptr = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, size, GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT)
-            if ptr:
-                from ctypes import memmove, c_void_p
-                memmove(c_void_p(ptr), data.ctypes.data, size)
-                glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER)
-            glBindTexture(GL_TEXTURE_2D, self.texture_id)
-            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, fw, fh, GL_RGB, GL_UNSIGNED_BYTE, None)
-            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0)
+        if not self.frame_data:
+            return
 
-            glEnable(GL_TEXTURE_2D)
-            glBegin(GL_QUADS)
-            glTexCoord2f(0.0, 1.0); glVertex2f(-1.0, -1.0)
-            glTexCoord2f(1.0, 1.0); glVertex2f( 1.0, -1.0)
-            glTexCoord2f(1.0, 0.0); glVertex2f( 1.0,  1.0)
-            glTexCoord2f(0.0, 0.0); glVertex2f(-1.0,  1.0)
-            glEnd()
-            glDisable(GL_TEXTURE_2D)
-            glBindTexture(GL_TEXTURE_2D, 0)
+        arr, fw, fh = self.frame_data
+        if (fw != self.texture_width) or (fh != self.texture_height):
+            self.resizeTexture(fw, fh)
 
-            self.current_pbo = (self.current_pbo + 1) % 2
+        data = np.ascontiguousarray(arr, dtype=np.uint8)
+        size = data.nbytes
+
+        current_pbo = self.pbo_ids[self.current_pbo]
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, current_pbo)
+
+        try:
+            ptr = glMapBufferRange(
+                GL_PIXEL_UNPACK_BUFFER, 0, size,
+                GL_MAP_WRITE_BIT |
+                GL_MAP_INVALIDATE_RANGE_BIT |
+                GL_MAP_UNSYNCHRONIZED_BIT
+            )
+        except Exception:
+            ptr = None
+
+        if ptr:
+            from ctypes import memmove, c_void_p
+            memmove(c_void_p(ptr), data.ctypes.data, size)
+            glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER)
+        else:
+            glBufferSubData(GL_PIXEL_UNPACK_BUFFER, 0, data)
+
+        glBindTexture(GL_TEXTURE_2D, self.texture_id)
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, fw, fh, GL_RGB, GL_UNSIGNED_BYTE, None)
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0)
+
+        glEnable(GL_TEXTURE_2D)
+        glBegin(GL_QUADS)
+        glTexCoord2f(0.0, 1.0); glVertex2f(-1.0, -1.0)
+        glTexCoord2f(1.0, 1.0); glVertex2f(1.0, -1.0)
+        glTexCoord2f(1.0, 0.0); glVertex2f(1.0, 1.0)
+        glTexCoord2f(0.0, 0.0); glVertex2f(-1.0, 1.0)
+        glEnd()
+        glDisable(GL_TEXTURE_2D)
+        glBindTexture(GL_TEXTURE_2D, 0)
+
+        self.current_pbo = (self.current_pbo + 1) % len(self.pbo_ids)
+
+        now = time.time()
+        self._frame_times.append(now)
+        if len(self._frame_times) > 60:
+            self._frame_times.pop(0)
+        if len(self._frame_times) >= 2:
+            mean_diff = statistics.mean(
+                t2 - t1 for t1, t2 in zip(self._frame_times, self._frame_times[1:])
+            )
+            self._fps = 1.0 / mean_diff if mean_diff > 0 else 0.0
+
+        if now - self._last_stats_update >= 1.0:
+            self._last_stats_update = now
+            try:
+                self._cpu = self._proc.cpu_percent(interval=None)
+                self._ram = self._proc.memory_info().rss / (1024 * 1024)
+            except Exception:
+                pass
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        font = QFont("Menlo", 10, QFont.Medium)
+        p.setFont(font)
+        text = f"FPS: {self._fps:.0f}  |  CPU: {self._cpu:.0f}%  |  RAM: {self._ram:.0f} MB"
+
+        metrics = p.fontMetrics()
+        rect = metrics.boundingRect(text)
+        rect.adjust(-10, -6, 10, 6)
+        rect.moveTopRight(QPoint(self.width() - 12, 10))
+
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setBrush(QColor(0, 0, 0, 180))
+        p.setPen(Qt.NoPen)
+        p.drawRoundedRect(rect, 8, 8)
+        p.setPen(QColor(240, 240, 240))
+        p.drawText(rect.adjusted(10, 0, 0, 0), Qt.AlignVCenter, text)
+        p.end()
 
     def updateFrame(self, frame_tuple):
         self.frame_data = frame_tuple
         self.update()
 
-    def mouseMoveEvent(self, e):
-        now = time.time()
-        if now - self.last_mouse_move < MOUSE_MOVE_THROTTLE:
-            return
-        self.last_mouse_move = now
-        if self.width() and self.height():
-            rx = self.offset_x + int(e.x() / self.width() * self.texture_width)
-            ry = self.offset_y + int(e.y() / self.height() * self.texture_height)
-            self.control_callback(f"MOUSE_MOVE {rx} {ry}")
-        e.accept()
+    def send_mouse_packet(self, pkt_type, bmask, x, y):
+        msg = f"MOUSE_PKT {pkt_type} {bmask} {x} {y}"
+        self.control_callback(msg)
 
     def mousePressEvent(self, e):
-        bmap = {Qt.LeftButton: "1", Qt.MiddleButton: "2", Qt.RightButton: "3"}
-        b = bmap.get(e.button(), "")
-        if b and self.width() and self.height():
+        bmap = {Qt.LeftButton: 1, Qt.MiddleButton: 2, Qt.RightButton: 4}
+        bmask = bmap.get(e.button(), 0)
+        if bmask:
             rx = self.offset_x + int(e.x() / self.width() * self.texture_width)
             ry = self.offset_y + int(e.y() / self.height() * self.texture_height)
-            self.control_callback(f"MOUSE_PRESS {b} {rx} {ry}")
+            self.send_mouse_packet(1, bmask, rx, ry)
+        e.accept()
+
+    def mouseMoveEvent(self, e):
+        if not self.width() or not self.height():
+            return
+
+        rx = self.offset_x + int(e.x() / self.width() * self.texture_width)
+        ry = self.offset_y + int(e.y() / self.height() * self.texture_height)
+    
+        if hasattr(self, "_last_sent_pos") and self._last_sent_pos == (rx, ry, int(e.buttons())):
+            return
+        self._last_sent_pos = (rx, ry, int(e.buttons()))
+
+        buttons = 0
+        if e.buttons() & Qt.LeftButton: buttons |= 1
+        if e.buttons() & Qt.MiddleButton: buttons |= 2
+        if e.buttons() & Qt.RightButton: buttons |= 4
+
+        self.send_mouse_packet(2, buttons, rx, ry)
         e.accept()
 
     def mouseReleaseEvent(self, e):
-        bmap = {Qt.LeftButton: "1", Qt.MiddleButton: "2", Qt.RightButton: "3"}
-        b = bmap.get(e.button(), "")
-        if b:
-            self.control_callback(f"MOUSE_RELEASE {b}")
+        bmap = {Qt.LeftButton: 1, Qt.MiddleButton: 2, Qt.RightButton: 4}
+        bmask = bmap.get(e.button(), 0)
+        if bmask:
+            rx = self.offset_x + int(e.x() / self.width() * self.texture_width)
+            ry = self.offset_y + int(e.y() / self.height() * self.texture_height)
+            self.send_mouse_packet(3, bmask, rx, ry)
         e.accept()
 
     def wheelEvent(self, e):
@@ -386,7 +475,8 @@ class VideoWidgetGL(QOpenGLWidget):
         return None
 
 class MainWindow(QMainWindow):
-    def __init__(self, decoder_opts, rwidth, rheight, host_ip, udp_port, offset_x, offset_y, net_mode='lan', parent=None, ultra=False):
+    def __init__(self, decoder_opts, rwidth, rheight, host_ip, udp_port,
+                 offset_x, offset_y, net_mode='lan', parent=None, ultra=False):
         super().__init__(parent)
         self.setWindowTitle("LinuxPlay")
         self.texture_width = rwidth
@@ -399,7 +489,7 @@ class MainWindow(QMainWindow):
         self.control_addr = (host_ip, CONTROL_PORT)
         self.control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.control_sock.setblocking(False)
-        
+
         try:
             self.control_sock.sendto(f"NET {net_mode}".encode("utf-8"), self.control_addr)
         except Exception as e:
@@ -409,18 +499,25 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.video_widget)
         self.video_widget.setFocus()
         self.setAcceptDrops(True)
+
         mtu_guess = int(os.environ.get("LINUXPLAY_MTU", "1500"))
         ipv6 = False
         pkt = _best_ts_pkt_size(mtu_guess, ipv6)
 
-        video_url = (f"udp://@0.0.0.0:{udp_port}?pkt_size={pkt}&reuse=1&buffer_size=8388608&fifo_size=1000000&overrun_nonfatal=1&max_delay=200000"
-                     if net_mode == "wifi"
-                     else f"udp://@0.0.0.0:{udp_port}?pkt_size={pkt}&reuse=1&buffer_size=262144&fifo_size=65536&overrun_nonfatal=1&max_delay=0")
+        video_url = (
+            f"udp://@0.0.0.0:{udp_port}"
+            f"?pkt_size={pkt}"
+            f"&reuse=1"
+            f"&buffer_size=65536"
+            f"&fifo_size=32768"
+            f"&overrun_nonfatal=1"
+            f"&max_delay=0"
+        )
 
         logging.debug("Decoder options: %s", decoder_opts)
 
         self.decoder_thread = DecoderThread(video_url, decoder_opts, ultra=self.ultra)
-        self.decoder_thread.frame_ready.connect(self.video_widget.updateFrame, Qt.QueuedConnection)
+        self.decoder_thread.frame_ready.connect(self.video_widget.updateFrame, Qt.DirectConnection)
         self.decoder_thread.start()
 
         self.clip_timer = QTimer(self)
@@ -519,26 +616,29 @@ def clipboard_listener_client(_host_ip):
                 CLIPBOARD_INBOX.put(new_content)
         except Exception as e:
             logging.error("Clipboard client error: %s", e)
-            
+
 def heartbeat_responder_client(host_ip):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("", UDP_HEARTBEAT_PORT))
-        logging.info("Heartbeat responder listening on UDP %d", UDP_HEARTBEAT_PORT)
-    except Exception as e:
-        logging.error("Heartbeat responder bind failed: %s", e)
-        return
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("", UDP_HEARTBEAT_PORT))
+    logging.info("Heartbeat responder listening on UDP %d", UDP_HEARTBEAT_PORT)
+
     while True:
         try:
             data, addr = sock.recvfrom(1024)
-            if data.startswith(b"PING"):
-                try:
-                    sock.sendto(b"PONG", (host_ip, UDP_HEARTBEAT_PORT))
-                except Exception as e:
-                    logging.debug("Heartbeat send error: %s", e)
+            msg = data.decode("utf-8", errors="ignore").strip()
+
+            if msg.startswith("PING"):
+                parts = msg.split()
+                if len(parts) == 2:
+                    ts = parts[1]
+                else:
+                    ts = str(time.time())
+                sock.sendto(f"PONG {ts}".encode("utf-8"), (host_ip, UDP_HEARTBEAT_PORT))
+
         except Exception as e:
-            logging.debug("Heartbeat recv error: %s", e)
+            logging.debug("Heartbeat client error: %s", e)
+            continue
 
 def main():
     p = argparse.ArgumentParser(description="LinuxPlay Client (Linux/Windows)")
@@ -566,6 +666,12 @@ def main():
     fmt.setSwapBehavior(QSurfaceFormat.SingleBuffer)
     QSurfaceFormat.setDefaultFormat(fmt)
 
+    try:
+        ps = psutil.Process(os.getpid())
+        ps.nice(-5)
+    except Exception:
+        pass
+
     app = QApplication(sys.argv)
 
     logging.basicConfig(level=(logging.DEBUG if args.debug else logging.INFO),
@@ -573,11 +679,13 @@ def main():
                         datefmt="%H:%M:%S")
 
     ok, host_info = tcp_handshake_client(args.host_ip)
-    threading.Thread(target=heartbeat_responder_client, args=(args.host_ip,), daemon=True).start()
     if not ok:
         QMessageBox.critical(None, "Handshake Failed", "Could not negotiate with host.")
         sys.exit(1)
+
     host_encoder, monitor_info_str = host_info
+
+    threading.Thread(target=heartbeat_responder_client, args=(args.host_ip,), daemon=True).start()
 
     net_mode = args.net
     if net_mode == "auto":
@@ -602,20 +710,20 @@ def main():
                 if not part:
                     continue
                 if '+' in part:
-                    res, ox, oy = part.split('+'); w,h = map(int, res.split('x'))
-                    monitors.append((w,h,int(ox),int(oy)))
+                    res, ox, oy = part.split('+'); w, h = map(int, res.split('x'))
+                    monitors.append((w, h, int(ox), int(oy)))
                 else:
-                    w,h = map(int, part.split('x')); monitors.append((w,h,0,0))
+                    w, h = map(int, part.split('x')); monitors.append((w, h, 0, 0))
         else:
             if '+' in monitor_info_str:
-                res, ox, oy = monitor_info_str.split('+'); w,h = map(int, res.split('x'))
-                monitors.append((w,h,int(ox),int(oy)))
+                res, ox, oy = monitor_info_str.split('+'); w, h = map(int, res.split('x'))
+                monitors.append((w, h, int(ox), int(oy)))
             else:
-                w,h = map(int, monitor_info_str.lower().split("x")); monitors.append((w,h,0,0))
+                w, h = map(int, monitor_info_str.lower().split("x")); monitors.append((w, h, 0, 0))
     except Exception:
         logging.error("Monitor parse error, defaulting.")
-        w,h = map(int, DEFAULT_RESOLUTION.lower().split("x"))
-        monitors = [(w,h,0,0)]
+        w, h = map(int, DEFAULT_RESOLUTION.lower().split("x"))
+        monitors = [(w, h, 0, 0)]
 
     chosen = args.hwaccel
     if chosen == "auto":
@@ -637,21 +745,22 @@ def main():
             "analyzeduration": "0",
             "rtbufsize": "512k",
             "threads": "1",
-            "skip_frame": "noref",
-            "vsync": "0",
-        })
+            "skip_frame": "noref",        })
 
     threading.Thread(target=clipboard_listener_client, args=(args.host_ip,), daemon=True).start()
 
     global audio_proc
     if args.audio == "enable":
         audio_cmd = [
-            "ffplay","-hide_banner","-loglevel","error",
-            *([] if net_mode == "wifi" else ["-fflags","nobuffer"]), "-flags","low_delay",
-            "-autoexit","-nodisp",
-            "-i", (f"udp://@0.0.0.0:{UDP_AUDIO_PORT}?fifo_size=800000&buffer_size=4194304&max_delay=150000&pkt_size=1316&overrun_nonfatal=1"
-                   if net_mode == "wifi"
-                   else f"udp://@0.0.0.0:{UDP_AUDIO_PORT}?fifo_size=40000&max_delay=0&pkt_size=1316&overrun_nonfatal=1")
+            "ffplay", "-hide_banner", "-loglevel", "error",
+            *([] if net_mode == "wifi" else ["-fflags", "nobuffer"]),
+            "-flags", "low_delay",
+            "-autoexit", "-nodisp",
+            "-i", (
+                f"udp://@0.0.0.0:{UDP_AUDIO_PORT}?fifo_size=800000&buffer_size=4194304&max_delay=150000&pkt_size=1316&overrun_nonfatal=1"
+                if net_mode == "wifi"
+                else f"udp://@0.0.0.0:{UDP_AUDIO_PORT}?fifo_size=40000&max_delay=0&pkt_size=1316&overrun_nonfatal=1"
+            )
         ]
         logging.info("Audio with ffplay…")
         try:
@@ -662,7 +771,7 @@ def main():
     if args.monitor.lower() == "all":
         windows = []
         for i, mon in enumerate(monitors):
-            w,h,ox,oy = mon
+            w, h, ox, oy = mon
             win = MainWindow(decoder_opts, w, h, args.host_ip, DEFAULT_UDP_PORT + i, ox, oy, net_mode, ultra=ultra_active)
             win.setWindowTitle(f"LinuxPlay - Monitor {i}")
             win.show()
@@ -675,7 +784,7 @@ def main():
             mon_index = 0
         if mon_index < 0 or mon_index >= len(monitors):
             mon_index = 0
-        w,h,ox,oy = monitors[mon_index]
+        w, h, ox, oy = monitors[mon_index]
         win = MainWindow(decoder_opts, w, h, args.host_ip, DEFAULT_UDP_PORT + mon_index, ox, oy, net_mode, ultra=ultra_active)
         win.setWindowTitle(f"LinuxPlay - Monitor {mon_index}")
         win.show()
