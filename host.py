@@ -27,7 +27,7 @@ TCP_HANDSHAKE_PORT = 7001
 FILE_UPLOAD_PORT = 7003
 UDP_HEARTBEAT_PORT = 7004
 DEFAULT_FPS = "30"
-DEFAULT_BITRATE = "8M"
+LEGACY_BITRATE = "8M"
 DEFAULT_RES = "1920x1080"
 IS_LINUX   = py_platform.system() == "Linux"
 
@@ -61,7 +61,7 @@ class HostState:
     def __init__(self):
         self.video_threads = []
         self.audio_thread = None
-        self.current_bitrate = DEFAULT_BITRATE
+        self.current_bitrate = LEGACY_BITRATE
         self.last_clipboard_content = ""
         self.ignore_clipboard_update = False
         self.should_terminate = False
@@ -90,6 +90,7 @@ def trigger_shutdown(reason: str):
         host_state.should_terminate = True
         host_state.shutdown_reason = reason
         logging.critical("FATAL/STOP: %s -- stopping all streams and listeners.", reason)
+
         for s in (
             host_state.handshake_sock,
             host_state.control_sock,
@@ -97,10 +98,71 @@ def trigger_shutdown(reason: str):
             host_state.file_upload_sock,
         ):
             try:
-                if s: s.close()
+                if s:
+                    try:
+                        s.shutdown(socket.SHUT_RDWR)
+                    except Exception:
+                        pass
+                    s.close()
             except Exception:
                 pass
+
         set_status(f"Stopping… ({reason})")
+
+
+def stop_all():
+    host_state.should_terminate = True
+
+    with host_state.video_thread_lock:
+        for thread in host_state.video_threads:
+            thread.stop()
+            thread.join(timeout=2)
+        host_state.video_threads.clear()
+
+    if host_state.audio_thread:
+        host_state.audio_thread.stop()
+        host_state.audio_thread.join(timeout=2)
+        host_state.audio_thread = None
+
+    for s in (
+        host_state.handshake_sock,
+        host_state.control_sock,
+        host_state.clipboard_listener_sock,
+        host_state.file_upload_sock,
+    ):
+        try:
+            if s:
+                try:
+                    s.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                s.close()
+        except Exception:
+            pass
+
+    host_state.starting_streams = False
+
+def stop_streams_only():
+    with host_state.video_thread_lock:
+        for thread in host_state.video_threads:
+            try:
+                thread.stop()
+                thread.join(timeout=2)
+            except Exception:
+                pass
+        host_state.video_threads.clear()
+    if host_state.audio_thread:
+        try:
+            host_state.audio_thread.stop()
+            host_state.audio_thread.join(timeout=2)
+        except Exception:
+            pass
+        host_state.audio_thread = None
+    host_state.starting_streams = False
+
+def cleanup():
+    stop_all()
+atexit.register(cleanup)
 
 def has_nvidia():
     return which("nvidia-smi") is not None
@@ -162,51 +224,6 @@ def ffmpeg_has_device(name: str) -> bool:
     except Exception:
         return False
 
-def stop_all():
-    host_state.should_terminate = True
-    with host_state.video_thread_lock:
-        for thread in host_state.video_threads:
-            thread.stop()
-            thread.join(timeout=2)
-        host_state.video_threads.clear()
-    if host_state.audio_thread:
-        host_state.audio_thread.stop()
-        host_state.audio_thread.join(timeout=2)
-        host_state.audio_thread = None
-    for s in (
-        host_state.handshake_sock,
-        host_state.control_sock,
-        host_state.clipboard_listener_sock,
-        host_state.file_upload_sock,
-    ):
-        try:
-            if s: s.close()
-        except Exception:
-            pass
-    host_state.starting_streams = False
-
-def stop_streams_only():
-    with host_state.video_thread_lock:
-        for thread in host_state.video_threads:
-            try:
-                thread.stop()
-                thread.join(timeout=2)
-            except Exception:
-                pass
-        host_state.video_threads.clear()
-    if host_state.audio_thread:
-        try:
-            host_state.audio_thread.stop()
-            host_state.audio_thread.join(timeout=2)
-        except Exception:
-            pass
-        host_state.audio_thread = None
-    host_state.starting_streams = False
-
-def cleanup():
-    stop_all()
-atexit.register(cleanup)
-
 class StreamThread(threading.Thread):
     def __init__(self, cmd, name):
         super().__init__(daemon=True)
@@ -224,6 +241,18 @@ class StreamThread(threading.Thread):
                 stderr=subprocess.PIPE,
                 universal_newlines=True
             )
+
+            try:
+                import psutil, os
+                ps = psutil.Process(self.process.pid)
+                ps.nice(-10)
+                cpu_count = os.cpu_count()
+                if cpu_count and cpu_count > 4:
+                    ps.cpu_affinity(list(range(0, min(cpu_count, 8))))
+                logging.debug(f"Affinity + priority applied to {self.name}")
+            except Exception as e:
+                logging.debug(f"Affinity set failed: {e}")
+
         except Exception as e:
             trigger_shutdown(f"{self.name} failed to start: {e}")
             return
@@ -286,7 +315,7 @@ def _input_ll_flags():
     ]
 
 def _output_sync_flags():
-    return ["-vsync","0", "-fps_mode","passthrough"]
+    return ["-fps_mode","passthrough"]
 
 def _mpegts_ll_mux_flags():
     return ["-flush_packets","1","-max_interleave_delta","0","-muxdelay","0","-muxpreload","0","-mpegts_flags","resend_headers"]
@@ -378,113 +407,164 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
         else:
             hwenc = "cpu"
 
+    adaptive = getattr(HOST_ARGS, "adaptive", False)
+    dynamic_flags = []
+
+    if not bitrate or str(bitrate).lower() in ("0", "auto"):
+        logging.debug("Auto bitrate: switching to CQP/CRF mode")
+        bitrate = "0"
+        if "vaapi" in hwenc:
+            dynamic_flags = ["-rc_mode", "CQP", "-qp", qp or "21"]
+        elif "nvenc" in hwenc:
+            dynamic_flags = ["-rc", "constqp", "-qp", qp or "23"]
+        elif "qsv" in hwenc:
+            dynamic_flags = ["-rc_mode", "ICQ", "-icq_quality", qp or "23"]
+        else:
+            dynamic_flags = ["-crf", qp or "23"]
+
+    elif adaptive:
+        if "vaapi" in hwenc:
+            dynamic_flags = ["-rc_mode", "CQP", "-qp", qp or "21"]
+        elif "nvenc" in hwenc:
+            dynamic_flags = [
+                "-rc", "vbr",
+                "-maxrate", bitrate,
+                "-cq", qp or "23",
+                "-tune", "ull"
+            ]
+        elif "qsv" in hwenc:
+            dynamic_flags = [
+                "-rc_mode", "ICQ",
+                "-icq_quality", qp or "23",
+                "-maxrate", bitrate,
+            ]
+        else:
+            dynamic_flags = ["-crf", qp or "23"]
+
+    else:
+        dynamic_flags = ["-b:v", bitrate]
+
+    gop_val = 0
+    try:
+        gop_val = int(gop)
+    except Exception:
+        gop_val = 0
+    use_gop = gop_val > 0
+
     if codec == "h.264":
         if hwenc == "nvenc" and ensure("h264_nvenc"):
             enc = [
                 "-c:v", "h264_nvenc",
                 "-preset", _safe_nvenc_preset(preset_l or "llhq"),
-                "-g", gop, "-bf", "0",
-                "-b:v", bitrate,
+                *(["-g", str(gop_val)] if use_gop else []),
+                "-bf", "0",
+                "-rc-lookahead", "0",
+                "-refs", "1",
+                "-flags2", "+fast",
+                *dynamic_flags,
                 "-pix_fmt", pix_fmt,
                 "-bsf:v", "h264_mp4toannexb"
             ]
             if not tune:
                 enc += ["-tune", "ll"]
-            if qp:
-                enc += ["-qp", qp]
 
         elif hwenc == "qsv" and ensure("h264_qsv"):
             enc = [
                 "-c:v", "h264_qsv",
-                "-g", gop, "-bf", "0",
-                "-b:v", bitrate,
+                *(["-g", str(gop_val)] if use_gop else []),
+                "-bf", "0",
+                "-rc-lookahead", "0",
+                "-refs", "1",
+                "-flags2", "+fast",
+                *dynamic_flags,
                 "-pix_fmt", pix_fmt,
                 "-bsf:v", "h264_mp4toannexb"
             ]
-            if qp:
-                enc += ["-global_quality", qp]
 
         elif hwenc == "vaapi" and has_vaapi() and ensure("h264_vaapi"):
             extra_filters += ["-vf", "format=nv12,hwupload", "-vaapi_device", "/dev/dri/renderD128"]
             enc = [
                 "-c:v", "h264_vaapi",
-                "-g", gop, "-bf", "0",
-                "-b:v", bitrate,
-                "-bsf:v", "h264_mp4toannexb",
-                "-qp", qp or "20"
+                *(["-g", str(gop_val)] if use_gop else []),
+                "-bf", "0",
+                "-rc-lookahead", "0",
+                "-refs", "1",
+                "-flags2", "+fast",
+                *dynamic_flags,
+                "-bsf:v", "h264_mp4toannexb"
             ]
+
         else:
             enc = [
                 "-c:v", "libx264",
-                "-preset", (preset_l or "ultrafast"),
-                "-g", gop, "-bf", "0",
-                "-b:v", bitrate,
+                "-preset", preset_l or "ultrafast",
+                *(["-g", str(gop_val)] if use_gop else []),
+                "-bf", "0",
+                "-rc-lookahead", "0",
+                "-refs", "1",
+                "-flags2", "+fast",
+                *dynamic_flags,
                 "-pix_fmt", pix_fmt,
-                "-tune", (tune or "zerolatency"),
+                "-tune", tune or "zerolatency",
                 "-bsf:v", "h264_mp4toannexb"
             ]
-            if qp:
-                enc += ["-qp", qp]
 
     elif codec == "h.265":
         if hwenc == "nvenc" and ensure("hevc_nvenc"):
             enc = [
                 "-c:v", "hevc_nvenc",
                 "-preset", _safe_nvenc_preset(preset_l or "p5"),
-                "-g", gop, "-bf", "0",
-                "-b:v", bitrate,
+                *(["-g", str(gop_val)] if use_gop else []),
+                "-bf", "0",
+                "-rc-lookahead", "0",
+                "-refs", "1",
+                "-flags2", "+fast",
+                *dynamic_flags,
                 "-pix_fmt", pix_fmt,
                 "-bsf:v", "hevc_mp4toannexb"
             ]
             if not tune:
                 enc += ["-tune", "ll"]
-            if qp:
-                enc += ["-qp", qp]
 
         elif hwenc == "qsv" and ensure("hevc_qsv"):
             enc = [
                 "-c:v", "hevc_qsv",
-                "-g", gop, "-bf", "0",
-                "-b:v", bitrate,
+                *(["-g", str(gop_val)] if use_gop else []),
+                "-bf", "0",
+                "-rc-lookahead", "0",
+                "-refs", "1",
+                "-flags2", "+fast",
+                *dynamic_flags,
                 "-pix_fmt", pix_fmt,
                 "-bsf:v", "hevc_mp4toannexb"
             ]
-            if qp:
-                enc += ["-global_quality", qp]
 
         elif hwenc == "vaapi" and has_vaapi() and ensure("hevc_vaapi"):
             extra_filters += ["-vf", "format=nv12,hwupload", "-vaapi_device", "/dev/dri/renderD128"]
             enc = [
                 "-c:v", "hevc_vaapi",
-                "-g", gop, "-bf", "0",
-                "-b:v", bitrate,
-                "-bsf:v", "hevc_mp4toannexb",
-                "-qp", qp or "20"
+                *(["-g", str(gop_val)] if use_gop else []),
+                "-bf", "0",
+                "-rc-lookahead", "0",
+                "-refs", "1",
+                "-flags2", "+fast",
+                *dynamic_flags,
+                "-bsf:v", "hevc_mp4toannexb"
             ]
+
         else:
             enc = [
                 "-c:v", "libx265",
-                "-preset", (preset_l or "ultrafast"),
-                "-g", gop, "-bf", "0",
-                "-b:v", bitrate,
-                "-tune", (tune or "zerolatency"),
+                "-preset", preset_l or "ultrafast",
+                *(["-g", str(gop_val)] if use_gop else []),
+                "-bf", "0",
+                "-rc-lookahead", "0",
+                "-refs", "1",
+                "-flags2", "+fast",
+                *dynamic_flags,
+                "-tune", tune or "zerolatency",
                 "-bsf:v", "hevc_mp4toannexb"
             ]
-            if qp:
-                enc += ["-qp", qp]
-
-    else:
-        enc = [
-            "-c:v", "libx264",
-            "-preset", (preset_l or "ultrafast"),
-            "-g", gop, "-bf", "0",
-            "-b:v", bitrate,
-            "-pix_fmt", pix_fmt,
-            "-tune", (tune or "zerolatency"),
-            "-bsf:v", "h264_mp4toannexb"
-        ]
-        if qp:
-            enc += ["-qp", qp]
 
     return extra_filters, enc
 
@@ -504,10 +584,6 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
     w, h, ox, oy = monitor_info
     preset = args.preset.strip().lower() if args.preset else ""
     gop, qp, tune, pix_fmt = args.gop, args.qp, args.tune, args.pix_fmt
-
-    wifi_or_highfps = (getattr(host_state, "net_mode", "lan") == "wifi") or (fps_i >= 90)
-    udp_buf = "8388608" if wifi_or_highfps else "2048"
-    udp_delay = "200000" if wifi_or_highfps else "0"
 
     codec_name = (args.encoder if args.encoder and args.encoder.lower() != "none" else "h.264")
     min_bits = int(w) * int(h) * max(1, fps_i) * _target_bpp(codec_name, fps_i)
@@ -571,7 +647,7 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
                 "-vaapi_device", "/dev/dri/renderD128"
             ]
         elif args.hwenc == "cpu":
-            extra_filters = ["-vf", "hwdownload,format=bgr0"]
+            extra_filters = ["-vf", "hwdownload,format=yuv420p"]
         else:
             logging.warning(
                 "kmsgrab requested but encoder backend '%s' not supported; falling back to x11grab.",
@@ -584,10 +660,13 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
         input_arg = f"{disp}+{ox},{oy}"
         input_side = [
             *base_in,
-            "-f", "x11grab", "-draw_mouse", "0",
-            "-framerate", str(fps_i), "-video_size", f"{w}x{h}",
+            "-f", "x11grab",
+            "-draw_mouse", "0",
+            "-framerate", str(fps_i),
+            "-video_size", f"{w}x{h}",
             "-i", input_arg,
         ]
+
         extra_filters, encode = _pick_encoder_args(
             codec=args.encoder, hwenc=args.hwenc, preset=preset,
             gop=gop, qp=qp, tune=tune, bitrate=bitrate, pix_fmt=pix_fmt
@@ -596,14 +675,25 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
     output_side = _output_sync_flags()
     out = [
         *(_mpegts_ll_mux_flags()),
+        "-flags", "+low_delay",
         "-f", "mpegts",
         *_marker_opt(),
-        f"udp://{host_state.client_ip}:{video_port}?pkt_size=1316&buffer_size={udp_buf}&overrun_nonfatal=1&max_delay={udp_delay}"
+        (
+            f"udp://{host_state.client_ip}:{video_port}"
+            f"?pkt_size=1316"
+            f"&buffer_size=65536"
+            f"&fifo_size=32768"
+            f"&overrun_nonfatal=1"
+            f"&max_delay=0"
+        )
     ]
 
     return input_side + output_side + (extra_filters or []) + encode + out
 
 def build_audio_cmd():
+    opus_app = os.environ.get("LP_OPUS_APP", "voip")
+    opus_fd  = os.environ.get("LP_OPUS_FD", "10")
+
     net_mode = getattr(host_state, "net_mode", "lan")
     aud_buf = "4194304" if net_mode == "wifi" else "512"
     aud_delay = "150000" if net_mode == "wifi" else "0"
@@ -616,7 +706,6 @@ def build_audio_cmd():
                 text=True,
                 stderr=subprocess.DEVNULL
             )
-
             best = None
             for line in out.splitlines():
                 parts = line.split("\t")
@@ -652,15 +741,16 @@ def build_audio_cmd():
     encode = [
         "-c:a", "libopus",
         "-b:a", "128k",
-        "-application", "voip",
-        "-frame_duration", "10",
+        "-application", opus_app,
+        "-frame_duration", opus_fd,
     ]
 
     out = [
         *(_mpegts_ll_mux_flags()),
         *_marker_opt(),
         "-f", "mpegts",
-        f"udp://{host_state.client_ip}:{UDP_AUDIO_PORT}?pkt_size=1316&buffer_size={aud_buf}&overrun_nonfatal=1&max_delay={aud_delay}"
+        f"udp://{host_state.client_ip}:{UDP_AUDIO_PORT}"
+        f"?pkt_size=1316&buffer_size={aud_buf}&overrun_nonfatal=1&max_delay={aud_delay}"
     ]
 
     return input_side + output_side + encode + out
@@ -793,13 +883,16 @@ def control_listener(sock):
         try:
             data, addr = sock.recvfrom(2048)
             msg = data.decode("utf-8", errors="ignore").strip()
-            if not msg: continue
+            if not msg:
+                continue
+
             tokens = msg.split()
-            cmd = tokens[0] if tokens else ""
-            if cmd.upper() == "NET" and len(tokens) >= 2:
+            cmd = tokens[0].upper() if tokens else ""
+
+            if cmd == "NET" and len(tokens) >= 2:
                 mode = tokens[1].strip().lower()
-                if mode in ("wifi","lan"):
-                    old = getattr(host_state, 'net_mode', 'lan')
+                if mode in ("wifi", "lan"):
+                    old = getattr(host_state, "net_mode", "lan")
                     if mode != old:
                         logging.info("Network mode switch requested: %s -> %s", old, mode)
                         host_state.net_mode = mode
@@ -810,18 +903,37 @@ def control_listener(sock):
                         except Exception as e:
                             logging.error("Restart after NET failed: %s", e)
                 continue
-            if cmd == "MOUSE_MOVE" and len(tokens) == 3:
-                _inject_mouse_move(tokens[1], tokens[2])
-            elif cmd == "MOUSE_PRESS" and len(tokens) == 4:
-                _inject_mouse_move(tokens[2], tokens[3]); _inject_mouse_down(tokens[1])
-            elif cmd == "MOUSE_RELEASE" and len(tokens) == 2:
-                _inject_mouse_up(tokens[1])
+
+            elif cmd == "MOUSE_PKT" and len(tokens) == 5:
+                try:
+                    pkt_type = int(tokens[1])
+                    bmask = int(tokens[2])
+                    x = int(tokens[3])
+                    y = int(tokens[4])
+                except ValueError:
+                    continue
+
+                _inject_mouse_move(x, y)
+
+                if pkt_type == 1:
+                    if bmask & 1: _inject_mouse_down("1")
+                    if bmask & 2: _inject_mouse_down("2")
+                    if bmask & 4: _inject_mouse_down("3")
+                elif pkt_type == 2:
+                    pass
+                elif pkt_type == 3:
+                    if bmask & 1: _inject_mouse_up("1")
+                    if bmask & 2: _inject_mouse_up("2")
+                    if bmask & 4: _inject_mouse_up("3")
+
             elif cmd == "MOUSE_SCROLL" and len(tokens) == 2:
                 _inject_scroll(tokens[1])
+
             elif cmd == "KEY_PRESS" and len(tokens) == 2:
                 _inject_key("down", tokens[1])
             elif cmd == "KEY_RELEASE" and len(tokens) == 2:
                 _inject_key("up", tokens[1])
+
         except OSError:
             break
         except Exception as e:
@@ -931,27 +1043,7 @@ def file_upload_listener():
     finally:
         host_state.file_upload_sock = None
 
-def adaptive_bitrate_manager(args):
-    while not host_state.should_terminate:
-        time.sleep(30)
-        if host_state.should_terminate: break
-        with host_state.video_thread_lock:
-            new_bitrate = DEFAULT_BITRATE if host_state.current_bitrate != DEFAULT_BITRATE else \
-                          f"{int(int(''.join(filter(str.isdigit, DEFAULT_BITRATE))) * 0.6)}M"
-            if new_bitrate != host_state.current_bitrate:
-                logging.info("ABR switch: %s -> %s", host_state.current_bitrate, new_bitrate)
-                new_threads = []
-                for i, mon in enumerate(host_state.monitors):
-                    cmd = build_video_cmd(args, new_bitrate, mon, UDP_VIDEO_PORT + i)
-                    t = StreamThread(cmd, f"Video {i} (ABR)")
-                    t.start(); new_threads.append(t)
-                for t in host_state.video_threads:
-                    t.stop(); t.join()
-                host_state.video_threads = new_threads
-                host_state.current_bitrate = new_bitrate
-
 def start_streams_for_current_client(args):
-
     if not host_state.client_ip:
         return
     with host_state.video_thread_lock:
@@ -985,35 +1077,46 @@ def heartbeat_manager(args):
     except Exception as e:
         trigger_shutdown(f"Heartbeat socket error: {e}")
         return
+
     last_ping = 0.0
     host_state.last_pong_ts = time.time()
+
     while not host_state.should_terminate:
         now = time.time()
+
         if host_state.client_ip:
-            if now - last_ping >= 5.0:
+            if now - last_ping >= 1.0:
                 try:
                     s.sendto(b"PING", (host_state.client_ip, UDP_HEARTBEAT_PORT))
                 except Exception as e:
                     logging.warning("Heartbeat send error: %s", e)
                 last_ping = now
+
             s.settimeout(0.5)
             try:
                 data, addr = s.recvfrom(1024)
-                if data.startswith(b"PONG") and host_state.client_ip and addr[0] == host_state.client_ip:
+                msg = data.decode("utf-8", errors="ignore").strip()
+
+                if msg.startswith("PONG") and addr[0] == host_state.client_ip:
                     host_state.last_pong_ts = now
+
             except socket.timeout:
                 pass
             except Exception as e:
                 logging.debug("Heartbeat recv error: %s", e)
+
             if now - host_state.last_pong_ts > 10.0:
-                logging.warning("Heartbeat timeout from %s — stopping streams and waiting for reconnection.", host_state.client_ip)
+                logging.warning(
+                    "Heartbeat timeout from %s — stopping streams and waiting for reconnection.",
+                    host_state.client_ip
+                )
                 stop_streams_only()
                 host_state.client_ip = None
                 set_status("Client disconnected — waiting for connection…")
                 host_state.last_pong_ts = now
         else:
             time.sleep(0.5)
-
+            
 def resource_monitor():
     p = psutil.Process(os.getpid())
 
@@ -1056,6 +1159,38 @@ def resource_monitor():
         gpu_info = read_gpu_usage()
         logging.info(f"[MONITOR] CPU: {cpu:.1f}% | RAM: {mem:.1f} MB" + (f" | {gpu_info}" if gpu_info else ""))
         time.sleep(5)
+
+def stats_broadcast():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    while not host_state.should_terminate:
+        if host_state.client_ip:
+            try:
+                cpu = psutil.cpu_percent(interval=None)
+                mem = psutil.virtual_memory().used / (1024 * 1024)
+
+                gpu = 0.0
+                try:
+                    import pynvml
+                    pynvml.nvmlInit()
+                    h = pynvml.nvmlDeviceGetHandleByIndex(0)
+                    gpu = float(pynvml.nvmlDeviceGetUtilizationRates(h).gpu)
+                except Exception:
+                    try:
+                        for card in os.listdir("/sys/class/drm"):
+                            busy_path = f"/sys/class/drm/{card}/device/gpu_busy_percent"
+                            if os.path.exists(busy_path):
+                                with open(busy_path) as f:
+                                    gpu = float(f.read().strip())
+                                break
+                    except Exception:
+                        gpu = 0.0
+
+                fps = getattr(host_state, "current_fps", 0)
+                msg = f"STATS {cpu:.1f} {gpu:.1f} {mem:.1f} {fps:.1f}"
+                sock.sendto(msg.encode("utf-8"), (host_state.client_ip, UDP_HEARTBEAT_PORT))
+            except Exception:
+                pass
+        time.sleep(1)
 
 def session_manager(args):
     while not host_state.should_terminate:
@@ -1124,6 +1259,7 @@ def core_main(args, use_signals=True) -> int:
     threading.Thread(target=session_manager, args=(args,), daemon=True).start()
     threading.Thread(target=control_listener, args=(host_state.control_sock,), daemon=True).start()
     threading.Thread(target=resource_monitor, daemon=True).start()
+    threading.Thread(target=stats_broadcast, daemon=True).start()
     logging.info("Host running. Close window or Ctrl+C to quit.")
     try:
         while not host_state.should_terminate:
@@ -1276,10 +1412,9 @@ def parse_args():
     p = argparse.ArgumentParser(description="LinuxPlay Host (Linux only)")
     p.add_argument("--gui", action="store_true", help="Show host GUI window.")
     p.add_argument("--encoder", choices=["none","h.264","h.265"], default="none")
-    p.add_argument("--hwenc", choices=["auto","cpu","nvenc","qsv","vaapi"], default="auto",
-                   help="Manual encoder backend selection (auto=heuristic).")
+    p.add_argument("--hwenc", choices=["auto","cpu","nvenc","qsv","vaapi"], default="auto", help="Manual encoder backend selection (auto=heuristic).")
     p.add_argument("--framerate", default=DEFAULT_FPS)
-    p.add_argument("--bitrate", default=DEFAULT_BITRATE)
+    p.add_argument("--bitrate", default=LEGACY_BITRATE)
     p.add_argument("--audio", choices=["enable","disable"], default="disable")
     p.add_argument("--adaptive", action="store_true")
     p.add_argument("--display", default=":0")
