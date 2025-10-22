@@ -253,6 +253,9 @@ class HostTab(QWidget):
             "disable"
         ])
 
+        self.audioModeCombo = QComboBox()
+        self.audioModeCombo.addItems(["Voice (low-latency)", "Music (quality)"])
+
         self.adaptiveCheck = QCheckBox("Enable Adaptive Bitrate")
 
         self.displayCombo = QComboBox()
@@ -268,7 +271,7 @@ class HostTab(QWidget):
 
         self.gopCombo = QComboBox()
         self.gopCombo.addItems([
-            "1","2","3","5","8","10","12","15","20","30","45","60","90","120","180","240","360"
+            "Auto", "1","2","3","5","8","10","12","15","20","30","45","60","90","120","180","240","360"
         ])
 
         self.qpCombo = QComboBox()
@@ -315,8 +318,9 @@ class HostTab(QWidget):
         form_layout.addRow("Encoder (codec):", self.encoderCombo)
         form_layout.addRow("Encoder Backend:", self.hwencCombo)
         form_layout.addRow("Framerate:", self.framerateCombo)
-        form_layout.addRow("Bitrate:", self.bitrateCombo)
+        form_layout.addRow("Max Bitrate:", self.bitrateCombo)
         form_layout.addRow("Audio:", self.audioCombo)
+        form_layout.addRow("Audio Mode:", self.audioModeCombo)
         form_layout.addRow("Adaptive:", self.adaptiveCheck)
 
         self.linuxCaptureCombo = QComboBox()
@@ -324,7 +328,7 @@ class HostTab(QWidget):
         self.linuxCaptureCombo.addItem("kmsgrab", userData="kmsgrab")
         self.linuxCaptureCombo.addItem("x11grab", userData="x11grab")
         form_layout.addRow("Linux Capture:", self.linuxCaptureCombo)
-        form_layout.addRow("X Display (fallback):", self.displayCombo)
+        form_layout.addRow("X Display:", self.displayCombo)
 
         form_layout.addRow("Preset:", self.presetCombo)
         form_layout.addRow("GOP:", self.gopCombo)
@@ -568,7 +572,6 @@ class HostTab(QWidget):
             "--framerate", framerate,
             "--bitrate", bitrate,
             "--audio", audio,
-            "--gop", gop,
             "--pix_fmt", pix_fmt,
             "--hwenc", hwenc,
         ]
@@ -584,12 +587,25 @@ class HostTab(QWidget):
             cmd.append("--debug")
         cmd.extend(["--display", display])
 
+        try:
+            _gop_i = int(gop)
+        except Exception:
+            _gop_i = 0
+        if _gop_i > 0:
+            cmd.extend(["--gop", str(_gop_i)])
         self._save_current()
 
         env = os.environ.copy()
         env["LINUXPLAY_MARKER"] = LINUXPLAY_MARKER
         env["LINUXPLAY_SID"] = env.get("LINUXPLAY_SID") or str(uuid.uuid4())
 
+        _am = self.audioModeCombo.currentText().lower()
+        if "music" in _am:
+            env["LP_OPUS_APP"] = "audio"
+            env["LP_OPUS_FD"] = "20"
+        else:
+            env["LP_OPUS_APP"] = "voip"
+            env["LP_OPUS_FD"] = "10"
         cap_mode = getattr(self, "linuxCaptureCombo", None)
         cap_val = cap_mode.currentData() if cap_mode else "auto"
         env["LINUXPLAY_CAPTURE"] = cap_val or "auto"
@@ -643,6 +659,8 @@ class HostTab(QWidget):
             "framerate": self.framerateCombo.currentText(),
             "bitrate": self.bitrateCombo.currentText(),
             "audio": self.audioCombo.currentText(),
+            
+            "audio_mode": self.audioModeCombo.currentText(),
             "adaptive": self.adaptiveCheck.isChecked(),
             "display": self.displayCombo.currentText(),
             "preset": self.presetCombo.currentText(),
@@ -673,6 +691,8 @@ class HostTab(QWidget):
         set_combo(self.framerateCombo, cfg.get("framerate"))
         set_combo(self.bitrateCombo, cfg.get("bitrate"))
         set_combo(self.audioCombo, cfg.get("audio"))
+        
+        set_combo(self.audioModeCombo, cfg.get("audio_mode", "Voice (low-latency)"))
         self.adaptiveCheck.setChecked(bool(cfg.get("adaptive", False)))
         set_combo(self.displayCombo, cfg.get("display"))
         set_combo(self.presetCombo, cfg.get("preset"))
@@ -729,7 +749,14 @@ class ClientTab(QWidget):
         for ip in last.get("recent_ips", []):
             self.hostIPEdit.addItem(ip)
 
-        self.audioCombo = QComboBox(); self.audioCombo.addItems(["enable","disable"])
+        self.audioCombo = QComboBox()
+        self.audioCombo.addItems([
+            "enable",
+            "disable"
+        ])
+        
+        self.audioModeCombo = QComboBox()
+        self.audioModeCombo.addItems(["Voice (low-latency)", "Music (quality)"])
         self.monitorField = QLineEdit("0")
         self.netCombo = QComboBox(); self.netCombo.addItems(["auto","lan","wifi"])
         self.ultraCheck = QCheckBox("Ultra (LAN only)")
@@ -741,6 +768,7 @@ class ClientTab(QWidget):
         form_layout.addRow("HW accel:", self.hwaccelCombo)
         form_layout.addRow("Host IP:", self.hostIPEdit)
         form_layout.addRow("Audio:", self.audioCombo)
+        form_layout.addRow("Audio Mode:", self.audioModeCombo)
         form_layout.addRow("Monitor (index or 'all'):", self.monitorField)
         form_layout.addRow("Network Mode:", self.netCombo)
         form_layout.addRow("Ultra Mode:", self.ultraCheck)
