@@ -1,163 +1,166 @@
 # LinuxPlay
 
-Ultra‑low‑latency desktop streaming over UDP using FFmpeg, with a Qt GUI for both **Host** and **Client**. Includes:
-- **Codecs:** H.264 / H.265 (HEVC) / AV1 via NVENC, QSV, AMF, VAAPI, or CPU.
-- **Transport:** MPEG‑TS over UDP for video/audio; TCP for handshake; UDP for control & clipboard; TCP for drag‑and‑drop upload.
-- **Multi‑monitor:** Stream one or all monitors.
-- **Clipboard & drag‑drop:** Bi‑directional clipboard, and client→host file upload.
-- **WAN ready (optional):** WireGuard helpers for tunnelling over the internet.
-- **Link aware:** Auto **Wi‑Fi / LAN** detection with network‑tuned buffers.
-- **Resilience:** 5 s **PING** / 10 s **PONG** heartbeat; host auto‑stops streams if the client drops and returns to *Waiting for connection*.
+Ultra‑low‑latency desktop streaming over UDP using FFmpeg, with a Qt GUI for **Host** and **Client**.
 
----
+## Features
 
-## TL;DR install
+- **Codecs:** H.264 / H.265 (HEVC) via NVENC, QSV, VAAPI, AMF, or CPU.
+- **Transport:** Video over **MPEG‑TS/UDP**, audio over UDP, control/clipboard over UDP, handshake & file upload over TCP.
+- **Multi‑monitor:** Stream one or multiple monitors.
+- **Clipboard & Drag‑and‑Drop:** Bi‑directional clipboard; client→host file upload (TCP).
+- **WAN‑friendly:** Optional WireGuard helpers for tunnelling over the internet.
+- **Link‑aware:** Client auto‑detects **Wi‑Fi vs LAN** and the host adapts buffers accordingly.
+- **Resilience:** Heartbeat (PING/PONG); host auto‑stops and returns to *Waiting for connection* if the client drops.
+- **Stats Overlay (Client):** FPS/CPU/RAM overlay via OpenGL (triple‑buffered PBO uploads).
+## How it works
 
-### Python deps (pip, one‑liner)
+```
+Client                        Network          Host
+------                        -------          ----
+TCP handshake (7001)   <-------------------->  Handshake
+UDP control (7000)      -------------------->  xdotool/pynput
+UDP clipboard (7002)   <-------------------->  pyperclip
+UDP heartbeat (7004)   <-------------------->  PING/PONG
+UDP video (5000+idx)   <--------------------   FFmpeg capture+encode
+UDP audio (6001)       <--------------------   FFmpeg Opus (optional)
+TCP upload (7003)      --------------------->  ~/LinuxPlayDrop
+```
+## Installation
 
+### Python packages
 ```bash
-python3 -m pip install -U pip wheel setuptools && \
-python3 -m pip install PyQt5 PyOpenGL PyOpenGL_accelerate av numpy pynput pyperclip
+python3 -m pip install -U pip wheel setuptools
+python3 -m pip install PyQt5 PyOpenGL PyOpenGL_accelerate av numpy pynput pyperclip psutil
 ```
 
-> Tip: Use a venv (`python3 -m venv .venv && source .venv/bin/activate` on Linux/macOS; `.\.venv\Scripts\activate` on Windows).
-
-### Ubuntu 24.04 Desktop (apt, one‑liner)
-
+### Ubuntu 24.04 packages
 ```bash
-sudo apt update && sudo apt install -y \
-  ffmpeg xdotool xclip pulseaudio-utils libcap2-bin \
-  wireguard-tools qrencode python3 python3-venv python3-pip libgl1
+sudo apt update && sudo apt install -y   ffmpeg xdotool xclip pulseaudio-utils libcap2-bin   wireguard-tools qrencode python3 python3-venv python3-pip libgl1
 ```
 
-- `ffmpeg` — capture/encode/ffplay (client audio)
-- `xdotool` — inject mouse/keys on Linux hosts
-- `xclip` — required by `pyperclip` for host clipboard
-- `pulseaudio-utils` — provides `pactl` for audio monitor detection (works with PipeWire’s Pulse shim)
-- `libcap2-bin` — gives `setcap` for **kmsgrab** (see below)
-- `wireguard-tools`, `qrencode` — **optional**, only for the WG helper
-- `libgl1` — OpenGL runtime for the client’s GL renderer
-
-> If `pip install av` fails to find wheels on your distro mirror, install FFmpeg dev headers and build tools:  
+> If `pip install av` fails, install FFmpeg dev headers:
 > `sudo apt install -y pkg-config python3-dev libavdevice-dev libavfilter-dev libavformat-dev libavcodec-dev libswscale-dev libswresample-dev libavutil-dev`
 
 ### Windows
+- Install **FFmpeg** and ensure `ffmpeg`/`ffplay` are on `PATH`, or place `ffmpeg/bin` alongside the scripts.
+- Install Python 3.9+ and the same pip packages as above.
+## Usage
 
-- Install [FFmpeg](https://ffmpeg.org/) and ensure `ffmpeg`/`ffplay` are on `PATH` **or** drop an `ffmpeg/bin` folder next to these scripts.
-- Python 3.9+; run the same pip one‑liner as above in an **elevated** terminal if needed.
-
----
-
-## Quick start
-
+### GUI launcher (recommended)
 ```bash
 python3 start.py
 ```
 
-- Use the **Host** tab on the capture machine, pick a preset (Lowest Latency / Balanced / High Quality), then **Start Host**.
-- Use the **Client** tab on the viewing machine; enter the Host’s **LAN IP** (or your **WireGuard** tunnel IP).
+- On **Host** tab: pick a preset (Lowest Latency / Balanced / High Quality), then **Start Host**.
+- On **Client** tab: enter the host's LAN IP (or WireGuard tunnel IP).
 
-CLI examples:
+### CLI (advanced)
 
+**Host**
 ```bash
-# Host (GUI)
-python host.py --gui --encoder h.264 --hwenc auto --framerate 60 --bitrate 8M --audio enable --gop 15 --pix_fmt yuv420p
-
-# Client (auto‑detect link type; see Wi‑Fi/LAN below)
-python client.py --host_ip 192.168.1.20 --decoder h.264 --hwaccel auto --audio enable --monitor 0 --debug
+python3 host.py --gui --encoder h.264 --hwenc auto --framerate 60 --bitrate 8M --audio enable --gop 15 --pix_fmt yuv420p
 ```
 
----
+**Client**
+```bash
+python3 client.py --host_ip 192.168.1.20 --decoder h.264 --hwaccel auto --audio enable --monitor 0 --debug
+```
+## Wi‑Fi vs LAN
 
-## Wi‑Fi vs LAN (what changed)
+- Client auto‑detects the route to host (Wi‑Fi or Ethernet) and announces `NET WIFI`/`NET LAN`.
+- Host retunes sender buffers accordingly (larger jitter buffers for Wi‑Fi, minimal for LAN).
+- Manual override: `client.py --net wifi|lan` (default `auto`).
 
-- **Auto detect:** Client figures out if the route to the host is Wi‑Fi or Ethernet (Linux: `ip route get`; Windows: `Get‑NetRoute`/`Get‑NetAdapter`).  
-- **Announce:** Client tells the host via control channel: `NET WIFI` or `NET LAN`.
-- **Retune:** Host restarts sender pipelines with link‑appropriate **UDP buffer sizes** and **max_delay**.
-- **Manual override:** `client.py --net wifi` or `--net lan` (default `--net auto`).
+**Tip:** On spiky Wi‑Fi, try slightly **lower FPS** and **lower bitrate** before increasing buffers.
+## Heartbeat and reconnects
 
-**Why:** Wi‑Fi needs bigger jitter buffers to prevent corrupt frames/dropouts; LAN can run tiny buffers for minimal latency.
+- Host sends **PING** on UDP 7004 every 5 s; expects **PONG** within 10 s.
+- On timeout, host **stops streams** and waits for reconnection.
+- Reconnecting the client restarts video/audio automatically.
+## Ports (host)
 
----
+| Purpose                | Proto | Port |
+|------------------------|-------|------|
+| Handshake              | TCP   | 7001 |
+| Video (per monitor)    | UDP   | 5000 + index |
+| Audio                  | UDP   | 6001 |
+| Control (mouse/keys)   | UDP   | 7000 |
+| Clipboard              | UDP   | 7002 |
+| File upload            | TCP   | 7003 |
+| Heartbeat (ping/pong)  | UDP   | 7004 |
+## Linux capture notes
 
-## Heartbeat (disconnect detection)
-
-- Host sends **`PING`** to the client on UDP **7004** every 5 s.  
-- If no **`PONG`** is received within **10 s**, the host **stops streams** and switches to *Waiting for connection…*.  
-- Reconnecting the client triggers an automatic restart of video/audio.
-
----
-
-## How it works (pipeline)
-
-- **Handshake:** TCP **7001** → codec & monitor geometry.
-- **Video:** FFmpeg capture → encode → **UDP** MPEG‑TS to **5000 + monitor_index**.
-- **Audio:** (optional) FFmpeg Opus → **UDP** **6001**; client plays via `ffplay`.
-- **Input:** Client → Host mouse/keys over **UDP 7000** (Linux uses `xdotool`, Windows uses `pynput`).
-- **Clipboard:** Bi‑directional text over **UDP 7002** (`pyperclip` on host sets system clipboard).
-- **Drag & Drop:** Client uploads to Host via **TCP 7003** into `~/LinuxPlayDrop`.
-- **Link announce:** Client → Host **UDP 7000**: `NET WIFI|LAN`.
-- **Heartbeat:** **UDP 7004** (`PING`/`PONG`).
-
----
-
-## Ports (open these on the **Host**)
-
-| Purpose                  | Proto | Port / Notes                          |
-|-------------------------|-------|---------------------------------------|
-| Handshake               | TCP   | **7001**                              |
-| Video (per monitor)     | UDP   | **5000 + index**                      |
-| Audio                   | UDP   | **6001**                              |
-| Control (mouse/keys)    | UDP   | **7000**                              |
-| Clipboard               | UDP   | **7002**                              |
-| File upload             | TCP   | **7003**                              |
-| Heartbeat (ping/pong)   | UDP   | **7004**                              |
-
-For WAN use, tunnel over WireGuard and point the client at the **tunnel IP**.
-
----
-
-## Linux capture specifics
-
-- **kmsgrab** (lowest overhead, no on‑screen cursor): you likely need to grant FFmpeg `cap_sys_admin`:
+- **kmsgrab** (lowest overhead, no cursor). Grant capability:
   ```bash
   sudo setcap cap_sys_admin+ep "$(command -v ffmpeg)"
   ```
-- **x11grab** is the fallback if kmsgrab isn’t viable or you need cursor capture.
-- VAAPI hardware encode requires access to `/dev/dri/renderD128` (add user to `video` group if needed).
+- **x11grab** is the fallback if kmsgrab isn't viable or you require cursor capture.
+- **VAAPI** encode requires access to `/dev/dri/renderD128` (add your user to the `video` group).
+## Recommended presets
+
+- **Lowest Latency:** H.264 @ 60–90 fps, GOP 10–15, `tune=zerolatency`, audio off if every ms matters.
+- **Balanced:** H.264 @ 45–75 fps, 4–10 Mbit/s, GOP 15, audio on.
+- **High Quality:** H.265 @ 30–60 fps, 12–20+ Mbit/s, `yuv444p` if your decoder supports it.
+## Command‑line reference
+
+### `client.py` options
+| Flag(s) | Default | Description |
+| --- | --- | --- |
+| `--decoder` | `none` |  _(choices: none, h.264, h.265)_ |
+| `--host_ip` | — |  |
+| `--audio` | `disable` |  _(choices: enable, disable)_ |
+| `--monitor` | `0` | Index or 'all' |
+| `--hwaccel` | `auto` |  _(choices: auto, cpu, cuda, qsv, d3d11va, dxva2, vaapi)_ |
+| `--debug` | — |  _(action: store_true)_ |
+| `--net` | `auto` |  _(choices: auto, lan, wifi)_ |
+| `--ultra` | — |  _(action: store_true)_ |
 
 ---
 
-## Recommended settings
-
-- **Lowest Latency (esports):** H.264 @ **60–90 fps**, GOP **10–15**, `tune=zerolatency`, **audio off** if you need every last ms.
-- **Balanced:** H.264 @ **45–75 fps**, 4–10 Mbit/s, GOP 15, audio on.
-- **High Quality:** H.265 / AV1 @ **30–60 fps**, 12–20+ Mbit/s, `yuv444p` if your decoder supports it.
-
-> If Wi‑Fi is still spiky, try **lower FPS** and **slightly lower bitrate** before increasing buffers further.
+### `host.py` options
+| Flag(s) | Default | Description |
+| --- | --- | --- |
+| `--gui` | — | Show host GUI window. _(action: store_true)_ |
+| `--encoder` | `none` |  _(choices: none, h.264, h.265)_ |
+| `--hwenc` | `auto` |  _(choices: auto, cpu, nvenc, qsv, vaapi)_ |
+| `--framerate` | `DEFAULT_FPS` |  |
+| `--bitrate` | `LEGACY_BITRATE` |  |
+| `--audio` | `disable` |  _(choices: enable, disable)_ |
+| `--adaptive` | — |  _(action: store_true)_ |
+| `--display` | `:0` |  |
+| `--preset` | — |  |
+| `--gop` | `30` |  |
+| `--qp` | — |  |
+| `--tune` | — |  |
+| `--pix_fmt` | `yuv420p` |  |
+| `--debug` | — |  _(action: store_true)_ |
 
 ---
 
+### `start.py` options
+| Flag(s) | Default | Description |
+| --- | --- | --- |
+| `--debug` | — |  _(action: store_true)_ |
 ## Troubleshooting
 
-- **Client window is black / “Invalid data found when processing input”:**  
-  The UDP stream isn’t arriving or is mangled. Check firewall/ports, confirm host found your client IP, and reduce bitrate/FPS. On the client, try `--hwaccel cpu` to test SW decode.
+- **Black client window / “Invalid data found when processing input”:**
+  - The UDP stream isn’t arriving or is mangled. Check firewall/ports, confirm the host resolved your client IP, and try lowering bitrate/FPS.
+  - On the client, try `--hwaccel cpu` to force software decode.
 
-- **No audio:**  
-  Ensure `ffplay` is installed and on `PATH`. On Linux hosts, verify a Pulse monitor exists; set `PULSE_MONITOR` to override.
+- **No audio:**
+  - Ensure `ffplay` is installed and on PATH.
+  - On Linux hosts, verify a Pulse monitor exists; override with `PULSE_MONITOR=<sink>.monitor`.
 
-- **kmsgrab errors:**  
-  Apply `setcap` to `ffmpeg` (see above) or switch to `x11grab`.
+- **kmsgrab errors:**
+  - Apply `setcap` to `ffmpeg` (see above) or switch to `x11grab`.
 
-- **Input doesn’t work on Linux:**  
-  Install `xdotool`. Some Wayland sessions may need Xwayland or different permissions.
+- **Input on Linux not working:**
+  - Install `xdotool`. Some Wayland sessions may require Xwayland or different permissions.
+## Security & WAN
 
----
+- For WAN use, tunnel over **WireGuard** and point the client to the tunnel IP.
+- Helper scripts (if installed) can set up the host and generate a peer QR.
+## License
 
-## Development
-
-- `start.py` — GUI launcher (Host/Client/Help)
-- `host.py` — Host core (capture/encode, control, clipboard, heartbeat, file server)
-- `client.py` — Client core (decoder, GL renderer, control, clipboard, DnD, Wi‑Fi/LAN detection)
-
-Run with `--debug` to see pipeline selection and link/heartbeat events.
+- **LinuxPlay** is licensed under **GNU GPL v2.0 only**. See [LICENSE](./LICENSE).
+- External tools (FFmpeg, xdotool, xclip, ffplay, etc.) are executed as **separate processes** and retain their own licenses.
