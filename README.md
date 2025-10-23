@@ -27,19 +27,19 @@ TCP upload (7003)      --------------------->  ~/LinuxPlayDrop
 ```
 ## Installation
 
+### Ubuntu 24.04 packages
+```bash
+sudo apt update && sudo apt install -y ffmpeg xdotool xclip pulseaudio-utils libcap2-bin wireguard-tools qrencode python3 python3-venv python3-pip libgl1
+```
+
+> If `pip install av` fails, install FFmpeg dev headers:
+> `sudo apt install -y pkg-config python3-dev libavdevice-dev libavfilter-dev libavformat-dev libavcodec-dev libswscale-dev libswresample-dev libavutil-dev`
+
 ### Python packages
 ```bash
 python3 -m pip install -U pip wheel setuptools
 python3 -m pip install PyQt5 PyOpenGL PyOpenGL_accelerate av numpy pynput pyperclip psutil
 ```
-
-### Ubuntu 24.04 packages
-```bash
-sudo apt update && sudo apt install -y   ffmpeg xdotool xclip pulseaudio-utils libcap2-bin   wireguard-tools qrencode python3 python3-venv python3-pip libgl1
-```
-
-> If `pip install av` fails, install FFmpeg dev headers:
-> `sudo apt install -y pkg-config python3-dev libavdevice-dev libavfilter-dev libavformat-dev libavcodec-dev libswscale-dev libswresample-dev libavutil-dev`
 
 ### Windows
 - Install **FFmpeg** and ensure `ffmpeg`/`ffplay` are on `PATH`, or place `ffmpeg/bin` alongside the scripts.
