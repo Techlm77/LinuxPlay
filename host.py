@@ -30,6 +30,9 @@ DEFAULT_FPS = "30"
 LEGACY_BITRATE = "8M"
 DEFAULT_RES = "1920x1080"
 IS_LINUX   = py_platform.system() == "Linux"
+HEARTBEAT_INTERVAL = 1.0
+HEARTBEAT_TIMEOUT  = 10.0
+RECONNECT_COOLDOWN = 2.0
 
 def _marker_value() -> str:
     marker = os.environ.get("LINUXPLAY_MARKER", "LinuxPlayHost")
@@ -73,6 +76,7 @@ class HostState:
         self.file_upload_sock = None
         self.heartbeat_sock = None
         self.last_pong_ts = 0.0
+        self.last_disconnect_ts = 0.0
         self.client_ip = None
         self.monitors = []
         self.shutdown_lock = threading.Lock()
@@ -82,6 +86,51 @@ class HostState:
 
 host_state = HostState()
 HOST_ARGS = None
+
+def _map_nvenc_tune(tune: str) -> str:
+    t = (tune or "").strip().lower()
+    if not t:
+        return ""
+
+    valid_nvenc_tunes = {
+        "ultra-low-latency": "ull",
+        "low-latency": "ll",
+        "high-quality": "hq",
+        "high-performance": "hp",
+        "performance": "hp",
+        "lossless": "lossless",
+        "lossless-highperf": "losslesshp",
+        "blu-ray": "bd",    
+        "auto": "",
+        "none": "",
+        "default": "",
+    }
+
+    if t in valid_nvenc_tunes:
+        return valid_nvenc_tunes[t]
+
+    logging.warning("Unrecognized NVENC tune '%s' — passing through as-is.", t)
+    return t
+
+def _vaapi_fmt_for_pix_fmt(pix_fmt: str, codec: str) -> str:
+    pf = (pix_fmt or "").strip().lower()
+    valid_vaapi_fmts = {
+
+        "nv12", "yuv420p", "yuyv422", "uyvy422", "yuv422p",
+        "yuv444p", "rgb0", "bgr0", "rgba", "bgra",
+
+        "p010", "p010le", "yuv420p10", "yuv420p10le",
+        "yuv422p10", "yuv422p10le", "yuv444p10", "yuv444p10le",
+
+        "yuv444p12le", "yuv444p16le",
+    }
+
+    if pf in valid_vaapi_fmts:
+        logging.info("Using requested VAAPI pix_fmt '%s' for codec %s.", pf, codec)
+        return pf
+
+    logging.warning("Unrecognized pix_fmt '%s' — falling back to 'nv12'.", pf)
+    return "nv12"
 
 def trigger_shutdown(reason: str):
     with host_state.shutdown_lock:
@@ -144,21 +193,27 @@ def stop_all():
 
 def stop_streams_only():
     with host_state.video_thread_lock:
-        for thread in host_state.video_threads:
+        if host_state.video_threads:
+            logging.info("Stopping active video streams...")
+            for t in host_state.video_threads:
+                try:
+                    t.stop()
+                    t.join(timeout=2)
+                except Exception as e:
+                    logging.debug(f"Error stopping video thread: {e}")
+            host_state.video_threads.clear()
+
+        if host_state.audio_thread:
             try:
-                thread.stop()
-                thread.join(timeout=2)
-            except Exception:
-                pass
-        host_state.video_threads.clear()
-    if host_state.audio_thread:
-        try:
-            host_state.audio_thread.stop()
-            host_state.audio_thread.join(timeout=2)
-        except Exception:
-            pass
-        host_state.audio_thread = None
-    host_state.starting_streams = False
+                host_state.audio_thread.stop()
+                host_state.audio_thread.join(timeout=2)
+            except Exception as e:
+                logging.debug(f"Error stopping audio thread: {e}")
+            host_state.audio_thread = None
+
+        host_state.starting_streams = False
+        host_state.last_disconnect_ts = time.time()
+        logging.info("All streams stopped and cooldown set.")
 
 def cleanup():
     stop_all()
@@ -176,8 +231,6 @@ def is_intel_cpu():
         return "intel" in p or "intel" in py_platform.platform().lower()
     except Exception:
         return False
-
-    return os.environ.get("LINUXPLAY_FORCE_AMF","0") == "1"
 
 def has_vaapi():
     return IS_LINUX and os.path.exists("/dev/dri/renderD128")
@@ -307,7 +360,7 @@ def detect_monitors():
 
 def _input_ll_flags():
     return [
-        "-fflags","nobuffer",
+        "-fflags","nobuffer","-avioflags","direct",
         "-use_wallclock_as_timestamps","1",
         "-thread_queue_size","64",
         "-probesize","32",
@@ -363,16 +416,8 @@ def _safe_nvenc_preset(preset):
                "lossless","p1","p2","p3","p4","p5","p6","p7"}
     return preset if preset in allowed else "p4"
 
-def _amf_quality_from_preset(preset: str) -> str:
-    return {
-        "ultrafast":"speed","superfast":"speed","veryfast":"speed",
-        "fast":"balanced","medium":"balanced",
-        "slow":"quality","veryslow":"quality",
-        "p1":"quality","p2":"quality","p3":"balanced","p4":"balanced","p5":"balanced","p6":"speed","p7":"speed",
-        "ll":"speed","llhq":"balanced","llhp":"speed","hp":"balanced","hq":"quality","bd":"quality",
-    }.get(preset or "balanced","balanced")
-
-def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, tune: str, bitrate: str, pix_fmt: str):
+def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str,
+                       tune: str, bitrate: str, pix_fmt: str):
     codec = (codec or "h.264").lower()
     hwenc = (hwenc or "auto").lower()
     preset_l = (preset or "").strip().lower()
@@ -382,7 +427,7 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
     def ensure(name: str) -> bool:
         ok = ffmpeg_has_encoder(name)
         if not ok:
-            logging.warning("Requested encoder '%s' not found in this FFmpeg build; falling back to CPU.", name)
+            logging.warning("Requested encoder '%s' not found; falling back to CPU.", name)
         return ok
 
     if hwenc == "auto":
@@ -408,11 +453,7 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
             hwenc = "cpu"
 
     adaptive = getattr(HOST_ARGS, "adaptive", False)
-    dynamic_flags = []
-
     if not bitrate or str(bitrate).lower() in ("0", "auto"):
-        logging.debug("Auto bitrate: switching to CQP/CRF mode")
-        bitrate = "0"
         if "vaapi" in hwenc:
             dynamic_flags = ["-rc_mode", "CQP", "-qp", qp or "21"]
         elif "nvenc" in hwenc:
@@ -421,35 +462,24 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
             dynamic_flags = ["-rc_mode", "ICQ", "-icq_quality", qp or "23"]
         else:
             dynamic_flags = ["-crf", qp or "23"]
-
     elif adaptive:
-        if "vaapi" in hwenc:
+        if "nvenc" in hwenc:
+            dynamic_flags = ["-rc", "vbr", "-maxrate", bitrate, "-cq", qp or "23"]
+        elif "vaapi" in hwenc:
             dynamic_flags = ["-rc_mode", "CQP", "-qp", qp or "21"]
-        elif "nvenc" in hwenc:
-            dynamic_flags = [
-                "-rc", "vbr",
-                "-maxrate", bitrate,
-                "-cq", qp or "23",
-                "-tune", "ull"
-            ]
         elif "qsv" in hwenc:
-            dynamic_flags = [
-                "-rc_mode", "ICQ",
-                "-icq_quality", qp or "23",
-                "-maxrate", bitrate,
-            ]
+            dynamic_flags = ["-rc_mode", "ICQ", "-icq_quality", qp or "23"]
         else:
             dynamic_flags = ["-crf", qp or "23"]
-
     else:
         dynamic_flags = ["-b:v", bitrate]
 
-    gop_val = 0
     try:
         gop_val = int(gop)
+        use_gop = gop_val > 0
     except Exception:
         gop_val = 0
-    use_gop = gop_val > 0
+        use_gop = False
 
     if codec == "h.264":
         if hwenc == "nvenc" and ensure("h264_nvenc"):
@@ -457,57 +487,41 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
                 "-c:v", "h264_nvenc",
                 "-preset", _safe_nvenc_preset(preset_l or "llhq"),
                 *(["-g", str(gop_val)] if use_gop else []),
-                "-bf", "0",
-                "-rc-lookahead", "0",
-                "-refs", "1",
-                "-flags2", "+fast",
-                *dynamic_flags,
-                "-pix_fmt", pix_fmt,
-                "-bsf:v", "h264_mp4toannexb"
+                "-bf", "0", "-rc-lookahead", "0", "-refs", "1",
+                "-flags2", "+fast", *dynamic_flags,
+                "-pix_fmt", pix_fmt, "-bsf:v", "h264_mp4toannexb"
             ]
-            if not tune:
+
+            if tune:
+                _t = tune.strip().lower()
+                if _t in ("zerolatency", "ull", "ultra-low-latency", "ultra_low_latency"):
+                    enc += ["-tune", "ull"]
+                elif _t in ("low-latency", "ll", "low_latency"):
+                    enc += ["-tune", "ll"]
+                elif _t in ("hq", "film", "quality", "high_quality"):
+                    enc += ["-tune", "hq"]
+                elif _t in ("lossless",):
+                    enc += ["-tune", "lossless"]
+            else:
                 enc += ["-tune", "ll"]
 
         elif hwenc == "qsv" and ensure("h264_qsv"):
-            enc = [
-                "-c:v", "h264_qsv",
-                *(["-g", str(gop_val)] if use_gop else []),
-                "-bf", "0",
-                "-rc-lookahead", "0",
-                "-refs", "1",
-                "-flags2", "+fast",
-                *dynamic_flags,
-                "-pix_fmt", pix_fmt,
-                "-bsf:v", "h264_mp4toannexb"
-            ]
+            enc = ["-c:v", "h264_qsv", *dynamic_flags,
+                   "-pix_fmt", pix_fmt, "-bsf:v", "h264_mp4toannexb"]
 
         elif hwenc == "vaapi" and has_vaapi() and ensure("h264_vaapi"):
-            extra_filters += ["-vf", "format=nv12,hwupload", "-vaapi_device", "/dev/dri/renderD128"]
-            enc = [
-                "-c:v", "h264_vaapi",
-                *(["-g", str(gop_val)] if use_gop else []),
-                "-bf", "0",
-                "-rc-lookahead", "0",
-                "-refs", "1",
-                "-flags2", "+fast",
-                *dynamic_flags,
-                "-bsf:v", "h264_mp4toannexb"
-            ]
+            va_fmt = _vaapi_fmt_for_pix_fmt(pix_fmt, codec)
+            extra_filters += ["-vf", f"format={va_fmt},hwupload",
+                              "-vaapi_device", "/dev/dri/renderD128"]
+            enc = ["-c:v", "h264_vaapi", "-bf", "0", *dynamic_flags,
+                   "-bsf:v", "h264_mp4toannexb"]
 
         else:
-            enc = [
-                "-c:v", "libx264",
-                "-preset", preset_l or "ultrafast",
-                *(["-g", str(gop_val)] if use_gop else []),
-                "-bf", "0",
-                "-rc-lookahead", "0",
-                "-refs", "1",
-                "-flags2", "+fast",
-                *dynamic_flags,
-                "-pix_fmt", pix_fmt,
-                "-tune", tune or "zerolatency",
-                "-bsf:v", "h264_mp4toannexb"
-            ]
+            enc = ["-c:v", "libx264", "-preset", preset_l or "ultrafast",
+                   "-tune", tune or "zerolatency",
+                   *(["-g", str(gop_val)] if use_gop else []),
+                   *dynamic_flags, "-pix_fmt", pix_fmt,
+                   "-bsf:v", "h264_mp4toannexb"]
 
     elif codec == "h.265":
         if hwenc == "nvenc" and ensure("hevc_nvenc"):
@@ -515,56 +529,41 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
                 "-c:v", "hevc_nvenc",
                 "-preset", _safe_nvenc_preset(preset_l or "p5"),
                 *(["-g", str(gop_val)] if use_gop else []),
-                "-bf", "0",
-                "-rc-lookahead", "0",
-                "-refs", "1",
-                "-flags2", "+fast",
-                *dynamic_flags,
-                "-pix_fmt", pix_fmt,
-                "-bsf:v", "hevc_mp4toannexb"
+                "-bf", "0", "-rc-lookahead", "0", "-refs", "1",
+                "-flags2", "+fast", *dynamic_flags,
+                "-pix_fmt", pix_fmt, "-bsf:v", "hevc_mp4toannexb"
             ]
-            if not tune:
+
+            if tune:
+                _t = tune.strip().lower()
+                if _t in ("zerolatency", "ull", "ultra-low-latency", "ultra_low_latency"):
+                    enc += ["-tune", "ull"]
+                elif _t in ("low-latency", "ll", "low_latency"):
+                    enc += ["-tune", "ll"]
+                elif _t in ("hq", "film", "quality", "high_quality"):
+                    enc += ["-tune", "hq"]
+                elif _t in ("lossless",):
+                    enc += ["-tune", "lossless"]
+            else:
                 enc += ["-tune", "ll"]
 
         elif hwenc == "qsv" and ensure("hevc_qsv"):
-            enc = [
-                "-c:v", "hevc_qsv",
-                *(["-g", str(gop_val)] if use_gop else []),
-                "-bf", "0",
-                "-rc-lookahead", "0",
-                "-refs", "1",
-                "-flags2", "+fast",
-                *dynamic_flags,
-                "-pix_fmt", pix_fmt,
-                "-bsf:v", "hevc_mp4toannexb"
-            ]
+            enc = ["-c:v", "hevc_qsv", *dynamic_flags,
+                   "-pix_fmt", pix_fmt, "-bsf:v", "hevc_mp4toannexb"]
 
         elif hwenc == "vaapi" and has_vaapi() and ensure("hevc_vaapi"):
-            extra_filters += ["-vf", "format=nv12,hwupload", "-vaapi_device", "/dev/dri/renderD128"]
-            enc = [
-                "-c:v", "hevc_vaapi",
-                *(["-g", str(gop_val)] if use_gop else []),
-                "-bf", "0",
-                "-rc-lookahead", "0",
-                "-refs", "1",
-                "-flags2", "+fast",
-                *dynamic_flags,
-                "-bsf:v", "hevc_mp4toannexb"
-            ]
+            va_fmt = _vaapi_fmt_for_pix_fmt(pix_fmt, codec)
+            extra_filters += ["-vf", f"format={va_fmt},hwupload",
+                              "-vaapi_device", "/dev/dri/renderD128"]
+            enc = ["-c:v", "hevc_vaapi", "-bf", "0", *dynamic_flags,
+                   "-bsf:v", "hevc_mp4toannexb"]
 
         else:
-            enc = [
-                "-c:v", "libx265",
-                "-preset", preset_l or "ultrafast",
-                *(["-g", str(gop_val)] if use_gop else []),
-                "-bf", "0",
-                "-rc-lookahead", "0",
-                "-refs", "1",
-                "-flags2", "+fast",
-                *dynamic_flags,
-                "-tune", tune or "zerolatency",
-                "-bsf:v", "hevc_mp4toannexb"
-            ]
+            enc = ["-c:v", "libx265", "-preset", preset_l or "ultrafast",
+                   "-tune", tune or "zerolatency",
+                   *(["-g", str(gop_val)] if use_gop else []),
+                   *dynamic_flags, "-pix_fmt", pix_fmt,
+                   "-bsf:v", "hevc_mp4toannexb"]
 
     return extra_filters, enc
 
@@ -588,6 +587,7 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
     codec_name = (args.encoder if args.encoder and args.encoder.lower() != "none" else "h.264")
     min_bits = int(w) * int(h) * max(1, fps_i) * _target_bpp(codec_name, fps_i)
     cur_bits = _parse_bitrate_bits(bitrate)
+
     if cur_bits < min_bits:
         safe_bits = int(min_bits)
         safe_str = _format_bits(safe_bits)
@@ -597,6 +597,11 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
         )
         bitrate = safe_str
         host_state.current_bitrate = safe_str
+
+    ip = getattr(host_state, "client_ip", None)
+    if not ip or not isinstance(ip, str) or ip.strip().lower() in ("none", "", "0.0.0.0"):
+        logging.error(f"build_video_cmd: invalid client IP ({ip!r}) — refusing to build ffmpeg command.")
+        return None
 
     base_in = [*(_ffmpeg_base_cmd()), *(_input_ll_flags())]
     disp = args.display
@@ -642,12 +647,21 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
         )
 
         if any(x in encode for x in ("h264_vaapi", "hevc_vaapi")):
+            _vaapi_fmt = {
+                "nv12": "nv12",
+                "yuv420p": "nv12",
+                "p010": "p010",
+                "yuv420p10": "p010",
+            }.get((pix_fmt or "nv12").lower(), "nv12")
+
             extra_filters = [
-                "-vf", f"hwmap=derive_device=vaapi,scale_vaapi=w={w}:h={h}:format=nv12",
+                "-vf", f"hwmap=derive_device=vaapi,scale_vaapi=w={w}:h={h}:format={_vaapi_fmt}",
                 "-vaapi_device", "/dev/dri/renderD128"
             ]
+
         elif args.hwenc == "cpu":
-            extra_filters = ["-vf", "hwdownload,format=yuv420p"]
+            extra_filters = ["-vf", f"hwdownload,format={pix_fmt or 'yuv420p'}"]
+
         else:
             logging.warning(
                 "kmsgrab requested but encoder backend '%s' not supported; falling back to x11grab.",
@@ -679,16 +693,17 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
         "-f", "mpegts",
         *_marker_opt(),
         (
-            f"udp://{host_state.client_ip}:{video_port}"
+            f"udp://{ip}:{video_port}"
             f"?pkt_size=1316"
             f"&buffer_size=65536"
             f"&fifo_size=32768"
             f"&overrun_nonfatal=1"
             f"&max_delay=0"
-        )
+        ),
     ]
 
-    return input_side + output_side + (extra_filters or []) + encode + out
+    full_cmd = input_side + output_side + (extra_filters or []) + encode + out
+    return full_cmd
 
 def build_audio_cmd():
     opus_app = os.environ.get("LP_OPUS_APP", "voip")
@@ -877,6 +892,48 @@ def tcp_handshake_server(sock, encoder_str, args):
             trigger_shutdown(f"Handshake server error: {e}")
             break
 
+def start_streams_for_current_client(args):
+    ip = getattr(host_state, "client_ip", None)
+    if not ip:
+        logging.warning("start_streams_for_current_client: no valid client IP — waiting for handshake.")
+        return
+
+    with host_state.video_thread_lock:
+        if host_state.starting_streams:
+            logging.debug("start_streams_for_current_client: already starting; skipping duplicate call.")
+            return
+        if host_state.video_threads:
+            logging.debug("start_streams_for_current_client: video threads already active; skipping.")
+            return
+
+        if getattr(host_state, "last_disconnect_ts", 0) > 0:
+            elapsed = time.time() - host_state.last_disconnect_ts
+            if elapsed < 2.0:
+                logging.debug(f"start_streams_for_current_client: cooldown {elapsed:.2f}s — skipping restart.")
+                return
+
+        host_state.starting_streams = True
+        try:
+            host_state.video_threads = []
+            for i, mon in enumerate(host_state.monitors):
+                cmd = build_video_cmd(args, host_state.current_bitrate, mon, UDP_VIDEO_PORT + i)
+                if not cmd:
+                    logging.warning(f"Video {i} skipped — invalid or incomplete ffmpeg command.")
+                    continue
+                t = StreamThread(cmd, f"Video {i}")
+                t.start()
+                host_state.video_threads.append(t)
+
+            if args.audio == "enable" and not host_state.audio_thread:
+                ac = build_audio_cmd()
+                if ac:
+                    host_state.audio_thread = StreamThread(ac, "Audio")
+                    host_state.audio_thread.start()
+        except Exception as e:
+            logging.error(f"start_streams_for_current_client: exception while starting — {e}")
+        finally:
+            host_state.starting_streams = False
+
 def control_listener(sock):
     logging.info("Control listener UDP %d", UDP_CONTROL_PORT)
     while not host_state.should_terminate:
@@ -904,6 +961,19 @@ def control_listener(sock):
                             logging.error("Restart after NET failed: %s", e)
                 continue
 
+            elif cmd == "GOODBYE":
+                logging.info("Client at %s disconnected cleanly.", addr[0])
+                try:
+                    stop_streams_only()
+                    host_state.client_ip = None
+                    host_state.starting_streams = False
+                    set_status("Client disconnected — waiting for connection…")
+                    logging.debug("All streams stopped after GOODBYE.")
+                    time.sleep(RECONNECT_COOLDOWN)
+                except Exception as e:
+                    logging.error(f"Error handling GOODBYE cleanup: {e}")
+                continue
+
             elif cmd == "MOUSE_PKT" and len(tokens) == 5:
                 try:
                     pkt_type = int(tokens[1])
@@ -919,8 +989,6 @@ def control_listener(sock):
                     if bmask & 1: _inject_mouse_down("1")
                     if bmask & 2: _inject_mouse_down("2")
                     if bmask & 4: _inject_mouse_down("3")
-                elif pkt_type == 2:
-                    pass
                 elif pkt_type == 3:
                     if bmask & 1: _inject_mouse_up("1")
                     if bmask & 2: _inject_mouse_up("2")
@@ -1043,37 +1111,13 @@ def file_upload_listener():
     finally:
         host_state.file_upload_sock = None
 
-def start_streams_for_current_client(args):
-    if not host_state.client_ip:
-        return
-    with host_state.video_thread_lock:
-        if host_state.starting_streams:
-            logging.debug("start_streams_for_current_client: already starting; skipping duplicate call.")
-            return
-        if host_state.video_threads:
-            return
-        host_state.starting_streams = True
-        try:
-            host_state.video_threads = []
-            for i, mon in enumerate(host_state.monitors):
-                cmd = build_video_cmd(args, host_state.current_bitrate, mon, UDP_VIDEO_PORT + i)
-                t = StreamThread(cmd, f"Video {i}")
-                t.start()
-                host_state.video_threads.append(t)
-            if args.audio == "enable" and not host_state.audio_thread:
-                ac = build_audio_cmd()
-                if ac:
-                    host_state.audio_thread = StreamThread(ac, "Audio")
-                    host_state.audio_thread.start()
-        finally:
-            host_state.starting_streams = False
-
 def heartbeat_manager(args):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("", UDP_HEARTBEAT_PORT))
         host_state.heartbeat_sock = s
+        logging.info("Heartbeat manager running on UDP %d", UDP_HEARTBEAT_PORT)
     except Exception as e:
         trigger_shutdown(f"Heartbeat socket error: {e}")
         return
@@ -1085,34 +1129,41 @@ def heartbeat_manager(args):
         now = time.time()
 
         if host_state.client_ip:
-            if now - last_ping >= 1.0:
+            if now - last_ping >= HEARTBEAT_INTERVAL:
                 try:
                     s.sendto(b"PING", (host_state.client_ip, UDP_HEARTBEAT_PORT))
+                    last_ping = now
                 except Exception as e:
                     logging.warning("Heartbeat send error: %s", e)
-                last_ping = now
 
             s.settimeout(0.5)
             try:
                 data, addr = s.recvfrom(1024)
                 msg = data.decode("utf-8", errors="ignore").strip()
-
                 if msg.startswith("PONG") and addr[0] == host_state.client_ip:
                     host_state.last_pong_ts = now
-
             except socket.timeout:
                 pass
             except Exception as e:
                 logging.debug("Heartbeat recv error: %s", e)
 
-            if now - host_state.last_pong_ts > 10.0:
-                logging.warning(
-                    "Heartbeat timeout from %s — stopping streams and waiting for reconnection.",
-                    host_state.client_ip
-                )
-                stop_streams_only()
-                host_state.client_ip = None
-                set_status("Client disconnected — waiting for connection…")
+            if now - host_state.last_pong_ts > HEARTBEAT_TIMEOUT:
+                if host_state.client_ip:
+                    logging.warning(
+                        "Heartbeat timeout from %s — no PONG or GOODBYE, stopping streams.",
+                        host_state.client_ip
+                    )
+                    try:
+                        stop_streams_only()
+                    except Exception as e:
+                        logging.error("Error stopping streams after timeout: %s", e)
+
+                    host_state.client_ip = None
+                    host_state.starting_streams = False
+                    set_status("Client disconnected — waiting for connection…")
+
+                    time.sleep(RECONNECT_COOLDOWN)
+
                 host_state.last_pong_ts = now
         else:
             time.sleep(0.5)
@@ -1194,10 +1245,15 @@ def stats_broadcast():
 
 def session_manager(args):
     while not host_state.should_terminate:
+        if time.time() - host_state.last_disconnect_ts < RECONNECT_COOLDOWN:
+            time.sleep(0.5)
+            continue
+
         if host_state.client_ip and not host_state.video_threads:
             set_status(f"Client: {host_state.client_ip}")
             start_streams_for_current_client(args)
-        time.sleep(0.2)
+        time.sleep(0.5)
+
 def _signal_handler(signum, frame):
     logging.info("Signal %s received, shutting down…", signum)
     trigger_shutdown(f"Signal {signum}")
@@ -1412,7 +1468,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="LinuxPlay Host (Linux only)")
     p.add_argument("--gui", action="store_true", help="Show host GUI window.")
     p.add_argument("--encoder", choices=["none","h.264","h.265"], default="none")
-    p.add_argument("--hwenc", choices=["auto","cpu","nvenc","qsv","vaapi"], default="auto", help="Manual encoder backend selection (auto=heuristic).")
+    p.add_argument("--hwenc", choices=["auto","cpu","nvenc","qsv","vaapi"], default="auto",
+                   help="Manual encoder backend selection (auto=heuristic).")
     p.add_argument("--framerate", default=DEFAULT_FPS)
     p.add_argument("--bitrate", default=LEGACY_BITRATE)
     p.add_argument("--audio", choices=["enable","disable"], default="disable")
