@@ -12,6 +12,7 @@ from queue import Queue
 import psutil
 import statistics
 import shutil
+import json
 
 try:
     HERE = os.path.dirname(os.path.abspath(__file__))
@@ -37,13 +38,19 @@ TCP_HANDSHAKE_PORT = 7001
 UDP_CLIPBOARD_PORT = 7002
 UDP_AUDIO_PORT = 6001
 UDP_HEARTBEAT_PORT = 7004
+UDP_FILE_PORT = 7003
 
 IS_WINDOWS = py_platform.system() == "Windows"
 IS_LINUX   = py_platform.system() == "Linux"
 
 CLIPBOARD_INBOX = Queue()
-
 audio_proc = None
+CLIENT_STATE = {
+    "connected": False,
+    "last_heartbeat": 0.0,
+    "net_mode": "lan",
+    "reconnecting": False
+}
 
 def ffmpeg_hwaccels():
     try:
@@ -84,7 +91,9 @@ def detect_network_mode(host_ip: str) -> str:
     try:
         if IS_LINUX:
             import subprocess, re, os
-            out = subprocess.check_output(["ip", "route", "get", host_ip], universal_newlines=True, stderr=subprocess.STDOUT)
+            out = subprocess.check_output(["ip", "route", "get", host_ip],
+                                          universal_newlines=True,
+                                          stderr=subprocess.STDOUT)
             m = re.search(r"\bdev\s+(\S+)", out)
             iface = m.group(1) if m else ""
             if iface and os.path.exists(f"/sys/class/net/{iface}/wireless"):
@@ -95,32 +104,23 @@ def detect_network_mode(host_ip: str) -> str:
         elif IS_WINDOWS:
             import subprocess
             ps = ["powershell", "-NoProfile", "-Command",
-                  "(Get-NetRoute -DestinationPrefix %s/32 | Sort-Object -Property RouteMetric | Select-Object -First 1).InterfaceAlias" % host_ip]
-            try:
-                alias = subprocess.check_output(ps, universal_newlines=True, stderr=subprocess.DEVNULL).strip()
-            except Exception:
-                alias = ""
+                  f"(Get-NetRoute -DestinationPrefix {host_ip}/32 | Sort-Object RouteMetric | Select-Object -First 1).InterfaceAlias"]
+            alias = subprocess.check_output(ps, universal_newlines=True,
+                                            stderr=subprocess.DEVNULL).strip()
             if alias:
                 ps2 = ["powershell", "-NoProfile", "-Command",
-                       "($a = Get-NetAdapter -Name '%s' -ErrorAction SilentlyContinue) | Select-Object -Expand NdisPhysicalMedium" % alias.replace("'", "''")]
-                try:
-                    medium = subprocess.check_output(ps2, universal_newlines=True, stderr=subprocess.DEVNULL).strip().lower()
-                    if "wireless" in medium or "802.11" in medium:
-                        return "wifi"
-                except Exception:
-                    pass
-            ps3 = ["powershell", "-NoProfile", "-Command", "(Get-NetAdapter -Physical | ? {$_.Status -eq 'Up'} | ? {$_.NdisPhysicalMedium -like '*Wireless*'}).Name | Select-Object -First 1"]
-            try:
-                any_wifi = subprocess.check_output(ps3, universal_newlines=True, stderr=subprocess.DEVNULL).strip()
-                if any_wifi: return "wifi"
-            except Exception:
-                pass
+                       f"($a = Get-NetAdapter -Name '{alias.replace('\"','')}') | Select-Object -Expand NdisPhysicalMedium"]
+                medium = subprocess.check_output(ps2, universal_newlines=True,
+                                                 stderr=subprocess.DEVNULL).strip().lower()
+                if "wireless" in medium or "802.11" in medium:
+                    return "wifi"
             return "lan"
     except Exception:
         return "lan"
 
 def tcp_handshake_client(host_ip):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(5)
     try:
         logging.info("Handshake to %s:%s", host_ip, TCP_HANDSHAKE_PORT)
         sock.connect((host_ip, TCP_HANDSHAKE_PORT))
@@ -134,9 +134,90 @@ def tcp_handshake_client(host_ip):
         parts = resp.split(":", 2)
         host_encoder = parts[1].strip()
         monitor_info = parts[2].strip() if len(parts) > 2 else DEFAULT_RESOLUTION
+        CLIENT_STATE["connected"] = True
+        CLIENT_STATE["last_heartbeat"] = time.time()
         return (True, (host_encoder, monitor_info))
-    logging.error("Handshake response invalid: %s", resp)
+    logging.error("Invalid handshake response: %s", resp)
     return (False, None)
+
+def heartbeat_responder(host_ip):
+    def loop():
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("", UDP_HEARTBEAT_PORT))
+            except OSError as e:
+                logging.error(f"Heartbeat bind failed: {e}")
+                return
+            sock.settimeout(2)
+            logging.info("Heartbeat responder active on UDP %s", UDP_HEARTBEAT_PORT)
+            while CLIENT_STATE["connected"]:
+                try:
+                    data, addr = sock.recvfrom(256)
+                    if data == b"PING":
+                        sock.sendto(b"PONG", addr)
+                        CLIENT_STATE["last_heartbeat"] = time.time()
+                except socket.timeout:
+                    if time.time() - CLIENT_STATE["last_heartbeat"] > 10:
+                        CLIENT_STATE["connected"] = False
+                        CLIENT_STATE["reconnecting"] = True
+                except Exception:
+                    time.sleep(0.2)
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+    return t
+
+def clipboard_listener(app_clipboard):
+    def loop():
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("", UDP_CLIPBOARD_PORT))
+            except OSError as e:
+                logging.error(f"Clipboard listener bind failed: {e}")
+                return
+            logging.info("Listening for clipboard updates on UDP %s", UDP_CLIPBOARD_PORT)
+            while CLIENT_STATE["connected"]:
+                try:
+                    data, _ = sock.recvfrom(65535)
+                    msg = data.decode("utf-8", errors="replace").strip()
+                    if msg.startswith("CLIPBOARD_UPDATE HOST"):
+                        text = msg.split("HOST", 1)[1].strip()
+                        if text:
+                            app_clipboard.blockSignals(True)
+                            app_clipboard.setText(text)
+                            app_clipboard.blockSignals(False)
+                except Exception:
+                    time.sleep(0.2)
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+    return t
+
+def audio_listener(host_ip):
+    def loop():
+        global audio_proc
+        cmd = [
+            "ffplay",
+            "-hide_banner", "-loglevel", "error",
+            "-nodisp", "-autoexit",
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-f", "mpegts",
+            f"udp://{host_ip}:{UDP_AUDIO_PORT}?overrun_nonfatal=1&buffer_size=32768"
+        ]
+        logging.info("Audio listener: %s", " ".join(cmd))
+        try:
+            audio_proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            audio_proc.wait()
+        except Exception as e:
+            logging.error("Audio listener failed: %s", e)
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+    return t
 
 class DecoderThread(QThread):
     frame_ready = pyqtSignal(object)
@@ -144,7 +225,7 @@ class DecoderThread(QThread):
     def __init__(self, input_url, decoder_opts, ultra=False):
         super().__init__()
         self.input_url = input_url
-        self.decoder_opts = dict(decoder_opts) if decoder_opts else {}
+        self.decoder_opts = dict(decoder_opts or {})
         self.decoder_opts.setdefault("probesize", "32")
         self.decoder_opts.setdefault("analyzeduration", "0")
         self.decoder_opts.setdefault("scan_all_pmts", "1")
@@ -152,11 +233,18 @@ class DecoderThread(QThread):
         self.decoder_opts.setdefault("flags", "low_delay")
         self.decoder_opts.setdefault("reorder_queue_size", "0")
         self.decoder_opts.setdefault("rtbufsize", "2M")
+        self.decoder_opts.setdefault("fpsprobesize", "1")
+
         self._running = True
         self._sw_fallback_done = False
         self.ultra = ultra
         self._emit_interval = 0.0
         self._last_emit = 0.0
+        self._frame_count = 0
+        self._avg_decode_time = 0.0
+        self._restart_delay = 0.5
+        self._last_error = ""
+        self._has_first_frame = False
 
     def _open_container(self):
         logging.debug("Opening stream with opts: %s", self.decoder_opts)
@@ -167,46 +255,81 @@ class DecoderThread(QThread):
             container = None
             try:
                 container = self._open_container()
+                vstream = next((s for s in container.streams if s.type == "video"), None)
+                if not vstream:
+                    logging.warning("No video stream detected, retrying...")
+                    time.sleep(0.5)
+                    continue
+
+                cc = vstream.codec_context
+                cc.thread_count = 1 if self.ultra else 2
                 try:
-                    vstream = next(s for s in container.streams if s.type == "video")
-                    cc = vstream.codec_context
-                    cc.thread_count = 1 if self.ultra else 2
+                    cc.low_delay = True
+                    cc.skip_frame = "NONREF"
                 except Exception:
                     pass
 
                 for frame in container.decode(video=0):
                     if not self._running:
                         break
-
-                    now_emit = time.time()
-                    if self._emit_interval > 0 and (now_emit - self._last_emit) < self._emit_interval:
+                    if not frame or frame.is_corrupt:
                         continue
-                    self._last_emit = now_emit
 
+                    t0 = time.perf_counter()
                     arr = frame.to_ndarray(format="rgb24")
+                    if not arr.flags["C_CONTIGUOUS"]:
+                        arr = np.ascontiguousarray(arr, dtype=np.uint8)
+
+                    self._has_first_frame = True
                     self.frame_ready.emit((arr, frame.width, frame.height))
 
+                    t1 = time.perf_counter()
+                    self._frame_count += 1
+                    decode_time = (t1 - t0) * 1000
+                    self._avg_decode_time = (
+                        0.9 * self._avg_decode_time + 0.1 * decode_time
+                        if self._frame_count > 1 else decode_time
+                    )
+
+                    if self._emit_interval > 0:
+                        elapsed = time.time() - self._last_emit
+                        if elapsed < self._emit_interval:
+                            continue
+                    self._last_emit = time.time()
+
+                if self._running:
+                    if not self._has_first_frame:
+                        logging.info("Still waiting for video data...")
+                    else:
+                        logging.warning("Stream ended — reconnecting in %.1fs...", self._restart_delay)
+                    time.sleep(self._restart_delay)
+
             except Exception as e:
-                logging.error("Decoding error: %s", e)
+                err = str(e)
+                if err != self._last_error:
+                    logging.error(f"Decode error: {err}")
+                    self._last_error = err
+
                 if not self._sw_fallback_done and "hwaccel" in self.decoder_opts:
-                    logging.warning("Hardware decoder failed — switching to software mode")
+                    logging.warning("HW decode failed — switching to CPU.")
                     self.decoder_opts.pop("hwaccel", None)
                     self.decoder_opts.pop("hwaccel_device", None)
                     self._sw_fallback_done = True
                     continue
-                time.sleep(0.03)
+
+                if self._running:
+                    time.sleep(self._restart_delay)
 
             finally:
-                if container:
-                    try:
+                try:
+                    if container:
                         container.close()
-                    except Exception:
-                        pass
-
-            time.sleep(0.002)
+                except Exception:
+                    pass
 
     def stop(self):
         self._running = False
+        time.sleep(0.05)
 
 class VideoWidgetGL(QOpenGLWidget):
     def __init__(self, control_callback, rwidth, rheight, offset_x, offset_y, host_ip, parent=None):
@@ -223,8 +346,8 @@ class VideoWidgetGL(QOpenGLWidget):
         self.texture_height = rheight
         self.offset_x = offset_x
         self.offset_y = offset_y
-        self.last_mouse_move = 0
         self.frame_data = None
+        self._pending_resize = None
 
         self.clipboard = QApplication.clipboard()
         self.clipboard.dataChanged.connect(self.on_clipboard_change)
@@ -241,17 +364,21 @@ class VideoWidgetGL(QOpenGLWidget):
         self._cpu = 0.0
         self._ram = 0.0
         self._last_stats_update = 0.0
+        self._last_mouse_ts = 0.0
+        self._mouse_throttle = 0.0025
+        self._last_frame_recv = time.time()
 
     def on_clipboard_change(self):
         new_text = self.clipboard.text()
-        if not self.ignore_clipboard and new_text and new_text != self.last_clipboard:
-            self.last_clipboard = new_text
-            msg = f"CLIPBOARD_UPDATE CLIENT {new_text}".encode("utf-8")
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            try:
+        if self.ignore_clipboard or not new_text or new_text == self.last_clipboard:
+            return
+        self.last_clipboard = new_text
+        msg = f"CLIPBOARD_UPDATE CLIENT {new_text}".encode("utf-8")
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                 sock.sendto(msg, (self.host_ip, UDP_CLIPBOARD_PORT))
-            finally:
-                sock.close()
+        except Exception:
+            pass
 
     def initializeGL(self):
         glDisable(GL_DEPTH_TEST)
@@ -264,13 +391,16 @@ class VideoWidgetGL(QOpenGLWidget):
         glBindTexture(GL_TEXTURE_2D, self.texture_id)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, None)
         glBindTexture(GL_TEXTURE_2D, 0)
 
         if self.pbo_ids:
             glDeleteBuffers(len(self.pbo_ids), self.pbo_ids)
-        self.pbo_ids = list(glGenBuffers(3))
+
+        self.pbo_ids = list(glGenBuffers(2))
         buf_size = w * h * 3
         for pbo in self.pbo_ids:
             glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo)
@@ -278,67 +408,79 @@ class VideoWidgetGL(QOpenGLWidget):
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0)
 
         self.texture_width, self.texture_height = w, h
+        glFlush()
 
     def resizeTexture(self, w, h):
-        logging.info("Resize texture %dx%d -> %dx%d", self.texture_width, self.texture_height, w, h)
-        self._initialize_texture(w, h)
+        if (w, h) != (self.texture_width, self.texture_height):
+            logging.info(f"Resize texture {self.texture_width}x{self.texture_height} → {w}x{h}")
+            self._pending_resize = (w, h)
 
     def paintGL(self):
         glClear(GL_COLOR_BUFFER_BIT)
+        now = time.time()
+
+        has_signal = (now - self._last_frame_recv) < 2.5
+
         if not self.frame_data:
+            self._draw_overlay_text("Waiting for signal…" if not has_signal else "No video")
             return
 
         arr, fw, fh = self.frame_data
-        if (fw != self.texture_width) or (fh != self.texture_height):
-            self.resizeTexture(fw, fh)
+
+        if self._pending_resize:
+            w, h = self._pending_resize
+            self._initialize_texture(w, h)
+            self._pending_resize = None
 
         data = np.ascontiguousarray(arr, dtype=np.uint8)
         size = data.nbytes
 
         current_pbo = self.pbo_ids[self.current_pbo]
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, current_pbo)
-
         try:
-            ptr = glMapBufferRange(
-                GL_PIXEL_UNPACK_BUFFER, 0, size,
-                GL_MAP_WRITE_BIT |
-                GL_MAP_INVALIDATE_RANGE_BIT |
-                GL_MAP_UNSYNCHRONIZED_BIT
-            )
+            ptr = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, size,
+                                   GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT | GL_MAP_UNSYNCHRONIZED_BIT)
+            if ptr:
+                from ctypes import memmove, c_void_p
+                memmove(c_void_p(ptr), data.ctypes.data, size)
+                glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER)
+            else:
+                glBufferSubData(GL_PIXEL_UNPACK_BUFFER, 0, data)
         except Exception:
-            ptr = None
-
-        if ptr:
-            from ctypes import memmove, c_void_p
-            memmove(c_void_p(ptr), data.ctypes.data, size)
-            glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER)
-        else:
-            glBufferSubData(GL_PIXEL_UNPACK_BUFFER, 0, data)
+            pass
 
         glBindTexture(GL_TEXTURE_2D, self.texture_id)
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, fw, fh, GL_RGB, GL_UNSIGNED_BYTE, None)
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0)
 
+        aspect_tex = fw / float(fh)
+        aspect_win = self.width() / float(self.height())
+        if aspect_win > aspect_tex:
+            sx = aspect_tex / aspect_win
+            sy = 1.0
+        else:
+            sx = 1.0
+            sy = aspect_win / aspect_tex
+
         glEnable(GL_TEXTURE_2D)
         glBegin(GL_QUADS)
-        glTexCoord2f(0.0, 1.0); glVertex2f(-1.0, -1.0)
-        glTexCoord2f(1.0, 1.0); glVertex2f(1.0, -1.0)
-        glTexCoord2f(1.0, 0.0); glVertex2f(1.0, 1.0)
-        glTexCoord2f(0.0, 0.0); glVertex2f(-1.0, 1.0)
+        glTexCoord2f(0.0, 1.0); glVertex2f(-sx, -sy)
+        glTexCoord2f(1.0, 1.0); glVertex2f(sx, -sy)
+        glTexCoord2f(1.0, 0.0); glVertex2f(sx, sy)
+        glTexCoord2f(0.0, 0.0); glVertex2f(-sx, sy)
         glEnd()
         glDisable(GL_TEXTURE_2D)
         glBindTexture(GL_TEXTURE_2D, 0)
 
         self.current_pbo = (self.current_pbo + 1) % len(self.pbo_ids)
 
-        now = time.time()
         self._frame_times.append(now)
-        if len(self._frame_times) > 60:
+        if len(self._frame_times) > 90:
             self._frame_times.pop(0)
         if len(self._frame_times) >= 2:
-            mean_diff = statistics.mean(
-                t2 - t1 for t1, t2 in zip(self._frame_times, self._frame_times[1:])
-            )
+            diffs = [t2 - t1 for t1, t2 in zip(self._frame_times, self._frame_times[1:])]
+            mean_diff = statistics.mean(diffs)
             self._fps = 1.0 / mean_diff if mean_diff > 0 else 0.0
 
         if now - self._last_stats_update >= 1.0:
@@ -349,18 +491,21 @@ class VideoWidgetGL(QOpenGLWidget):
             except Exception:
                 pass
 
+        overlay = f"FPS: {self._fps:.0f} | CPU: {self._cpu:.0f}% | RAM: {self._ram:.0f} MB"
+        if not CLIENT_STATE["connected"]:
+            overlay += " | RECONNECTING…"
+        elif CLIENT_STATE["reconnecting"]:
+            overlay += " | Weak Signal"
+
+        self._draw_overlay_text(overlay)
+
+    def _draw_overlay_text(self, text):
         p = QPainter(self)
         p.setRenderHint(QPainter.TextAntialiasing)
-        font = QFont("Menlo", 10, QFont.Medium)
-        p.setFont(font)
-        text = f"FPS: {self._fps:.0f}  |  CPU: {self._cpu:.0f}%  |  RAM: {self._ram:.0f} MB"
-
-        metrics = p.fontMetrics()
-        rect = metrics.boundingRect(text)
+        p.setFont(QFont("Menlo", 10, QFont.Medium))
+        rect = p.fontMetrics().boundingRect(text)
         rect.adjust(-10, -6, 10, 6)
         rect.moveTopRight(QPoint(self.width() - 12, 10))
-
-        p.setRenderHint(QPainter.Antialiasing, True)
         p.setBrush(QColor(0, 0, 0, 180))
         p.setPen(Qt.NoPen)
         p.drawRoundedRect(rect, 8, 8)
@@ -370,37 +515,63 @@ class VideoWidgetGL(QOpenGLWidget):
 
     def updateFrame(self, frame_tuple):
         self.frame_data = frame_tuple
-        self.update()
+        self._last_frame_recv = time.time()
+        if self.isVisible():
+            self.update()
 
     def send_mouse_packet(self, pkt_type, bmask, x, y):
         msg = f"MOUSE_PKT {pkt_type} {bmask} {x} {y}"
-        self.control_callback(msg)
+        try:
+            self.control_callback(msg)
+        except Exception:
+            pass
+
+    def _scaled_mouse_coords(self, e):
+        ww, wh = self.width(), self.height()
+        fw, fh = self.texture_width, self.texture_height
+        aspect_tex = fw / float(fh)
+        aspect_win = ww / float(wh)
+
+        if aspect_win > aspect_tex:
+            view_h = wh
+            view_w = aspect_tex / aspect_win * ww
+            offset_x = (ww - view_w) / 2.0
+            offset_y = 0
+        else:
+            view_w = ww
+            view_h = aspect_win / aspect_tex * wh
+            offset_x = 0
+            offset_y = (wh - view_h) / 2.0
+
+        nx = (e.x() - offset_x) / view_w
+        ny = (e.y() - offset_y) / view_h
+
+        nx = min(max(nx, 0.0), 1.0)
+        ny = min(max(ny, 0.0), 1.0)
+
+        rx = self.offset_x + int(nx * fw)
+        ry = self.offset_y + int(ny * fh)
+        return rx, ry
 
     def mousePressEvent(self, e):
         bmap = {Qt.LeftButton: 1, Qt.MiddleButton: 2, Qt.RightButton: 4}
         bmask = bmap.get(e.button(), 0)
         if bmask:
-            rx = self.offset_x + int(e.x() / self.width() * self.texture_width)
-            ry = self.offset_y + int(e.y() / self.height() * self.texture_height)
+            rx, ry = self._scaled_mouse_coords(e)
             self.send_mouse_packet(1, bmask, rx, ry)
         e.accept()
 
     def mouseMoveEvent(self, e):
-        if not self.width() or not self.height():
+        now = time.time()
+        if now - self._last_mouse_ts < self._mouse_throttle:
             return
+        self._last_mouse_ts = now
 
-        rx = self.offset_x + int(e.x() / self.width() * self.texture_width)
-        ry = self.offset_y + int(e.y() / self.height() * self.texture_height)
-    
-        if hasattr(self, "_last_sent_pos") and self._last_sent_pos == (rx, ry, int(e.buttons())):
-            return
-        self._last_sent_pos = (rx, ry, int(e.buttons()))
-
+        rx, ry = self._scaled_mouse_coords(e)
         buttons = 0
         if e.buttons() & Qt.LeftButton: buttons |= 1
         if e.buttons() & Qt.MiddleButton: buttons |= 2
         if e.buttons() & Qt.RightButton: buttons |= 4
-
         self.send_mouse_packet(2, buttons, rx, ry)
         e.accept()
 
@@ -408,8 +579,7 @@ class VideoWidgetGL(QOpenGLWidget):
         bmap = {Qt.LeftButton: 1, Qt.MiddleButton: 2, Qt.RightButton: 4}
         bmask = bmap.get(e.button(), 0)
         if bmask:
-            rx = self.offset_x + int(e.x() / self.width() * self.texture_width)
-            ry = self.offset_y + int(e.y() / self.height() * self.texture_height)
+            rx, ry = self._scaled_mouse_coords(e)
             self.send_mouse_packet(3, bmask, rx, ry)
         e.accept()
 
@@ -440,54 +610,44 @@ class VideoWidgetGL(QOpenGLWidget):
         e.accept()
 
     def _get_key_name(self, event):
-        from PyQt5.QtCore import Qt
-
         text = event.text()
         if text and len(text) == 1 and ord(text) >= 0x20:
-            if text == " ":
-                return "space"
-            return text
-
+            return "space" if text == " " else text
         key = event.key()
         key_map = {
-            Qt.Key_Escape:"Escape", Qt.Key_Tab:"Tab", Qt.Key_Backtab:"Tab", Qt.Key_Backspace:"BackSpace",
-            Qt.Key_Return:"Return", Qt.Key_Enter:"Return", Qt.Key_Insert:"Insert", Qt.Key_Delete:"Delete",
-            Qt.Key_Pause:"Pause", Qt.Key_Print:"Print", Qt.Key_SysReq:"Sys_Req", Qt.Key_Clear:"Clear",
-            Qt.Key_Home:"Home", Qt.Key_End:"End", Qt.Key_Left:"Left", Qt.Key_Up:"Up", Qt.Key_Right:"Right", Qt.Key_Down:"Down",
-            Qt.Key_PageUp:"Page_Up", Qt.Key_PageDown:"Page_Down", Qt.Key_Shift:"Shift_L", Qt.Key_Control:"Control_L",
-            Qt.Key_Meta:"Super_L", Qt.Key_Alt:"Alt_L", Qt.Key_AltGr:"Alt_R", Qt.Key_CapsLock:"Caps_Lock",
-            Qt.Key_NumLock:"Num_Lock", Qt.Key_ScrollLock:"Scroll_Lock",
-            Qt.Key_F1:"F1", Qt.Key_F2:"F2", Qt.Key_F3:"F3", Qt.Key_F4:"F4", Qt.Key_F5:"F5", Qt.Key_F6:"F6",
-            Qt.Key_F7:"F7", Qt.Key_F8:"F8", Qt.Key_F9:"F9", Qt.Key_F10:"F10", Qt.Key_F11:"F11", Qt.Key_F12:"F12",
-            Qt.Key_Space:"space",
+            Qt.Key_Escape: "Escape", Qt.Key_Tab: "Tab", Qt.Key_Backtab: "Tab",
+            Qt.Key_Backspace: "BackSpace", Qt.Key_Return: "Return", Qt.Key_Enter: "Return",
+            Qt.Key_Insert: "Insert", Qt.Key_Delete: "Delete", Qt.Key_Pause: "Pause",
+            Qt.Key_Print: "Print", Qt.Key_Home: "Home", Qt.Key_End: "End",
+            Qt.Key_Left: "Left", Qt.Key_Up: "Up", Qt.Key_Right: "Right", Qt.Key_Down: "Down",
+            Qt.Key_PageUp: "Page_Up", Qt.Key_PageDown: "Page_Down",
+            Qt.Key_Shift: "Shift_L", Qt.Key_Control: "Control_L",
+            Qt.Key_Meta: "Super_L", Qt.Key_Alt: "Alt_L", Qt.Key_AltGr: "Alt_R",
+            Qt.Key_CapsLock: "Caps_Lock", Qt.Key_NumLock: "Num_Lock",
+            Qt.Key_ScrollLock: "Scroll_Lock",
         }
         if key in key_map:
             return key_map[key]
-
         if (Qt.Key_A <= key <= Qt.Key_Z) or (Qt.Key_0 <= key <= Qt.Key_9):
             try:
                 return chr(key).lower()
             except Exception:
                 pass
-
-        if text:
-            return text
-        return None
+        return text or None
 
 class MainWindow(QMainWindow):
     def __init__(self, decoder_opts, rwidth, rheight, host_ip, udp_port,
                  offset_x, offset_y, net_mode='lan', parent=None, ultra=False):
         super().__init__(parent)
         self.setWindowTitle("LinuxPlay")
-        self.texture_width = rwidth
-        self.texture_height = rheight
-        self.offset_x = offset_x
-        self.offset_y = offset_y
-        self.host_ip = host_ip
-        self.ultra = ultra
+        self.texture_width, self.texture_height = rwidth, rheight
+        self.offset_x, self.offset_y = offset_x, offset_y
+        self.host_ip, self.ultra = host_ip, ultra
+        self._running, self._restarts = True, 0
 
         self.control_addr = (host_ip, CONTROL_PORT)
         self.control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.control_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.control_sock.setblocking(False)
 
         try:
@@ -495,45 +655,97 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logging.debug(f"NET announce failed: {e}")
 
-        self.video_widget = VideoWidgetGL(self.send_control, rwidth, rheight, offset_x, offset_y, host_ip)
+        self.video_widget = VideoWidgetGL(self.send_control, rwidth, rheight,
+                                          offset_x, offset_y, host_ip)
         self.setCentralWidget(self.video_widget)
         self.video_widget.setFocus()
         self.setAcceptDrops(True)
 
         mtu_guess = int(os.environ.get("LINUXPLAY_MTU", "1500"))
-        ipv6 = False
-        pkt = _best_ts_pkt_size(mtu_guess, ipv6)
-
-        video_url = (
+        pkt = _best_ts_pkt_size(mtu_guess, False)
+        self.video_url = (
             f"udp://@0.0.0.0:{udp_port}"
             f"?pkt_size={pkt}"
-            f"&reuse=1"
-            f"&buffer_size=65536"
-            f"&fifo_size=32768"
-            f"&overrun_nonfatal=1"
-            f"&max_delay=0"
+            f"&reuse=1&buffer_size=65536&fifo_size=32768"
+            f"&overrun_nonfatal=1&max_delay=0"
         )
 
-        logging.debug("Decoder options: %s", decoder_opts)
+        self.decoder_opts = dict(decoder_opts)
+        logging.debug("Decoder options: %s", self.decoder_opts)
 
-        self.decoder_thread = DecoderThread(video_url, decoder_opts, ultra=self.ultra)
-        self.decoder_thread.frame_ready.connect(self.video_widget.updateFrame, Qt.DirectConnection)
-        self.decoder_thread.start()
+        self._start_decoder_thread()
+        self._start_background_threads()
 
         self.clip_timer = QTimer(self)
         self.clip_timer.timeout.connect(self._drain_clipboard_inbox)
         self.clip_timer.start(10)
+
+        self.status_timer = QTimer(self)
+        self.status_timer.timeout.connect(self._poll_connection_state)
+        self.status_timer.start(1000)
+
+    def _start_background_threads(self):
+        try:
+            self._heartbeat_thread = heartbeat_responder(self.host_ip)
+        except Exception as e:
+            logging.error(f"Heartbeat responder failed: {e}")
+            self._heartbeat_thread = None
+
+        try:
+            self._audio_thread = audio_listener(self.host_ip)
+        except Exception as e:
+            logging.error(f"Audio listener failed: {e}")
+            self._audio_thread = None
+
+        try:
+            self._clip_thread = clipboard_listener(QApplication.clipboard())
+        except Exception as e:
+            logging.error(f"Clipboard listener failed: {e}")
+            self._clip_thread = None
+
+    def _start_decoder_thread(self):
+        self.decoder_thread = DecoderThread(self.video_url, self.decoder_opts, ultra=self.ultra)
+        self.decoder_thread.frame_ready.connect(self.video_widget.updateFrame, Qt.DirectConnection)
+        self.decoder_thread.finished.connect(self._on_decoder_exit)
+        self.decoder_thread.start()
+        logging.info("Decoder thread started")
+
+    def _on_decoder_exit(self):
+        if not self._running:
+            return
+        self._restarts += 1
+        delay = min(1.0 + (self._restarts * 0.3), 5.0)
+        logging.warning(f"Decoder thread exited — attempting restart in {delay:.1f}s")
+        QTimer.singleShot(int(delay * 1000), self._restart_decoder_safe)
+
+    def _restart_decoder_safe(self):
+        if self._running:
+            try:
+                self._start_decoder_thread()
+            except Exception as e:
+                logging.error(f"Decoder restart failed: {e}")
+
+    def _poll_connection_state(self):
+        now = time.time()
+        age = now - CLIENT_STATE.get("last_heartbeat", 0)
+        if age > 6 and CLIENT_STATE["connected"]:
+            CLIENT_STATE["connected"], CLIENT_STATE["reconnecting"] = False, True
+            logging.warning("Lost heartbeat from host")
+        elif age <= 6 and CLIENT_STATE["reconnecting"]:
+            CLIENT_STATE["connected"], CLIENT_STATE["reconnecting"] = True, False
+            logging.info("Heartbeat restored")
 
     def _drain_clipboard_inbox(self):
         changed = False
         while not CLIPBOARD_INBOX.empty():
             text = CLIPBOARD_INBOX.get_nowait()
             cb = QApplication.clipboard()
-            self.video_widget.ignore_clipboard = True
-            if text != cb.text():
+            current = cb.text()
+            if text and text != current:
+                self.video_widget.ignore_clipboard = True
                 cb.setText(text)
+                self.video_widget.ignore_clipboard = False
                 changed = True
-            self.video_widget.ignore_clipboard = False
         if changed:
             self.video_widget.last_clipboard = QApplication.clipboard().text()
 
@@ -545,100 +757,87 @@ class MainWindow(QMainWindow):
 
     def dropEvent(self, event):
         urls = event.mimeData().urls()
-        if urls:
-            for url in urls:
-                path = url.toLocalFile()
-                if os.path.isdir(path):
-                    for root, _, files in os.walk(path):
-                        for f in files:
-                            self._spawn_upload(os.path.join(root, f))
-                elif os.path.isfile(path):
-                    self._spawn_upload(path)
-            event.acceptProposedAction()
-        else:
+        if not urls:
             event.ignore()
+            return
 
-    def _spawn_upload(self, file_path):
-        threading.Thread(target=self.upload_file, args=(file_path,), daemon=True).start()
+        files_to_upload = []
+        for url in urls:
+            path = url.toLocalFile()
+            if os.path.isdir(path):
+                for root, _, files in os.walk(path):
+                    for f in files:
+                        files_to_upload.append(os.path.join(root, f))
+            elif os.path.isfile(path):
+                files_to_upload.append(path)
+
+        for fpath in files_to_upload:
+            threading.Thread(target=self.upload_file, args=(fpath,), daemon=True).start()
+        event.acceptProposedAction()
 
     def upload_file(self, file_path):
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect((self.control_addr[0], 7003))
-            filename = os.path.basename(file_path).encode("utf-8")
-            header = len(filename).to_bytes(4, "big") + filename
-            size = os.path.getsize(file_path)
-            header += size.to_bytes(8, "big")
-            sock.sendall(header)
-            with open(file_path, "rb") as f:
-                while True:
-                    data = f.read(4096)
-                    if not data:
-                        break
-                    sock.sendall(data)
-            sock.close()
-            logging.info("Uploaded: %s", file_path)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.connect((self.control_addr[0], UDP_FILE_PORT))
+                filename = os.path.basename(file_path).encode("utf-8")
+                header = len(filename).to_bytes(4, "big") + filename
+                size = os.path.getsize(file_path)
+                header += size.to_bytes(8, "big")
+                sock.sendall(header)
+                with open(file_path, "rb") as f:
+                    while chunk := f.read(4096):
+                        sock.sendall(chunk)
+            logging.info(f"Uploaded: {file_path}")
         except Exception as e:
-            logging.error("Upload error: %s", e)
+            logging.error(f"Upload error for {file_path}: {e}")
 
     def send_control(self, msg):
         try:
             self.control_sock.sendto(msg.encode("utf-8"), self.control_addr)
         except Exception as e:
-            logging.error("Control send error: %s", e)
+            logging.error(f"Control send error: {e}")
 
     def closeEvent(self, event):
-        self.clip_timer.stop()
-        self.decoder_thread.stop()
-        self.decoder_thread.wait(2000)
+        self._running = False
+        CLIENT_STATE["connected"] = False
+        logging.info("Closing client window…")
+
+        try:
+            self.control_sock.sendto(b"GOODBYE", self.control_addr)
+            logging.info("Sent GOODBYE to host")
+        except Exception as e:
+            logging.debug(f"GOODBYE send failed: {e}")
+
+        for timer_name in ("clip_timer", "status_timer"):
+            timer = getattr(self, timer_name, None)
+            if timer:
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+
+        if hasattr(self, "decoder_thread"):
+            try:
+                self.decoder_thread.stop()
+                self.decoder_thread.wait(2000)
+            except Exception as e:
+                logging.debug(f"Decoder cleanup error: {e}")
+
         global audio_proc
-        if audio_proc is not None:
+        if audio_proc:
             try:
                 audio_proc.terminate()
+                audio_proc.wait(timeout=2)
             except Exception as e:
-                logging.error("ffplay term error: %s", e)
+                logging.error(f"ffplay term error: {e}")
+            audio_proc = None
+
+        try:
+            self.control_sock.close()
+        except Exception:
+            pass
+
         event.accept()
-
-def clipboard_listener_client(_host_ip):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        sock.bind(("", UDP_CLIPBOARD_PORT))
-    except Exception as e:
-        logging.error("Clipboard listener bind failed: %s", e)
-        return
-    while True:
-        try:
-            data, _ = sock.recvfrom(65535)
-            msg = data.decode("utf-8", errors="ignore")
-            tokens = msg.split(maxsplit=2)
-            if len(tokens) >= 3 and tokens[0] == "CLIPBOARD_UPDATE" and tokens[1] == "HOST":
-                new_content = tokens[2]
-                CLIPBOARD_INBOX.put(new_content)
-        except Exception as e:
-            logging.error("Clipboard client error: %s", e)
-
-def heartbeat_responder_client(host_ip):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("", UDP_HEARTBEAT_PORT))
-    logging.info("Heartbeat responder listening on UDP %d", UDP_HEARTBEAT_PORT)
-
-    while True:
-        try:
-            data, addr = sock.recvfrom(1024)
-            msg = data.decode("utf-8", errors="ignore").strip()
-
-            if msg.startswith("PING"):
-                parts = msg.split()
-                if len(parts) == 2:
-                    ts = parts[1]
-                else:
-                    ts = str(time.time())
-                sock.sendto(f"PONG {ts}".encode("utf-8"), (host_ip, UDP_HEARTBEAT_PORT))
-
-        except Exception as e:
-            logging.debug("Heartbeat client error: %s", e)
-            continue
 
 def main():
     p = argparse.ArgumentParser(description="LinuxPlay Client (Linux/Windows)")
@@ -656,10 +855,13 @@ def main():
     os.environ["vblank_mode"] = "0"
     os.environ["__GL_SYNC_TO_VBLANK"] = "0"
     os.environ["__GL_SYNC_DISPLAY_DEVICE"] = "none"
-    os.environ["QT_XCB_GL_INTEGRATION"] = "xcb_egl"
-    os.environ["QT_OPENGL"] = "angle" if IS_WINDOWS else "desktop"
-    os.environ["QT_ANGLE_PLATFORM"] = "d3d11"
     os.environ["QT_LOGGING_RULES"] = "qt.qpa.*=false"
+    if IS_WINDOWS:
+        os.environ["QT_OPENGL"] = "angle"
+        os.environ["QT_ANGLE_PLATFORM"] = "d3d11"
+    else:
+        os.environ.setdefault("QT_OPENGL", "desktop")
+        os.environ.setdefault("QT_XCB_GL_INTEGRATION", "xcb_egl")
 
     fmt = QSurfaceFormat()
     fmt.setSwapInterval(0)
@@ -673,19 +875,17 @@ def main():
         pass
 
     app = QApplication(sys.argv)
-
     logging.basicConfig(level=(logging.DEBUG if args.debug else logging.INFO),
                         format="%(asctime)s [%(levelname)s] %(message)s",
                         datefmt="%H:%M:%S")
 
     ok, host_info = tcp_handshake_client(args.host_ip)
-    if not ok:
+    if not ok or not host_info:
         QMessageBox.critical(None, "Handshake Failed", "Could not negotiate with host.")
         sys.exit(1)
-
     host_encoder, monitor_info_str = host_info
-
-    threading.Thread(target=heartbeat_responder_client, args=(args.host_ip,), daemon=True).start()
+    CLIENT_STATE["connected"] = True
+    CLIENT_STATE["last_heartbeat"] = time.time()
 
     net_mode = args.net
     if net_mode == "auto":
@@ -695,34 +895,26 @@ def main():
             net_mode = "lan"
     logging.info(f"Network mode: {net_mode}")
 
-    ultra_requested = args.ultra
-    ultra_active = bool(ultra_requested and net_mode == "lan")
-
-    if ultra_requested and not ultra_active:
+    ultra_active = args.ultra and (net_mode == "lan")
+    if args.ultra and not ultra_active:
         logging.info("Ultra requested but disabled on %s; using safe buffering.", net_mode)
     elif ultra_active:
         logging.info("⚡ Ultra mode enabled (LAN): minimal buffering, no B-frame reordering.")
 
     try:
         monitors = []
-        if ";" in monitor_info_str:
-            for part in monitor_info_str.split(";"):
-                if not part:
-                    continue
-                if '+' in part:
-                    res, ox, oy = part.split('+'); w, h = map(int, res.split('x'))
-                    monitors.append((w, h, int(ox), int(oy)))
-                else:
-                    w, h = map(int, part.split('x')); monitors.append((w, h, 0, 0))
-        else:
-            if '+' in monitor_info_str:
-                res, ox, oy = monitor_info_str.split('+'); w, h = map(int, res.split('x'))
+        parts = [p for p in monitor_info_str.split(";") if p]
+        for part in parts:
+            if "+" in part:
+                res, ox, oy = part.split("+"); w, h = map(int, res.split("x"))
                 monitors.append((w, h, int(ox), int(oy)))
             else:
-                w, h = map(int, monitor_info_str.lower().split("x")); monitors.append((w, h, 0, 0))
+                w, h = map(int, part.split("x")); monitors.append((w, h, 0, 0))
+        if not monitors:
+            raise ValueError
     except Exception:
-        logging.error("Monitor parse error, defaulting.")
-        w, h = map(int, DEFAULT_RESOLUTION.lower().split("x"))
+        logging.error("Monitor parse error, defaulting to %s", DEFAULT_RESOLUTION)
+        w, h = map(int, DEFAULT_RESOLUTION.split("x"))
         monitors = [(w, h, 0, 0)]
 
     chosen = args.hwaccel
@@ -745,48 +937,29 @@ def main():
             "analyzeduration": "0",
             "rtbufsize": "512k",
             "threads": "1",
-            "skip_frame": "noref",        })
-
-    threading.Thread(target=clipboard_listener_client, args=(args.host_ip,), daemon=True).start()
-
-    global audio_proc
-    if args.audio == "enable":
-        audio_cmd = [
-            "ffplay", "-hide_banner", "-loglevel", "error",
-            *([] if net_mode == "wifi" else ["-fflags", "nobuffer"]),
-            "-flags", "low_delay",
-            "-autoexit", "-nodisp",
-            "-i", (
-                f"udp://@0.0.0.0:{UDP_AUDIO_PORT}?fifo_size=800000&buffer_size=4194304&max_delay=150000&pkt_size=1316&overrun_nonfatal=1"
-                if net_mode == "wifi"
-                else f"udp://@0.0.0.0:{UDP_AUDIO_PORT}?fifo_size=40000&max_delay=0&pkt_size=1316&overrun_nonfatal=1"
-            )
-        ]
-        logging.info("Audio with ffplay…")
-        try:
-            audio_proc = subprocess.Popen(audio_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except FileNotFoundError:
-            logging.error("ffplay not found. Add ffmpeg/bin to PATH or install ffmpeg.")
+            "skip_frame": "noref",
+        })
 
     if args.monitor.lower() == "all":
         windows = []
-        for i, mon in enumerate(monitors):
-            w, h, ox, oy = mon
-            win = MainWindow(decoder_opts, w, h, args.host_ip, DEFAULT_UDP_PORT + i, ox, oy, net_mode, ultra=ultra_active)
+        for i, (w, h, ox, oy) in enumerate(monitors):
+            win = MainWindow(decoder_opts, w, h, args.host_ip,
+                             DEFAULT_UDP_PORT + i, ox, oy, net_mode, ultra=ultra_active)
             win.setWindowTitle(f"LinuxPlay - Monitor {i}")
             win.show()
             windows.append(win)
         ret = app.exec_()
     else:
         try:
-            mon_index = int(args.monitor)
+            idx = int(args.monitor)
         except Exception:
-            mon_index = 0
-        if mon_index < 0 or mon_index >= len(monitors):
-            mon_index = 0
-        w, h, ox, oy = monitors[mon_index]
-        win = MainWindow(decoder_opts, w, h, args.host_ip, DEFAULT_UDP_PORT + mon_index, ox, oy, net_mode, ultra=ultra_active)
-        win.setWindowTitle(f"LinuxPlay - Monitor {mon_index}")
+            idx = 0
+        if idx < 0 or idx >= len(monitors):
+            idx = 0
+        w, h, ox, oy = monitors[idx]
+        win = MainWindow(decoder_opts, w, h, args.host_ip,
+                         DEFAULT_UDP_PORT + idx, ox, oy, net_mode, ultra=ultra_active)
+        win.setWindowTitle(f"LinuxPlay - Monitor {idx}")
         win.show()
         ret = app.exec_()
 
@@ -796,6 +969,7 @@ def main():
         except Exception as e:
             logging.error("ffplay term error: %s", e)
     sys.exit(ret)
+
 
 if __name__ == "__main__":
     main()
