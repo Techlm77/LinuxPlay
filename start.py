@@ -221,7 +221,7 @@ class HostTab(QWidget):
         self.gopCombo = QComboBox()
         self.gopCombo.addItems(["Auto", "1", "2", "3", "4", "5", "8", "10", "15", "20", "30"])
         self.qpCombo = QComboBox()
-        self.qpCombo.addItems(["Auto", "5", "10", "15", "18", "20", "22", "25", "28", "30", "32", "35", "38", "40", "45", "50"])
+        self.qpCombo.addItems(["0", "5", "10", "15", "18", "20", "22", "25", "28", "30", "32", "35", "38", "40", "45", "50"])
         self.tuneCombo = QComboBox()
         self.tuneCombo.addItems(["None", "auto", "default", "low-latency", "ultra-low-latency", "high-quality", "high-performance", "performance", "lossless", "lossless-highperf", "blu-ray"])
         self.pixFmtCombo = QComboBox()
