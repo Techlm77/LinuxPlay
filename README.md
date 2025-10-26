@@ -9,8 +9,6 @@
 
 ---
 
-Ultra‑low‑latency desktop streaming over UDP using FFmpeg, with a Qt GUI for **Host** and **Client**.
-
 ## Features
 
 - **Codecs:** H.264 / H.265 (HEVC) via NVENC, QSV, VAAPI, AMF, or CPU.
