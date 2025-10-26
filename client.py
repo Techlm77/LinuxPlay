@@ -8,11 +8,19 @@ import time
 import threading
 import subprocess
 import platform as py_platform
-from queue import Queue
 import psutil
 import statistics
 import shutil
 import json
+import av
+import numpy as np
+import struct
+
+from PyQt5.QtWidgets import QApplication, QMainWindow, QMessageBox, QOpenGLWidget
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QPoint
+from PyQt5.QtGui import QSurfaceFormat, QPainter, QFont, QColor
+from OpenGL.GL import *
+from queue import Queue
 
 try:
     HERE = os.path.dirname(os.path.abspath(__file__))
@@ -22,23 +30,16 @@ try:
 except Exception:
     pass
 
-import av
-import numpy as np
-
-from PyQt5.QtWidgets import QApplication, QMainWindow, QMessageBox, QOpenGLWidget
-from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QPoint
-from PyQt5.QtGui import QSurfaceFormat, QPainter, QFont, QColor
-
-from OpenGL.GL import *
-
 DEFAULT_UDP_PORT = 5000
-DEFAULT_RESOLUTION = "1920x1080"
 CONTROL_PORT = 7000
 TCP_HANDSHAKE_PORT = 7001
 UDP_CLIPBOARD_PORT = 7002
-UDP_AUDIO_PORT = 6001
-UDP_HEARTBEAT_PORT = 7004
 UDP_FILE_PORT = 7003
+UDP_HEARTBEAT_PORT = 7004
+UDP_GAMEPAD_PORT = 7005
+UDP_AUDIO_PORT = 6001
+
+DEFAULT_RESOLUTION = "1920x1080"
 
 IS_WINDOWS = py_platform.system() == "Windows"
 IS_LINUX   = py_platform.system() == "Linux"
@@ -515,6 +516,9 @@ class VideoWidgetGL(QOpenGLWidget):
 
     def updateFrame(self, frame_tuple):
         self.frame_data = frame_tuple
+        _, fw, fh = frame_tuple
+        if (fw, fh) != (self.texture_width, self.texture_height):
+            self.resizeTexture(fw, fh)
         self._last_frame_recv = time.time()
         if self.isVisible():
             self.update()
@@ -635,16 +639,115 @@ class VideoWidgetGL(QOpenGLWidget):
                 pass
         return text or None
 
+class GamepadThread(threading.Thread):
+    def __init__(self, host_ip, port, path_hint=None):
+        super().__init__(daemon=True)
+        self.host_ip = host_ip
+        self.port = port
+        self.path_hint = path_hint
+        self._running = True
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def _find_device(self):
+        try:
+            from evdev import InputDevice, list_devices
+        except Exception:
+            return None
+        if self.path_hint:
+            try:
+                return InputDevice(self.path_hint)
+            except Exception:
+                return None
+        candidates = []
+        for p in list_devices():
+            try:
+                d = InputDevice(p)
+                name = (d.name or "").lower()
+                if any(k in name for k in ("controller", "gamepad", "xbox", "dualshock", "dual sense", "8bitdo", "ps")):
+                    candidates.append(d)
+                    continue
+                caps = d.capabilities(verbose=True)
+                if any(n for (typ, codes) in caps for (code, n) in (codes or []) if n.startswith(("BTN_", "ABS_"))):
+                    candidates.append(d)
+            except Exception:
+                pass
+        if not candidates:
+            return None
+
+        def score(dev):
+            s = 0
+            try:
+                n = (dev.name or "").lower()
+                if "controller" in n or "gamepad" in n: s += 5
+                if "xbox" in n or "dual" in n or "8bitdo" in n or "ps" in n: s += 3
+                caps = dev.capabilities(verbose=True)
+                if any((codes or []) for (_t, codes) in caps): s += 1
+            except Exception:
+                pass
+            return s
+
+        candidates.sort(key=score, reverse=True)
+        return candidates[0]
+
+    def run(self):
+        if not IS_LINUX:
+            return
+        try:
+            from evdev import ecodes, InputDevice
+        except Exception:
+            return
+
+        dev = self._find_device()
+        if not dev:
+            return
+
+        try:
+            dev.grab()
+        except Exception:
+            pass
+
+        pack_event = struct.Struct("!Bhh").pack
+        sendto = self.sock.sendto
+        addr = (self.host_ip, self.port)
+
+        try:
+            for event in dev.read_loop():
+                if not self._running:
+                    break
+                t = int(event.type)
+                c = int(event.code)
+                v = int(event.value)
+                if t in (ecodes.EV_KEY, ecodes.EV_ABS, ecodes.EV_SYN):
+                    try:
+                        sendto(pack_event(t, c, v), addr)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        try:
+            dev.ungrab()
+        except Exception:
+            pass
+
+    def stop(self):
+        self._running = False
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
 class MainWindow(QMainWindow):
     def __init__(self, decoder_opts, rwidth, rheight, host_ip, udp_port,
-                 offset_x, offset_y, net_mode='lan', parent=None, ultra=False):
+                 offset_x, offset_y, net_mode='lan', parent=None, ultra=False, gamepad="disable", gamepad_dev=None):
         super().__init__(parent)
         self.setWindowTitle("LinuxPlay")
         self.texture_width, self.texture_height = rwidth, rheight
         self.offset_x, self.offset_y = offset_x, offset_y
         self.host_ip, self.ultra = host_ip, ultra
         self._running, self._restarts = True, 0
-
+        self.gamepad_mode = gamepad
+        self.gamepad_dev = gamepad_dev
         self.control_addr = (host_ip, CONTROL_PORT)
         self.control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.control_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -702,7 +805,15 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logging.error(f"Clipboard listener failed: {e}")
             self._clip_thread = None
-
+        self._gp_thread = None
+        if self.gamepad_mode == "enable" and IS_LINUX:
+            try:
+                self._gp_thread = GamepadThread(self.host_ip, UDP_GAMEPAD_PORT, self.gamepad_dev)
+                self._gp_thread.start()
+                logging.info("Controller forwarding started from %s -> %s", self.gamepad_dev or "/dev/input/event*", f"{self.host_ip}:{UDP_GAMEPAD_PORT}")
+            except Exception as e:
+                logging.error("Gamepad thread failed: %s", e)
+                self._gp_thread = None
     def _start_decoder_thread(self):
         self.decoder_thread = DecoderThread(self.video_url, self.decoder_opts, ultra=self.ultra)
         self.decoder_thread.frame_ready.connect(self.video_widget.updateFrame, Qt.DirectConnection)
@@ -785,7 +896,10 @@ class MainWindow(QMainWindow):
                 header += size.to_bytes(8, "big")
                 sock.sendall(header)
                 with open(file_path, "rb") as f:
-                    while chunk := f.read(4096):
+                    while True:
+                        chunk = f.read(4096)
+                        if not chunk:
+                            break
                         sock.sendall(chunk)
             logging.info(f"Uploaded: {file_path}")
         except Exception as e:
@@ -822,7 +936,11 @@ class MainWindow(QMainWindow):
                 self.decoder_thread.wait(2000)
             except Exception as e:
                 logging.debug(f"Decoder cleanup error: {e}")
-
+        if getattr(self, "_gp_thread", None):
+            try:
+                self._gp_thread.stop()
+            except Exception:
+                pass
         global audio_proc
         if audio_proc:
             try:
@@ -848,8 +966,9 @@ def main():
     p.add_argument("--hwaccel", choices=["auto","cpu","cuda","qsv","d3d11va","dxva2","vaapi"], default="auto")
     p.add_argument("--debug", action="store_true")
     p.add_argument("--net", choices=["auto","lan","wifi"], default="auto")
-    p.add_argument("--ultra", action="store_true",
-                   help="Enable ultra-low-latency (LAN only). Auto-disabled on Wi-Fi/WAN.")
+    p.add_argument("--ultra", action="store_true", help="Enable ultra-low-latency (LAN only). Auto-disabled on Wi-Fi/WAN.")
+    p.add_argument("--gamepad", choices=["enable","disable"], default="enable")
+    p.add_argument("--gamepad_dev", default=None)
     args = p.parse_args()
 
     os.environ["vblank_mode"] = "0"
@@ -943,8 +1062,7 @@ def main():
     if args.monitor.lower() == "all":
         windows = []
         for i, (w, h, ox, oy) in enumerate(monitors):
-            win = MainWindow(decoder_opts, w, h, args.host_ip,
-                             DEFAULT_UDP_PORT + i, ox, oy, net_mode, ultra=ultra_active)
+            win = MainWindow(decoder_opts, w, h, args.host_ip, DEFAULT_UDP_PORT + i, ox, oy, net_mode, ultra=ultra_active, gamepad=args.gamepad, gamepad_dev=args.gamepad_dev)
             win.setWindowTitle(f"LinuxPlay - Monitor {i}")
             win.show()
             windows.append(win)
@@ -957,8 +1075,7 @@ def main():
         if idx < 0 or idx >= len(monitors):
             idx = 0
         w, h, ox, oy = monitors[idx]
-        win = MainWindow(decoder_opts, w, h, args.host_ip,
-                         DEFAULT_UDP_PORT + idx, ox, oy, net_mode, ultra=ultra_active)
+        win = MainWindow(decoder_opts, w, h, args.host_ip, DEFAULT_UDP_PORT + idx, ox, oy, net_mode, ultra=ultra_active, gamepad=args.gamepad, gamepad_dev=args.gamepad_dev)
         win.setWindowTitle(f"LinuxPlay - Monitor {idx}")
         win.show()
         ret = app.exec_()
@@ -969,7 +1086,6 @@ def main():
         except Exception as e:
             logging.error("ffplay term error: %s", e)
     sys.exit(ret)
-
 
 if __name__ == "__main__":
     main()
