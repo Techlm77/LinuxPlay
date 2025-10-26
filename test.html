@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>How It Works - LinuxPlay Remote Desktop</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            background-color: #121212;
+            color: #e0e0e0;
+            padding: 20px;
+            max-width: 980px;
+            margin: auto;
+        }
+
+        h1,
+        h2 {
+            color: #ffffff;
+        }
+
+        code {
+            background: #1e1e1e;
+            padding: 4px 6px;
+            border-radius: 4px;
+            color: #ffcc00;
+        }
+
+        pre {
+            background: #1e1e1e;
+            padding: 12px;
+            border-radius: 6px;
+            overflow-x: auto;
+        }
+
+        .tldr {
+            background: #2d2d2d;
+            padding: 12px;
+            border-left: 5px solid #007bff;
+            margin: 18px 0;
+        }
+
+        ul {
+            padding-left: 20px;
+        }
+
+        .pill {
+            padding: 2px 8px;
+            border: 1px solid #444;
+            border-radius: 999px;
+            font-size: 12px;
+        }
+
+        .tabs {
+            margin-top: 40px;
+        }
+
+        .tab-buttons {
+            display: flex;
+            border-bottom: 2px solid #007bff;
+        }
+
+        .tab-buttons button {
+            flex: 1;
+            background: #1e1e1e;
+            border: none;
+            padding: 10px;
+            cursor: pointer;
+            color: #e0e0e0;
+            font-size: 16px;
+        }
+
+        .tab-buttons button.active {
+            background: #2d2d2d;
+            border-bottom: 2px solid #ffcc00;
+        }
+
+        .tab-content {
+            display: none;
+            padding: 20px 0;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .form-group {
+            margin-bottom: 14px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 6px;
+        }
+
+        .form-group select,
+        .form-group input[type="text"],
+        .form-group input[type="password"] {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #444;
+            border-radius: 4px;
+            background: #1e1e1e;
+            color: #e0e0e0;
+        }
+
+        .form-group input[type="checkbox"] {
+            margin-right: 5px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 12px;
+        }
+
+        .command-preview {
+            background: #0f0f0f;
+            padding: 12px;
+            border-radius: 6px;
+            margin-top: 12px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .btn {
+            padding: 10px 15px;
+            background: #007bff;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .advanced-note {
+            background: #2d2d2d;
+            padding: 12px;
+            border-left: 5px solid #ffcc00;
+            margin: 20px 0;
+        }
+
+        .kvs {
+            display: grid;
+            grid-template-columns: 160px auto;
+            gap: 6px 14px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>How LinuxPlay Remote Desktop Works</h1>
+
+    <div class="tldr">
+        <h2>TL;DR</h2>
+        <p>
+            LinuxPlay captures your desktop with <code>FFmpeg</code> (<span class="pill">kmsgrab</span> or <span
+                class="pill">x11grab</span> on Linux),
+            encodes it with GPU or CPU (<span class="pill">NVENC</span> <span class="pill">QSV</span> <span
+                class="pill">VAAPI</span> or software), and streams
+            <em>unicast</em> <code>UDP</code> directly to the client’s IP on per‑monitor ports (video from
+            <code>5000</code>+, audio <code>6001</code>).
+            A tiny TCP handshake (<code>7001</code>) negotiates the host encoder and shares monitor geometry; inputs go
+            back over UDP control (<code>7000</code>),
+            clipboard sync uses UDP (<code>7002</code>), file drag‑and‑drop uploads via TCP (<code>7003</code>), and a
+            PING/PONG heartbeat runs on UDP (<code>7004</code>).
+            The client decodes with <code>PyAV</code> + optional hardware accel and renders via a low‑latency
+            <code>PyQt5</code> + <code>OpenGL</code> path.
+        </p>
+    </div>
+
+    <p><strong>Scope & Security:</strong> Hosting is <em>Linux‑only</em>; the client runs on Linux and Windows. For WAN,
+        put the host behind a WireGuard tunnel and connect to the tunnel IP. No built‑in password prompts are
+        used—assume your LAN is trusted or use WireGuard.</p>
+
+    <h2>1) Capture & Monitors</h2>
+    <p>
+        On Linux, the host auto‑selects <code>kmsgrab</code> when possible (great for Wayland/KMS; cursor isn’t drawn)
+        or falls back to <code>x11grab</code>.
+        The handshake shares all monitors as <code>WxH+X+Y</code> so the client can open one window per monitor or a
+        specific index.
+    </p>
+    <pre><code># Example (x11grab fallback)
+ffmpeg -f x11grab -draw_mouse 0 -framerate 60 -video_size 1920x1080 -i :0.0+0,0 …</code></pre>
+
+    <h2>2) Encoding</h2>
+    <p>
+        Pick <code>h.264</code> (lowest latency) or <code>h.265</code> (higher efficiency). Backends include
+        <code>nvenc</code>, <code>qsv</code>, <code>vaapi</code>, or CPU.
+        Preset, GOP, QP, tune, and pixel format are configurable. A comment marker is embedded so player logs can
+        attribute streams to LinuxPlay.
+    </p>
+
+    <h2>3) Negotiation (TCP 7001)</h2>
+    <p>
+        Client connects and sends <code>HELLO</code>. Host replies <code>OK:&lt;codec&gt;:&lt;monitor-list&gt;</code>
+        and remembers the client IP for unicast.
+    </p>
+    <pre><code># Client → Host
+HELLO
+
+# Host → Client
+OK:h.264:1920x1080+0+0;1920x1080+1920+0</code></pre>
+
+    <h2>4) Transport</h2>
+    <div class="kvs">
+        <div>Video (per monitor)</div>
+        <div>UDP to <code>client_ip:5000+i</code> (MPEG‑TS, pkt_size≈1316, low‑delay flags)</div>
+        <div>Audio</div>
+        <div>UDP to <code>client_ip:6001</code> (Opus)</div>
+        <div>Inputs</div>
+        <div>UDP control <code>7000</code> from client → host</div>
+        <div>Clipboard</div>
+        <div>UDP <code>7002</code> bidirectional</div>
+        <div>Heartbeat</div>
+        <div>UDP <code>7004</code> PING/PONG</div>
+        <div>File upload</div>
+        <div>TCP <code>7003</code> client → host (drag‑and‑drop)</div>
+    </div>
+
+    <pre><code># Host (conceptual): send video for monitor 0 to the client
+ffmpeg … -f mpegts udp://&lt;client_ip&gt;:5000
+# Client listens locally and decodes
+av.open("udp://@0.0.0.0:5000", format="mpegts", options={"fflags":"nobuffer","flags":"low_delay"})</code></pre>
+
+    <h2>5) Decoding & Rendering</h2>
+    <p>
+        The client uses <code>PyAV</code> (FFmpeg) and auto‑chooses
+        <code>vaapi</code>/<code>cuda</code>/<code>qsv</code>/<code>d3d11va</code> when available. Frames are uploaded
+        to an OpenGL widget for tear‑free, vsync‑off presentation. An optional <em>Ultra</em> mode further cuts
+        buffering for LAN.
+    </p>
+
+    <h2>6) Input, Clipboard & Files</h2>
+    <ul>
+        <li><strong>Input:</strong> Client emits <code>MOUSE_*</code> / <code>KEY_*</code> UDP messages; host injects
+            via <code>pynput</code> (preferred) or <code>xdotool</code> fallback.</li>
+        <li><strong>Clipboard:</strong> Host polls <code>pyperclip</code>; client uses Qt clipboard. Both sides exchange
+            <code>CLIPBOARD_UPDATE</code> messages.
+        </li>
+        <li><strong>Files:</strong> Drag any file/folder onto the client window to upload to the host’s
+            <code>~/LinuxPlayDrop</code> via TCP.
+        </li>
+    </ul>
+
+    <h2>7) Network Adaptation</h2>
+    <ul>
+        <li><strong>LAN vs Wi‑Fi:</strong> Client detects link type and announces it to the host; both sides tweak UDP
+            buffers/delay. <em>Ultra</em> is auto‑disabled off‑LAN.</li>
+        <li><strong>Adaptive bitrate (experimental):</strong> Host can toggle to a lower bitrate under load and restart
+            streams seamlessly.</li>
+        <li><strong>Health‑check:</strong> Host pings; client PONGs. Host restarts streams for the current client if
+            needed.</li>
+    </ul>
+
+    <h2>Summary</h2>
+    <ul>
+        <li>Host captures with <code>kmsgrab</code> or <code>x11grab</code>, encodes via NVENC/QSV/VAAPI/CPU.</li>
+        <li>TCP handshake shares encoder + monitor layout; streaming is <em>unicast</em> UDP per monitor.</li>
+        <li>Client decodes with hardware accel and renders through a PyQt5 + OpenGL path.</li>
+        <li>Inputs, clipboard, file upload, heartbeat all run over lightweight UDP/TCP side‑channels.</li>
+        <li>For WAN, use WireGuard; for lowest latency, prefer h.264 + LAN + Ultra.</li>
+    </ul>
+
+    <div class="advanced-note">
+        <p><strong>Tip:</strong> You can run LinuxPlay directly from the terminal. The previews below reflect the
+            current CLI flags and env hints.</p>
+    </div>
+
+    <div class="tabs">
+        <h2>Live Demo</h2>
+        <div class="tab-buttons">
+            <button id="hostTabBtn" class="active">Host</button>
+            <button id="clientTabBtn">Client</button>
+        </div>
+
+        <div id="hostTab" class="tab-content active">
+            <h3>Host Configuration (Linux)</h3>
+            <div class="grid">
+                <div class="form-group">
+                    <label for="hostEncoder">Codec</label>
+                    <select id="hostEncoder">
+                        <option value="h.264">h.264</option>
+                        <option value="h.265">h.265</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="hostHWEnc">Encoder backend</label>
+                    <select id="hostHWEnc">
+                        <option value="auto">auto</option>
+                        <option value="nvenc">nvenc</option>
+                        <option value="qsv">qsv</option>
+                        <option value="vaapi">vaapi</option>
+                        <option value="cpu">cpu</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="hostFramerate">Framerate</label>
+                    <select id="hostFramerate">
+                        <option>30</option>
+                        <option>45</option>
+                        <option selected>60</option>
+                        <option>90</option>
+                        <option>120</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="hostBitrate">Bitrate</label>
+                    <select id="hostBitrate">
+                        <option>2M</option>
+                        <option>4M</option>
+                        <option selected>8M</option>
+                        <option>12M</option>
+                        <option>16M</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="hostAudio">Audio</label>
+                    <select id="hostAudio">
+                        <option>enable</option>
+                        <option selected>disable</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="hostPreset">Preset</label>
+                    <select id="hostPreset">
+                        <option value="">Default</option>
+                        <option>llhq</option>
+                        <option>llhp</option>
+                        <option>ultrafast</option>
+                        <option>veryfast</option>
+                        <option>fast</option>
+                        <option>medium</option>
+                        <option>slow</option>
+                        <option>quality</option>
+                        <option>speed</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="hostGop">GOP</label>
+                    <select id="hostGop">
+                        <option>8</option>
+                        <option selected>15</option>
+                        <option>30</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="hostQp">QP</label>
+                    <select id="hostQp">
+                        <option value="">None</option>
+                        <option>20</option>
+                        <option>25</option>
+                        <option>28</option>
+                        <option>32</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="hostTune">Tune</label>
+                    <select id="hostTune">
+                        <option value="">None</option>
+                        <option>zerolatency</option>
+                        <option>film</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="hostPixFmt">Pixel Format</label>
+                    <select id="hostPixFmt">
+                        <option>yuv420p</option>
+                        <option>yuv444p</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="hostCapture">Linux Capture</label>
+                    <select id="hostCapture">
+                        <option value="auto">auto</option>
+                        <option>kmsgrab</option>
+                        <option>x11grab</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="hostDisplay">X Display (fallback)</label>
+                    <select id="hostDisplay">
+                        <option>:0</option>
+                        <option>:1</option>
+                        <option>:2</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-group"><label><input type="checkbox" id="hostAdaptive"> Enable Adaptive Bitrate
+                    (experimental)</label></div>
+            <div class="form-group"><label><input type="checkbox" id="hostDebug"> Enable Debug</label></div>
+            <div class="command-preview" id="hostCommandPreview"></div>
+        </div>
+
+        <div id="clientTab" class="tab-content">
+            <h3>Client Configuration</h3>
+            <div class="grid">
+                <div class="form-group">
+                    <label for="clientDecoder">Decoder</label>
+                    <select id="clientDecoder">
+                        <option>none</option>
+                        <option selected>h.264</option>
+                        <option>h.265</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="clientHWAccel">HW accel</label>
+                    <select id="clientHWAccel">
+                        <option>auto</option>
+                        <option>cpu</option>
+                        <option>cuda</option>
+                        <option>qsv</option>
+                        <option>d3d11va</option>
+                        <option>dxva2</option>
+                        <option>vaapi</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="clientHostIP">Host IP (LAN or WG tunnel)</label>
+                    <input type="text" id="clientHostIP" placeholder="e.g. 192.168.1.100 or 10.13.13.1" />
+                </div>
+                <div class="form-group">
+                    <label for="clientMonitor">Monitor</label>
+                    <input type="text" id="clientMonitor" value="0" placeholder="index or 'all'" />
+                </div>
+                <div class="form-group">
+                    <label for="clientAudio">Audio</label>
+                    <select id="clientAudio">
+                        <option>enable</option>
+                        <option selected>disable</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="clientNet">Network mode</label>
+                    <select id="clientNet">
+                        <option>auto</option>
+                        <option>lan</option>
+                        <option>wifi</option>
+                    </select>
+                </div>
+            </div>
+            <div class="form-group"><label><input type="checkbox" id="clientUltra"> Ultra (LAN only)</label></div>
+            <div class="form-group"><label><input type="checkbox" id="clientDebug"> Enable Debug</label></div>
+            <div class="command-preview" id="clientCommandPreview"></div>
+        </div>
+    </div>
+
+    <script>
+        const hostTabBtn = document.getElementById("hostTabBtn");
+        const clientTabBtn = document.getElementById("clientTabBtn");
+        const hostTab = document.getElementById("hostTab");
+        const clientTab = document.getElementById("clientTab");
+
+        hostTabBtn.addEventListener("click", () => {
+            hostTabBtn.classList.add("active");
+            clientTabBtn.classList.remove("active");
+            hostTab.classList.add("active");
+            clientTab.classList.remove("active");
+        });
+
+        clientTabBtn.addEventListener("click", () => {
+            clientTabBtn.classList.add("active");
+            hostTabBtn.classList.remove("active");
+            clientTab.classList.add("active");
+            hostTab.classList.remove("active");
+        });
+
+        function updateHostCommand() {
+            const enc = document.getElementById("hostEncoder").value;
+            const hwenc = document.getElementById("hostHWEnc").value;
+            const fps = document.getElementById("hostFramerate").value;
+            const br = document.getElementById("hostBitrate").value;
+            const au = document.getElementById("hostAudio").value;
+            const pr = document.getElementById("hostPreset").value;
+            const gop = document.getElementById("hostGop").value;
+            const qp = document.getElementById("hostQp").value;
+            const tune = document.getElementById("hostTune").value;
+            const pix = document.getElementById("hostPixFmt").value;
+            const cap = document.getElementById("hostCapture").value;
+            const disp = document.getElementById("hostDisplay").value;
+            const abr = document.getElementById("hostAdaptive").checked;
+            const dbg = document.getElementById("hostDebug").checked;
+
+            let env = "LINUXPLAY_CAPTURE=" + cap + " ";
+            let cmd = `python3 host.py --gui --encoder ${enc} --hwenc ${hwenc} --framerate ${fps} --bitrate ${br} --audio ${au} --gop ${gop} --pix_fmt ${pix} --display ${disp}`;
+            if (pr) cmd += ` --preset ${pr}`;
+            if (qp) cmd += ` --qp ${qp}`;
+            if (tune) cmd += ` --tune ${tune}`;
+            if (abr) cmd += ` --adaptive`;
+            if (dbg) cmd += ` --debug`;
+            document.getElementById("hostCommandPreview").textContent = env + cmd;
+        }
+
+        function updateClientCommand() {
+            const dec = document.getElementById("clientDecoder").value;
+            const hw = document.getElementById("clientHWAccel").value;
+            const ip = document.getElementById("clientHostIP").value.trim();
+            const mon = document.getElementById("clientMonitor").value.trim() || "0";
+            const au = document.getElementById("clientAudio").value;
+            const net = document.getElementById("clientNet").value;
+            const ultra = document.getElementById("clientUltra").checked;
+            const dbg = document.getElementById("clientDebug").checked;
+
+            let cmd = `python3 client.py --decoder ${dec} --host_ip ${ip || "<HOST_IP>"} --audio ${au} --monitor ${mon} --hwaccel ${hw} --net ${net}`;
+            if (ultra) cmd += ` --ultra`;
+            if (dbg) cmd += ` --debug`;
+            document.getElementById("clientCommandPreview").textContent = cmd;
+        }
+
+        document.querySelectorAll("#hostTab input, #hostTab select").forEach(el => {
+            el.addEventListener("input", updateHostCommand);
+            el.addEventListener("change", updateHostCommand);
+        });
+        document.querySelectorAll("#clientTab input, #clientTab select").forEach(el => {
+            el.addEventListener("input", updateClientCommand);
+            el.addEventListener("change", updateClientCommand);
+        });
+
+        updateHostCommand();
+        updateClientCommand();
+    </script>
+</body>
+
+</html>
