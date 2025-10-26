@@ -10,7 +10,9 @@ import psutil
 import socket
 import atexit
 import signal
+import struct
 import platform as py_platform
+
 from shutil import which
 
 from PyQt5.QtWidgets import (
@@ -20,16 +22,20 @@ from PyQt5.QtGui import QFont, QPalette, QColor, QKeySequence
 from PyQt5.QtCore import Qt, QTimer, QObject, pyqtSignal
 
 UDP_VIDEO_PORT = 5000
-UDP_AUDIO_PORT = 6001
 UDP_CONTROL_PORT = 7000
-UDP_CLIPBOARD_PORT = 7002
 TCP_HANDSHAKE_PORT = 7001
+UDP_CLIPBOARD_PORT = 7002
 FILE_UPLOAD_PORT = 7003
 UDP_HEARTBEAT_PORT = 7004
+UDP_GAMEPAD_PORT = 7005
+UDP_AUDIO_PORT = 6001
+
 DEFAULT_FPS = "30"
 LEGACY_BITRATE = "8M"
 DEFAULT_RES = "1920x1080"
+
 IS_LINUX   = py_platform.system() == "Linux"
+
 HEARTBEAT_INTERVAL = 1.0
 HEARTBEAT_TIMEOUT  = 10.0
 RECONNECT_COOLDOWN = 2.0
@@ -60,6 +66,12 @@ try:
 except Exception:
     HAVE_PYPERCLIP = False
 
+try:
+    from evdev import UInput, ecodes, AbsInfo
+    HAVE_UINPUT = True
+except Exception:
+    HAVE_UINPUT = False
+
 class HostState:
     def __init__(self):
         self.video_threads = []
@@ -83,6 +95,7 @@ class HostState:
         self.shutdown_reason = None
         self.net_mode = "lan"
         self.starting_streams = False
+        self.gamepad_thread = None
 
 host_state = HostState()
 HOST_ARGS = None
@@ -100,7 +113,7 @@ def _map_nvenc_tune(tune: str) -> str:
         "performance": "hp",
         "lossless": "lossless",
         "lossless-highperf": "losslesshp",
-        "blu-ray": "bd",    
+        "blu-ray": "bd",
         "auto": "",
         "none": "",
         "default": "",
@@ -158,7 +171,6 @@ def trigger_shutdown(reason: str):
 
         set_status(f"Stopping… ({reason})")
 
-
 def stop_all():
     host_state.should_terminate = True
 
@@ -172,7 +184,13 @@ def stop_all():
         host_state.audio_thread.stop()
         host_state.audio_thread.join(timeout=2)
         host_state.audio_thread = None
-
+    if host_state.gamepad_thread:
+        try:
+            host_state.gamepad_thread.stop()
+            host_state.gamepad_thread.join(timeout=2)
+        except Exception:
+            pass
+        host_state.gamepad_thread = None
     for s in (
         host_state.handshake_sock,
         host_state.control_sock,
@@ -1167,7 +1185,7 @@ def heartbeat_manager(args):
                 host_state.last_pong_ts = now
         else:
             time.sleep(0.5)
-            
+
 def resource_monitor():
     p = psutil.Process(os.getpid())
 
@@ -1243,6 +1261,160 @@ def stats_broadcast():
                 pass
         time.sleep(1)
 
+class GamepadServer(threading.Thread):
+    def __init__(self):
+        super().__init__(daemon=True)
+        self._running = True
+        self.sock = None
+        self.ui = None
+        self._dpad = {"left": False, "right": False, "up": False, "down": False}
+        self._hatx = 0
+        self._haty = 0
+
+    def _open_socket(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVLOWAT, 1)
+        s.bind(("", UDP_GAMEPAD_PORT))
+        s.setblocking(False)
+        return s
+
+    def _open_uinput(self):
+        if not (IS_LINUX and HAVE_UINPUT):
+            return None
+        caps = {
+            ecodes.EV_KEY: [
+                ecodes.BTN_SOUTH, ecodes.BTN_EAST, ecodes.BTN_NORTH, ecodes.BTN_WEST,
+                ecodes.BTN_TL, ecodes.BTN_TR, ecodes.BTN_TL2, ecodes.BTN_TR2,
+                ecodes.BTN_SELECT, ecodes.BTN_START,
+                ecodes.BTN_THUMBL, ecodes.BTN_THUMBR,
+                getattr(ecodes, "BTN_MODE", 0x13c),
+            ],
+            ecodes.EV_ABS: [
+                (ecodes.ABS_X,   AbsInfo(0, -32768, 32767, 16, 0, 0)),
+                (ecodes.ABS_Y,   AbsInfo(0, -32768, 32767, 16, 0, 0)),
+                (ecodes.ABS_RX,  AbsInfo(0, -32768, 32767, 16, 0, 0)),
+                (ecodes.ABS_RY,  AbsInfo(0, -32768, 32767, 16, 0, 0)),
+                (ecodes.ABS_Z,   AbsInfo(0, 0, 255, 0, 0, 0)),
+                (ecodes.ABS_RZ,  AbsInfo(0, 0, 255, 0, 0, 0)),
+                (ecodes.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
+                (ecodes.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
+            ],
+        }
+        ui = UInput(
+            caps,
+            name="LinuxPlay Virtual Gamepad",
+            bustype=0x03,
+            vendor=0x045e,
+            product=0x028e,
+            version=0x0110,
+        )
+        ui.write(ecodes.EV_ABS, ecodes.ABS_Z, 0)
+        ui.write(ecodes.EV_ABS, ecodes.ABS_RZ, 0)
+        ui.syn()
+        return ui
+
+    def run(self):
+        try:
+            import psutil
+            psutil.Process(os.getpid()).nice(-10)
+        except Exception:
+            pass
+
+        try:
+            self.sock = self._open_socket()
+            self.ui = self._open_uinput()
+            if not self.ui:
+                logging.info("Gamepad server active (pass-through), but uinput unavailable.")
+            else:
+                logging.info("Gamepad server active on UDP %d with virtual device.", UDP_GAMEPAD_PORT)
+        except Exception as e:
+            logging.error("Gamepad server init failed: %s", e)
+            return
+
+        buf = bytearray(64)
+        pending = []
+        unpack_event = struct.Struct("!Bhh").unpack_from
+
+        while self._running and not host_state.should_terminate:
+            try:
+                n, _ = self.sock.recvfrom_into(buf)
+            except BlockingIOError:
+                time.sleep(0.0005)
+                continue
+            except OSError:
+                break
+            if n < 5:
+                continue
+
+            try:
+                for i in range(0, n - 4, 5):
+                    try:
+                        t, c, v = unpack_event(buf, i)
+                    except Exception:
+                        continue
+                    if not self.ui:
+                        continue
+
+                    if t == ecodes.EV_KEY and c in (
+                        ecodes.KEY_LEFT, ecodes.KEY_RIGHT, ecodes.KEY_UP, ecodes.KEY_DOWN
+                    ):
+                        if c == ecodes.KEY_LEFT:
+                            self._dpad["left"] = (v != 0)
+                        elif c == ecodes.KEY_RIGHT:
+                            self._dpad["right"] = (v != 0)
+                        elif c == ecodes.KEY_UP:
+                            self._dpad["up"] = (v != 0)
+                        elif c == ecodes.KEY_DOWN:
+                            self._dpad["down"] = (v != 0)
+
+                        new_hatx = (
+                            -1 if self._dpad["left"] and not self._dpad["right"]
+                            else (1 if self._dpad["right"] and not self._dpad["left"] else 0)
+                        )
+                        new_haty = (
+                            -1 if self._dpad["up"] and not self._dpad["down"]
+                            else (1 if self._dpad["down"] and not self._dpad["up"] else 0)
+                        )
+
+                        if new_hatx != self._hatx:
+                            self._hatx = new_hatx
+                            pending.append((ecodes.EV_ABS, ecodes.ABS_HAT0X, self._hatx))
+                        if new_haty != self._haty:
+                            self._haty = new_haty
+                            pending.append((ecodes.EV_ABS, ecodes.ABS_HAT0Y, self._haty))
+                    else:
+                        pending.append((t, c, v))
+
+                if pending:
+                    for et, ec, ev in pending:
+                        self.ui.write(et, ec, ev)
+                    self.ui.syn()
+                    pending.clear()
+
+            except Exception as e:
+                logging.debug("Gamepad parse/write error: %s", e)
+
+        try:
+            if self.ui:
+                self.ui.close()
+        except Exception:
+            pass
+        try:
+            if self.sock:
+                self.sock.close()
+        except Exception:
+            pass
+
+    def stop(self):
+        self._running = False
+        try:
+            if self.sock:
+                self.sock.close()
+        except Exception:
+            pass
+
 def session_manager(args):
     while not host_state.should_terminate:
         if time.time() - host_state.last_disconnect_ts < RECONNECT_COOLDOWN:
@@ -1310,12 +1482,18 @@ def core_main(args, use_signals=True) -> int:
     threading.Thread(target=file_upload_listener, daemon=True).start()
 
     logging.info("Waiting for client handshake…")
-    
+
     threading.Thread(target=heartbeat_manager, args=(args,), daemon=True).start()
     threading.Thread(target=session_manager, args=(args,), daemon=True).start()
     threading.Thread(target=control_listener, args=(host_state.control_sock,), daemon=True).start()
     threading.Thread(target=resource_monitor, daemon=True).start()
     threading.Thread(target=stats_broadcast, daemon=True).start()
+    if IS_LINUX:
+        try:
+            host_state.gamepad_thread = GamepadServer()
+            host_state.gamepad_thread.start()
+        except Exception as e:
+            logging.error("Failed to start gamepad server: %s", e)
     logging.info("Host running. Close window or Ctrl+C to quit.")
     try:
         while not host_state.should_terminate:
