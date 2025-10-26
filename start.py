@@ -543,14 +543,17 @@ class ClientTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         main_layout = QVBoxLayout()
+
         form_group = QGroupBox("Client Configuration")
         form_layout = QFormLayout()
+
         self.decoderCombo = QComboBox()
         self.decoderCombo.addItem("none")
         if check_decoder_support("h.264"):
             self.decoderCombo.addItem("h.264")
         if check_decoder_support("h.265"):
             self.decoderCombo.addItem("h.265")
+
         self.hwaccelCombo = QComboBox()
         self.hwaccelCombo.addItems(["auto", "cpu", "cuda", "qsv", "d3d11va", "dxva2", "vaapi"])
         if IS_WINDOWS:
@@ -562,9 +565,11 @@ class ClientTab(QWidget):
                 idx = self.hwaccelCombo.findText(item)
                 if idx != -1:
                     self.hwaccelCombo.removeItem(idx)
+
         self.hostIPEdit = QComboBox()
         self.hostIPEdit.setEditable(True)
         self.hostIPEdit.setToolTip("Host IP (LAN) or WireGuard tunnel IP (e.g., 10.13.13.1)")
+
         if IS_LINUX and os.path.exists(WG_INFO_PATH):
             try:
                 with open(WG_INFO_PATH, "r") as f:
@@ -574,19 +579,29 @@ class ClientTab(QWidget):
                     self.hostIPEdit.addItem(t_ip)
             except Exception:
                 pass
+
         last = load_cfg().get("client", {})
         for ip in last.get("recent_ips", []):
             self.hostIPEdit.addItem(ip)
+
         self.audioCombo = QComboBox()
         self.audioCombo.addItems(["enable", "disable"])
         self.audioModeCombo = QComboBox()
         self.audioModeCombo.addItems(["Voice (low-latency)", "Music (quality)"])
+
         self.monitorField = QLineEdit("0")
         self.netCombo = QComboBox()
         self.netCombo.addItems(["auto", "lan", "wifi"])
         self.ultraCheck = QCheckBox("Ultra (LAN only)")
         self.debugCheck = QCheckBox("Enable Debug")
+
+        self.gamepadCombo = QComboBox()
+        self.gamepadCombo.addItems(["enable", "disable"])
+        self.gamepadDevEdit = QLineEdit()
+        self.gamepadDevEdit.setPlaceholderText("/dev/input/eventX (optional)")
+
         self._load_saved_client_extras()
+
         form_layout.addRow("Decoder:", self.decoderCombo)
         form_layout.addRow("HW accel:", self.hwaccelCombo)
         form_layout.addRow("Host IP:", self.hostIPEdit)
@@ -596,11 +611,16 @@ class ClientTab(QWidget):
         form_layout.addRow("Network Mode:", self.netCombo)
         form_layout.addRow("Ultra Mode:", self.ultraCheck)
         form_layout.addRow("Debug:", self.debugCheck)
+        form_layout.addRow("Gamepad:", self.gamepadCombo)
+        form_layout.addRow("Gamepad Device:", self.gamepadDevEdit)
+
         form_group.setLayout(form_layout)
+
         button_layout = QHBoxLayout()
         self.startButton = QPushButton("Start Client")
         self.startButton.clicked.connect(self.start_client)
         button_layout.addWidget(self.startButton)
+
         main_layout.addWidget(form_group)
         main_layout.addLayout(button_layout)
         main_layout.addStretch()
@@ -608,12 +628,14 @@ class ClientTab(QWidget):
 
     def _load_saved_client_extras(self):
         cfg = load_cfg().get("client", {})
+
         def set_combo(combo, val):
             if not val:
                 return
             idx = combo.findText(val)
             if idx != -1:
                 combo.setCurrentIndex(idx)
+
         set_combo(self.decoderCombo, cfg.get("decoder"))
         set_combo(self.hwaccelCombo, cfg.get("hwaccel"))
         set_combo(self.audioCombo, cfg.get("audio"))
@@ -621,11 +643,14 @@ class ClientTab(QWidget):
         set_combo(self.netCombo, cfg.get("net", "auto"))
         self.ultraCheck.setChecked(bool(cfg.get("ultra", False)))
         self.debugCheck.setChecked(bool(cfg.get("debug", False)))
+        set_combo(self.gamepadCombo, cfg.get("gamepad", "enable"))
+        self.gamepadDevEdit.setText(cfg.get("gamepad_dev", ""))
 
     def start_client(self):
         if not ffmpeg_ok():
             _warn_ffmpeg(self)
             return
+
         decoder = self.decoderCombo.currentText()
         host_ip = self.hostIPEdit.currentText().strip()
         audio = self.audioCombo.currentText()
@@ -634,23 +659,52 @@ class ClientTab(QWidget):
         hwaccel = self.hwaccelCombo.currentText()
         net = self.netCombo.currentText()
         ultra = self.ultraCheck.isChecked()
+        gamepad = self.gamepadCombo.currentText()
+        gamepad_dev = self.gamepadDevEdit.text().strip() or None
+
         if not host_ip:
             self.hostIPEdit.setEditText("Enter host IP or WG tunnel IP")
             return
+
         cfg = load_cfg()
         client_cfg = cfg.get("client", {})
         rec = client_cfg.get("recent_ips", [])
         if host_ip and host_ip not in rec:
             rec = [host_ip] + rec
             rec = rec[:5]
-        client_cfg.update({"recent_ips": rec, "decoder": decoder, "hwaccel": hwaccel, "audio": audio, "monitor": monitor, "debug": bool(debug), "net": net, "ultra": bool(ultra)})
+
+        client_cfg.update({
+            "recent_ips": rec,
+            "decoder": decoder,
+            "hwaccel": hwaccel,
+            "audio": audio,
+            "monitor": monitor,
+            "debug": bool(debug),
+            "net": net,
+            "ultra": bool(ultra),
+            "gamepad": gamepad,
+            "gamepad_dev": gamepad_dev
+        })
         cfg["client"] = client_cfg
         save_cfg(cfg)
-        cmd = [sys.executable, os.path.join(HERE, "client.py"), "--decoder", decoder, "--host_ip", host_ip, "--audio", audio, "--monitor", monitor, "--hwaccel", hwaccel, "--net", net]
+
+        cmd = [
+            sys.executable, os.path.join(HERE, "client.py"),
+            "--decoder", decoder,
+            "--host_ip", host_ip,
+            "--audio", audio,
+            "--monitor", monitor,
+            "--hwaccel", hwaccel,
+            "--net", net,
+            "--gamepad", gamepad
+        ]
+        if gamepad_dev:
+            cmd.extend(["--gamepad_dev", gamepad_dev])
         if ultra:
             cmd.append("--ultra")
         if debug:
             cmd.append("--debug")
+
         try:
             subprocess.Popen(cmd)
         except Exception as e:
