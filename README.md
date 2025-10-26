@@ -169,4 +169,4 @@ python3 client.py --host_ip 192.168.1.20 --decoder h.264 --hwaccel auto --audio 
 
 ---
 
-*Developed and maintained by [Techlm77](https://github.com/Techlm77) — proudly built for Linux enthusiasts and creators.*
+Developed and maintained by [Techlm77](https://github.com/Techlm77) :)
