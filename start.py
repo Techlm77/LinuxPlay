@@ -206,26 +206,173 @@ class HostTab(QWidget):
         self.encoderCombo.currentIndexChanged.connect(self._refresh_backend_choices)
         self.hwencCombo = QComboBox()
         self.framerateCombo = QComboBox()
-        self.framerateCombo.addItems(["15", "24", "30", "45", "60", "75", "90", "100", "120", "144", "165", "200", "240", "300", "360"])
+        self.framerateCombo.addItems([
+            "15", 
+            "24", 
+            "30", 
+            "45", 
+            "60", 
+            "75", 
+            "90", 
+            "100", 
+            "120", 
+            "144", 
+            "165", 
+            "200", 
+            "240", 
+            "300", 
+            "360"
+        ])
         self.bitrateCombo = QComboBox()
-        self.bitrateCombo.addItems(["0", "50k", "100k", "200k", "300k", "400k", "500k", "750k", "1M", "1.5M", "2M", "3M", "4M", "5M", "6M", "8M", "10M", "12M", "15M", "20M", "25M", "30M", "35M", "40M", "45M", "50M", "60M", "70M", "80M", "90M", "100M"])
+        self.bitrateCombo.addItems([
+            "0", 
+            "50k", 
+            "100k", 
+            "200k", 
+            "300k", 
+            "400k", 
+            "500k", 
+            "750k", 
+            "1M", 
+            "1.5M", 
+            "2M", 
+            "3M", 
+            "4M", 
+            "5M", 
+            "6M", 
+            "8M", 
+            "10M", 
+            "12M", 
+            "15M", 
+            "20M", 
+            "25M", 
+            "30M", 
+            "35M", 
+            "40M", 
+            "45M", 
+            "50M", 
+            "60M", 
+            "70M", 
+            "80M", 
+            "90M", 
+            "100M"
+        ])
         self.audioCombo = QComboBox()
         self.audioCombo.addItems(["enable", "disable"])
         self.audioModeCombo = QComboBox()
         self.audioModeCombo.addItems(["Voice (low-latency)", "Music (quality)"])
         self.adaptiveCheck = QCheckBox("Enable Adaptive Bitrate")
         self.displayCombo = QComboBox()
-        self.displayCombo.addItems([":0", ":1", ":2", ":3", ":4", ":5", ":6"])
+        self.displayCombo.addItems([
+            ":0", 
+            ":1", 
+            ":2", 
+            ":3", 
+            ":4", 
+            ":5", 
+            ":6"
+        ])
         self.presetCombo = QComboBox()
-        self.presetCombo.addItems(["Default", "ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow", "llhp", "llhq", "hp", "hq", "p1", "p2", "p3", "p4", "p5", "p6", "p7", "lossless", "speed", "balanced", "quality"])
+        self.presetCombo.addItems([
+            "Default", 
+            "zerolatency", 
+            "ultra-low-latency", 
+            "realtime",
+            "ultrafast", 
+            "superfast", 
+            "veryfast", 
+            "faster", 
+            "fast", 
+            "medium", 
+            "slow", 
+            "slower", 
+            "veryslow",
+            "llhp", 
+            "llhq", 
+            "hp", 
+            "hq",
+            "p1", 
+            "p2", 
+            "p3", 
+            "p4", 
+            "p5", 
+            "p6", 
+            "p7",
+            "lossless", 
+            "speed", 
+            "balanced", 
+            "quality"
+        ])
+
         self.gopCombo = QComboBox()
-        self.gopCombo.addItems(["Auto", "1", "2", "3", "4", "5", "8", "10", "15", "20", "30"])
+        self.gopCombo.addItems([
+            "Auto", 
+            "1", 
+            "2", 
+            "3", 
+            "4", 
+            "5", 
+            "8", 
+            "10",
+            "15", 
+            "20", 
+            "30"])
+
         self.qpCombo = QComboBox()
-        self.qpCombo.addItems(["0", "5", "10", "15", "18", "20", "22", "25", "28", "30", "32", "35", "38", "40", "45", "50"])
+        self.qpCombo.addItems([
+            "None",
+            "0", 
+            "5", 
+            "10", 
+            "15", 
+            "18", 
+            "20", 
+            "22", 
+            "25", 
+            "28", 
+            "30", 
+            "32", 
+            "35", 
+            "38", 
+            "40", 
+            "45", 
+            "50"
+        ])
         self.tuneCombo = QComboBox()
-        self.tuneCombo.addItems(["None", "auto", "default", "low-latency", "ultra-low-latency", "high-quality", "high-performance", "performance", "lossless", "lossless-highperf", "blu-ray"])
+        self.tuneCombo.addItems([
+            "None", 
+            "auto", 
+            "default",
+            "low-latency", 
+            "ultra-low-latency", 
+            "zerolatency",
+            "high-quality", 
+            "high-performance", 
+            "performance",
+            "lossless", 
+            "lossless-highperf", 
+            "blu-ray"
+        ])
         self.pixFmtCombo = QComboBox()
-        self.pixFmtCombo.addItems(["yuv420p", "nv12", "yuv422p", "yuyv422", "uyvy422", "yuv444p", "rgb0", "bgr0", "rgba", "bgra", "p010le", "yuv420p10le", "yuv422p10le", "yuv444p10le", "p016le", "yuv444p12le", "yuv444p16le"])
+        self.pixFmtCombo.addItems([
+            "yuv420p", 
+            "nv12", 
+            "yuv422p", 
+            "yuyv422", 
+            "uyvy422", 
+            "yuv444p",
+            "rgb0", 
+            "bgr0", 
+            "rgba",
+            "bgra",
+            "p010le", 
+            "yuv420p10le", 
+            "yuv422p10le", 
+            "yuv444p10le",
+            "p016le", 
+            "yuv444p12le", 
+            "yuv444p16le"
+        ])
         self.debugCheck = QCheckBox("Enable Debug")
         self.captureHint = QLabel("")
         if ffmpeg_has_device("kmsgrab"):
@@ -317,9 +464,9 @@ class HostTab(QWidget):
             self.audioCombo.setCurrentText("disable")
             self.adaptiveCheck.setChecked(False)
             self.displayCombo.setCurrentText(":0")
-            self.presetCombo.setCurrentText("llhq" if self.presetCombo.findText("llhq") != -1 else "ultrafast")
-            self.gopCombo.setCurrentText("8")
-            self.qpCombo.setCurrentText("None")
+            self.presetCombo.setCurrentText("llhp" if self.presetCombo.findText("llhp") != -1 else "zerolatency")
+            self.gopCombo.setCurrentText("1")
+            self.qpCombo.setCurrentText("23")
             self.tuneCombo.setCurrentText("ultra-low-latency")
             self.pixFmtCombo.setCurrentText("yuv420p")
             self._refresh_backend_choices(preselect="auto")
@@ -409,30 +556,56 @@ class HostTab(QWidget):
 
     def start_host(self):
         if not IS_LINUX:
-            QMessageBox.critical(self, "Unsupported OS", "Hosting is only supported on Linux. Use the Client tab instead.")
+            QMessageBox.critical(
+                self,
+                "Unsupported OS",
+                "Hosting is only supported on Linux. Use the Client tab instead.",
+            )
             return
+
         if not ffmpeg_ok():
             _warn_ffmpeg(self)
             self._update_buttons()
             return
+
         encoder = self.encoderCombo.currentText()
         if encoder == "none":
-            QMessageBox.warning(self, "Select an encoder", "Encoder is set to 'none'. Pick h.264 or h.265 before starting the host.")
+            QMessageBox.warning(
+                self,
+                "Select an encoder",
+                "Encoder is set to 'none'. Pick h.264 or h.265 before starting the host.",
+            )
             self._update_buttons()
             return
+
         framerate = self.framerateCombo.currentText()
         bitrate = self.bitrateCombo.currentText()
         audio = self.audioCombo.currentText()
         adaptive = self.adaptiveCheck.isChecked()
         display = self.displayCombo.currentText()
-        preset = "" if self.presetCombo.currentText() == "Default" else self.presetCombo.currentText()
+
+        preset = "" if self.presetCombo.currentText() in ("Default", "None") else self.presetCombo.currentText()
         gop = self.gopCombo.currentText()
-        qp = "" if self.qpCombo.currentText() == "None" else self.qpCombo.currentText()
-        tune = "" if self.tuneCombo.currentText() == "None" else self.tuneCombo.currentText()
+        qp_val = self.qpCombo.currentText()
+        qp = "" if qp_val in ("None", "", None) else qp_val
+        tune_val = self.tuneCombo.currentText()
+        tune = "" if tune_val in ("None", "", None) else tune_val
         pix_fmt = self.pixFmtCombo.currentText()
         debug = self.debugCheck.isChecked()
         hwenc = self.hwencCombo.currentData() or "auto"
-        cmd = [sys.executable, os.path.join(HERE, "host.py"), "--gui", "--encoder", encoder, "--framerate", framerate, "--bitrate", bitrate, "--audio", audio, "--pix_fmt", pix_fmt, "--hwenc", hwenc]
+    
+        cmd = [
+            sys.executable,
+            os.path.join(HERE, "host.py"),
+            "--gui",
+            "--encoder", encoder,
+            "--framerate", framerate,
+            "--bitrate", bitrate,
+            "--audio", audio,
+            "--pix_fmt", pix_fmt,
+            "--hwenc", hwenc,
+        ]
+
         if adaptive:
             cmd.append("--adaptive")
         if preset:
@@ -444,42 +617,70 @@ class HostTab(QWidget):
         if debug:
             cmd.append("--debug")
         cmd.extend(["--display", display])
+
         try:
             _gop_i = int(gop)
         except Exception:
             _gop_i = 0
         if _gop_i > 0:
             cmd.extend(["--gop", str(_gop_i)])
+        elif preset.lower() in ("llhp", "zerolatency", "ultra-low-latency", "ull"):
+            cmd.extend(["--gop", "1"])
+
         self._save_current()
+
         env = os.environ.copy()
         env["LINUXPLAY_MARKER"] = LINUXPLAY_MARKER
         env["LINUXPLAY_SID"] = env.get("LINUXPLAY_SID") or str(uuid.uuid4())
+
         _am = self.audioModeCombo.currentText().lower()
         if "music" in _am:
-            env["LP_OPUS_APP"] = "audio"; env["LP_OPUS_FD"] = "20"
+            env["LP_OPUS_APP"] = "audio"
+            env["LP_OPUS_FD"] = "20"
         else:
-            env["LP_OPUS_APP"] = "voip"; env["LP_OPUS_FD"] = "10"
+            env["LP_OPUS_APP"] = "voip"
+            env["LP_OPUS_FD"] = "10"
+
         cap_mode = getattr(self, "linuxCaptureCombo", None)
         cap_val = cap_mode.currentData() if cap_mode else "auto"
         env["LINUXPLAY_CAPTURE"] = cap_val or "auto"
+
+        kms_dev = getattr(self, "kmsDeviceEdit", None)
+        if kms_dev and hasattr(kms_dev, "text"):
+            val = kms_dev.text().strip()
+            if val:
+                env["LINUXPLAY_KMS_DEVICE"] = val
+
         try:
-            self.host_process = subprocess.Popen(cmd, preexec_fn=os.setsid, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+            self.host_process = subprocess.Popen(
+                cmd,
+                preexec_fn=os.setsid,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=env,
+            )
         except Exception as e:
             logging.error("Failed to start host: %s", e)
             QMessageBox.critical(self, "Start Host Failed", str(e))
             self.host_process = None
             self._update_buttons()
             return
+
         def _watch():
             try:
                 _ = self.host_process.wait()
             except Exception:
                 pass
+
             def done():
                 self.host_process = None
                 self._update_buttons()
+
             QTimer.singleShot(0, done)
-        self._exit_watcher_thread = threading.Thread(target=_watch, name="HostExitWatcher", daemon=True)
+
+        self._exit_watcher_thread = threading.Thread(
+            target=_watch, name="HostExitWatcher", daemon=True
+        )
         self._exit_watcher_thread.start()
         self._update_buttons()
 
