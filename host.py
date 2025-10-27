@@ -102,45 +102,64 @@ HOST_ARGS = None
 
 def _map_nvenc_tune(tune: str) -> str:
     t = (tune or "").strip().lower()
-    if not t:
+    if not t or t in ("auto", "default", "none"):
         return ""
 
-    valid_nvenc_tunes = {
+    alias_map = {
+        "ull": "ull",
         "ultra-low-latency": "ull",
+        "ultra_low_latency": "ull",
+        "zerolatency": "ull",
+        "realtime": "ull",
+
         "low-latency": "ll",
+        "low_latency": "ll",
+        "ll": "ll",
+
+        "hq": "hq",
         "high-quality": "hq",
+        "high_quality": "hq",
+        "hp": "hp",
         "high-performance": "hp",
+        "high_performance": "hp",
         "performance": "hp",
+
         "lossless": "lossless",
         "lossless-highperf": "losslesshp",
+        "lossless_highperf": "losslesshp",
+
         "blu-ray": "bd",
-        "auto": "",
-        "none": "",
-        "default": "",
+        "bluray": "bd",
     }
 
-    if t in valid_nvenc_tunes:
-        return valid_nvenc_tunes[t]
+    mapped = alias_map.get(t)
+    if mapped:
+        return mapped
 
     logging.warning("Unrecognized NVENC tune '%s' — passing through as-is.", t)
     return t
 
 def _vaapi_fmt_for_pix_fmt(pix_fmt: str, codec: str) -> str:
     pf = (pix_fmt or "").strip().lower()
-    valid_vaapi_fmts = {
 
+    valid_vaapi_fmts = {
         "nv12", "yuv420p", "yuyv422", "uyvy422", "yuv422p",
         "yuv444p", "rgb0", "bgr0", "rgba", "bgra",
-
         "p010", "p010le", "yuv420p10", "yuv420p10le",
         "yuv422p10", "yuv422p10le", "yuv444p10", "yuv444p10le",
-
         "yuv444p12le", "yuv444p16le",
     }
 
     if pf in valid_vaapi_fmts:
         logging.info("Using requested VAAPI pix_fmt '%s' for codec %s.", pf, codec)
         return pf
+
+    if pf in ("yuv420", "420p"):
+        return "yuv420p"
+    if pf in ("yuv420p10bit", "yuv420p10b"):
+        return "yuv420p10le"
+    if pf in ("yuv444", "444p"):
+        return "yuv444p"
 
     logging.warning("Unrecognized pix_fmt '%s' — falling back to 'nv12'.", pf)
     return "nv12"
@@ -429,18 +448,45 @@ def _target_bpp(codec: str, fps: int) -> float:
         base += 0.02
     return base
 
-def _safe_nvenc_preset(preset):
-    allowed = {"default","fast","medium","slow","hp","hq","bd","ll","llhq","llhp",
-               "lossless","p1","p2","p3","p4","p5","p6","p7"}
-    return preset if preset in allowed else "p4"
+def _safe_nvenc_preset(preset: str) -> str:
+    preset = (preset or "").strip().lower()
+    alias_map = {
+        "ultrafast": "p1", "superfast": "p2", "veryfast": "p3",
+        "fast": "p4", "medium": "p5", "slow": "p6", "slower": "p7",
+        "veryslow": "p7",
+        "ll": "ll", "low-latency": "ll", "low_latency": "ll",
+        "llhq": "llhq", "llhp": "llhp",
+        "ull": "llhp", "ultra-low-latency": "llhp", "ultra_low_latency": "llhp",
+        "zerolatency": "llhp", "realtime": "llhp",
+        "hq": "hq", "hp": "hp",
+        "lossless": "lossless", "lossless-highperf": "losslesshp",
+        "bd": "bd", "high-quality": "hq", "high-performance": "hp"
+    }
+
+    allowed = {
+        "default", "fast", "medium", "slow", "hp", "hq", "bd",
+        "ll", "llhq", "llhp", "lossless", "losslesshp",
+        "p1", "p2", "p3", "p4", "p5", "p6", "p7"
+    }
+
+    mapped = alias_map.get(preset, preset)
+    return mapped if mapped in allowed else "p4"
+
+def _norm_qp(qp):
+    try:
+        q = int(qp)
+        return str(max(0, min(51, q)))
+    except Exception:
+        return ""
 
 def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str,
                        tune: str, bitrate: str, pix_fmt: str):
     codec = (codec or "h.264").lower()
     hwenc = (hwenc or "auto").lower()
     preset_l = (preset or "").strip().lower()
-    extra_filters = []
-    enc = []
+    tune_l = (tune or "").strip().lower()
+    qp = _norm_qp(qp)
+    extra_filters, enc = [], []
 
     def ensure(name: str) -> bool:
         ok = ffmpeg_has_encoder(name)
@@ -471,33 +517,60 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str,
             hwenc = "cpu"
 
     adaptive = getattr(HOST_ARGS, "adaptive", False)
-    if not bitrate or str(bitrate).lower() in ("0", "auto"):
-        if "vaapi" in hwenc:
-            dynamic_flags = ["-rc_mode", "CQP", "-qp", qp or "21"]
-        elif "nvenc" in hwenc:
-            dynamic_flags = ["-rc", "constqp", "-qp", qp or "23"]
-        elif "qsv" in hwenc:
-            dynamic_flags = ["-rc_mode", "ICQ", "-icq_quality", qp or "23"]
+    bitrate_s = str(bitrate or "").lower()
+
+    if "vaapi" in hwenc:
+        qp_val = qp or "23"
+        dynamic_flags = [
+            "-rc_mode", "CQP",
+            "-qp", qp_val,
+        ]
+        if bitrate and str(bitrate).lower() not in ("0", "auto"):
+            dynamic_flags += [
+                "-b:v", bitrate,
+                "-maxrate", bitrate,
+                "-bufsize", bitrate,
+            ]
+
+    elif "nvenc" in hwenc:
+        if adaptive:
+            dynamic_flags = [
+                "-rc", "vbr",
+                "-maxrate", bitrate or "15M",
+                "-cq", qp or "23",
+            ]
         else:
-            dynamic_flags = ["-crf", qp or "23"]
-    elif adaptive:
-        if "nvenc" in hwenc:
-            dynamic_flags = ["-rc", "vbr", "-maxrate", bitrate, "-cq", qp or "23"]
-        elif "vaapi" in hwenc:
-            dynamic_flags = ["-rc_mode", "CQP", "-qp", qp or "21"]
-        elif "qsv" in hwenc:
-            dynamic_flags = ["-rc_mode", "ICQ", "-icq_quality", qp or "23"]
-        else:
-            dynamic_flags = ["-crf", qp or "23"]
+            dynamic_flags = [
+                "-rc", "constqp",
+            ] + (["-qp", qp] if qp else [])
+
+    elif "qsv" in hwenc:
+        dynamic_flags = [
+            "-rc_mode", "ICQ",
+            "-icq_quality", qp or "23",
+        ]
+
     else:
-        dynamic_flags = ["-b:v", bitrate]
+        dynamic_flags = [
+            "-crf", qp or "23",
+        ]
 
     try:
         gop_val = int(gop)
         use_gop = gop_val > 0
     except Exception:
-        gop_val = 0
-        use_gop = False
+        gop_val, use_gop = 0, False
+
+    def _nvenc_tune_args():
+        if tune_l in ("zerolatency", "ull", "ultra-low-latency", "ultra_low_latency", "realtime"):
+            return ["-tune", "ull"]
+        if tune_l in ("low-latency", "ll", "low_latency"):
+            return ["-tune", "ll"]
+        if tune_l in ("hq", "film", "quality", "high_quality"):
+            return ["-tune", "hq"]
+        if tune_l in ("lossless",):
+            return ["-tune", "lossless"]
+        return ["-tune", "ll"]
 
     if codec == "h.264":
         if hwenc == "nvenc" and ensure("h264_nvenc"):
@@ -506,22 +579,12 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str,
                 "-preset", _safe_nvenc_preset(preset_l or "llhq"),
                 *(["-g", str(gop_val)] if use_gop else []),
                 "-bf", "0", "-rc-lookahead", "0", "-refs", "1",
-                "-flags2", "+fast", *dynamic_flags,
-                "-pix_fmt", pix_fmt, "-bsf:v", "h264_mp4toannexb"
+                "-flags2", "+fast",
+                *dynamic_flags,
+                "-pix_fmt", pix_fmt,
+                "-bsf:v", "h264_mp4toannexb",
+                *_nvenc_tune_args()
             ]
-
-            if tune:
-                _t = tune.strip().lower()
-                if _t in ("zerolatency", "ull", "ultra-low-latency", "ultra_low_latency"):
-                    enc += ["-tune", "ull"]
-                elif _t in ("low-latency", "ll", "low_latency"):
-                    enc += ["-tune", "ll"]
-                elif _t in ("hq", "film", "quality", "high_quality"):
-                    enc += ["-tune", "hq"]
-                elif _t in ("lossless",):
-                    enc += ["-tune", "lossless"]
-            else:
-                enc += ["-tune", "ll"]
 
         elif hwenc == "qsv" and ensure("h264_qsv"):
             enc = ["-c:v", "h264_qsv", *dynamic_flags,
@@ -529,17 +592,30 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str,
 
         elif hwenc == "vaapi" and has_vaapi() and ensure("h264_vaapi"):
             va_fmt = _vaapi_fmt_for_pix_fmt(pix_fmt, codec)
-            extra_filters += ["-vf", f"format={va_fmt},hwupload",
-                              "-vaapi_device", "/dev/dri/renderD128"]
-            enc = ["-c:v", "h264_vaapi", "-bf", "0", *dynamic_flags,
-                   "-bsf:v", "h264_mp4toannexb"]
+            extra_filters += [
+                "-vf", f"format={va_fmt},hwupload",
+                "-vaapi_device", "/dev/dri/renderD128"
+            ]
+            enc = [
+                "-c:v", "h264_vaapi",
+                "-bf", "0",
+                *dynamic_flags,
+                "-pix_fmt", pix_fmt,
+                "-bsf:v", "h264_mp4toannexb"
+            ]
 
         else:
-            enc = ["-c:v", "libx264", "-preset", preset_l or "ultrafast",
-                   "-tune", tune or "zerolatency",
-                   *(["-g", str(gop_val)] if use_gop else []),
-                   *dynamic_flags, "-pix_fmt", pix_fmt,
-                   "-bsf:v", "h264_mp4toannexb"]
+            enc = [
+                "-c:v", "libx264",
+                "-preset", preset_l or "ultrafast",
+                "-tune", tune_l or "zerolatency",
+                *(["-g", str(gop_val)] if use_gop else []),
+                *dynamic_flags,
+                "-pix_fmt", pix_fmt,
+                "-bsf:v", "h264_mp4toannexb"
+            ]
+            if tune_l in ("zerolatency", "ultra-low-latency", "ull", "low-latency", "ll"):
+                enc += ["-x264-params", "scenecut=0"]
 
     elif codec == "h.265":
         if hwenc == "nvenc" and ensure("hevc_nvenc"):
@@ -548,22 +624,12 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str,
                 "-preset", _safe_nvenc_preset(preset_l or "p5"),
                 *(["-g", str(gop_val)] if use_gop else []),
                 "-bf", "0", "-rc-lookahead", "0", "-refs", "1",
-                "-flags2", "+fast", *dynamic_flags,
-                "-pix_fmt", pix_fmt, "-bsf:v", "hevc_mp4toannexb"
+                "-flags2", "+fast",
+                *dynamic_flags,
+                "-pix_fmt", pix_fmt,
+                "-bsf:v", "hevc_mp4toannexb",
+                *_nvenc_tune_args()
             ]
-
-            if tune:
-                _t = tune.strip().lower()
-                if _t in ("zerolatency", "ull", "ultra-low-latency", "ultra_low_latency"):
-                    enc += ["-tune", "ull"]
-                elif _t in ("low-latency", "ll", "low_latency"):
-                    enc += ["-tune", "ll"]
-                elif _t in ("hq", "film", "quality", "high_quality"):
-                    enc += ["-tune", "hq"]
-                elif _t in ("lossless",):
-                    enc += ["-tune", "lossless"]
-            else:
-                enc += ["-tune", "ll"]
 
         elif hwenc == "qsv" and ensure("hevc_qsv"):
             enc = ["-c:v", "hevc_qsv", *dynamic_flags,
@@ -571,17 +637,30 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str,
 
         elif hwenc == "vaapi" and has_vaapi() and ensure("hevc_vaapi"):
             va_fmt = _vaapi_fmt_for_pix_fmt(pix_fmt, codec)
-            extra_filters += ["-vf", f"format={va_fmt},hwupload",
-                              "-vaapi_device", "/dev/dri/renderD128"]
-            enc = ["-c:v", "hevc_vaapi", "-bf", "0", *dynamic_flags,
-                   "-bsf:v", "hevc_mp4toannexb"]
+            extra_filters += [
+                "-vf", f"format={va_fmt},hwupload",
+                "-vaapi_device", "/dev/dri/renderD128"
+            ]
+            enc = [
+                "-c:v", "hevc_vaapi",
+                "-bf", "0",
+                *dynamic_flags,
+                "-pix_fmt", pix_fmt,
+                "-bsf:v", "hevc_mp4toannexb"
+            ]
 
         else:
-            enc = ["-c:v", "libx265", "-preset", preset_l or "ultrafast",
-                   "-tune", tune or "zerolatency",
-                   *(["-g", str(gop_val)] if use_gop else []),
-                   *dynamic_flags, "-pix_fmt", pix_fmt,
-                   "-bsf:v", "hevc_mp4toannexb"]
+            enc = [
+                "-c:v", "libx265",
+                "-preset", preset_l or "ultrafast",
+                "-tune", tune_l or "zerolatency",
+                *(["-g", str(gop_val)] if use_gop else []),
+                *dynamic_flags,
+                "-pix_fmt", pix_fmt,
+                "-bsf:v", "hevc_mp4toannexb"
+            ]
+            if tune_l in ("zerolatency", "ultra-low-latency", "ull", "low-latency", "ll"):
+                enc += ["-x265-params", "scenecut=0:rc-lookahead=0"]
 
     return extra_filters, enc
 
@@ -605,7 +684,6 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
     codec_name = (args.encoder if args.encoder and args.encoder.lower() != "none" else "h.264")
     min_bits = int(w) * int(h) * max(1, fps_i) * _target_bpp(codec_name, fps_i)
     cur_bits = _parse_bitrate_bits(bitrate)
-
     if cur_bits < min_bits:
         safe_bits = int(min_bits)
         safe_str = _format_bits(safe_bits)
@@ -641,16 +719,13 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
     if capture_pref == "kmsgrab":
         use_kms = True
     elif capture_pref == "auto" and kms_available:
-        if (
-            (args.hwenc in ("auto", "vaapi") and vaapi_available and _vaapi_possible_for_codec())
-            or (args.hwenc == "cpu")
-        ):
+        if ((args.hwenc in ("auto", "vaapi") and vaapi_available and _vaapi_possible_for_codec())
+            or (args.hwenc == "cpu")):
             use_kms = True
 
     if use_kms:
         kms_dev = os.environ.get("LINUXPLAY_KMS_DEVICE", _pick_kms_device())
         logging.info("Linux capture: kmsgrab (%s) selected (pref=%s).", kms_dev, capture_pref)
-
         input_side = [
             *base_in,
             "-f", "kmsgrab",
@@ -659,35 +734,22 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
             "-i", "-",
         ]
 
-        _k_extra_filters, encode = _pick_encoder_args(
+        extra_filters, encode = _pick_encoder_args(
             codec=args.encoder, hwenc=args.hwenc, preset=preset,
             gop=gop, qp=qp, tune=tune, bitrate=bitrate, pix_fmt=pix_fmt
         )
 
         if any(x in encode for x in ("h264_vaapi", "hevc_vaapi")):
             _vaapi_fmt = {
-                "nv12": "nv12",
-                "yuv420p": "nv12",
-                "p010": "p010",
-                "yuv420p10": "p010",
+                "nv12": "nv12", "yuv420p": "nv12",
+                "p010": "p010", "yuv420p10": "p010"
             }.get((pix_fmt or "nv12").lower(), "nv12")
-
-            extra_filters = [
-                "-vf", f"hwmap=derive_device=vaapi,scale_vaapi=w={w}:h={h}:format={_vaapi_fmt}",
-                "-vaapi_device", "/dev/dri/renderD128"
-            ]
-
+            extra_filters = ["-vf", f"hwmap=derive_device=vaapi,scale_vaapi=w={w}:h={h}:format={_vaapi_fmt}",
+                             "-vaapi_device", "/dev/dri/renderD128"]
         elif args.hwenc == "cpu":
             extra_filters = ["-vf", f"hwdownload,format={pix_fmt or 'yuv420p'}"]
 
-        else:
-            logging.warning(
-                "kmsgrab requested but encoder backend '%s' not supported; falling back to x11grab.",
-                args.hwenc
-            )
-            use_kms = False
-
-    if not use_kms:
+    else:
         logging.info("Linux capture: x11grab selected (pref=%s, kms=%s).", capture_pref, kms_available)
         input_arg = f"{disp}+{ox},{oy}"
         input_side = [
@@ -698,13 +760,21 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
             "-video_size", f"{w}x{h}",
             "-i", input_arg,
         ]
-
         extra_filters, encode = _pick_encoder_args(
             codec=args.encoder, hwenc=args.hwenc, preset=preset,
             gop=gop, qp=qp, tune=tune, bitrate=bitrate, pix_fmt=pix_fmt
         )
 
     output_side = _output_sync_flags()
+    mtu_guess = 1500
+    ipv6 = ":" in ip
+    pkt_size = _best_ts_pkt_size(mtu_guess, ipv6)
+    fifo_size = 32768
+    buffer_size = 65536
+    if getattr(host_state, "net_mode", "lan") == "wifi":
+        fifo_size = 131072
+        buffer_size = 262144
+
     out = [
         *(_mpegts_ll_mux_flags()),
         "-flags", "+low_delay",
@@ -712,9 +782,9 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
         *_marker_opt(),
         (
             f"udp://{ip}:{video_port}"
-            f"?pkt_size=1316"
-            f"&buffer_size=65536"
-            f"&fifo_size=32768"
+            f"?pkt_size={pkt_size}"
+            f"&buffer_size={buffer_size}"
+            f"&fifo_size={fifo_size}"
             f"&overrun_nonfatal=1"
             f"&max_delay=0"
         ),
