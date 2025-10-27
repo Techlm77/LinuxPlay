@@ -401,14 +401,15 @@ class VideoWidgetGL(QOpenGLWidget):
         if self.pbo_ids:
             glDeleteBuffers(len(self.pbo_ids), self.pbo_ids)
 
-        self.pbo_ids = list(glGenBuffers(2))
         buf_size = w * h * 3
+        self.pbo_ids = list(glGenBuffers(3))
         for pbo in self.pbo_ids:
             glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo)
             glBufferData(GL_PIXEL_UNPACK_BUFFER, buf_size, None, GL_STREAM_DRAW)
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0)
 
         self.texture_width, self.texture_height = w, h
+        self.current_pbo = 0
         glFlush()
 
     def resizeTexture(self, w, h):
@@ -421,9 +422,9 @@ class VideoWidgetGL(QOpenGLWidget):
         now = time.time()
 
         has_signal = (now - self._last_frame_recv) < 2.5
-
         if not self.frame_data:
             self._draw_overlay_text("Waiting for signal…" if not has_signal else "No video")
+            self._flush_pending_mouse()
             return
 
         arr, fw, fh = self.frame_data
@@ -439,8 +440,10 @@ class VideoWidgetGL(QOpenGLWidget):
         current_pbo = self.pbo_ids[self.current_pbo]
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, current_pbo)
         try:
-            ptr = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, size,
-                                   GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT | GL_MAP_UNSYNCHRONIZED_BIT)
+            ptr = glMapBufferRange(
+                GL_PIXEL_UNPACK_BUFFER, 0, size,
+                GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT | GL_MAP_UNSYNCHRONIZED_BIT
+            )
             if ptr:
                 from ctypes import memmove, c_void_p
                 memmove(c_void_p(ptr), data.ctypes.data, size)
@@ -458,11 +461,9 @@ class VideoWidgetGL(QOpenGLWidget):
         aspect_tex = fw / float(fh)
         aspect_win = self.width() / float(self.height())
         if aspect_win > aspect_tex:
-            sx = aspect_tex / aspect_win
-            sy = 1.0
+            sx, sy = (aspect_tex / aspect_win), 1.0
         else:
-            sx = 1.0
-            sy = aspect_win / aspect_tex
+            sx, sy = 1.0, (aspect_win / aspect_tex)
 
         glEnable(GL_TEXTURE_2D)
         glBegin(GL_QUADS)
@@ -483,7 +484,6 @@ class VideoWidgetGL(QOpenGLWidget):
             diffs = [t2 - t1 for t1, t2 in zip(self._frame_times, self._frame_times[1:])]
             mean_diff = statistics.mean(diffs)
             self._fps = 1.0 / mean_diff if mean_diff > 0 else 0.0
-
         if now - self._last_stats_update >= 1.0:
             self._last_stats_update = now
             try:
@@ -497,8 +497,9 @@ class VideoWidgetGL(QOpenGLWidget):
             overlay += " | RECONNECTING…"
         elif CLIENT_STATE["reconnecting"]:
             overlay += " | Weak Signal"
-
         self._draw_overlay_text(overlay)
+
+        self._flush_pending_mouse()
 
     def _draw_overlay_text(self, text):
         p = QPainter(self)
@@ -522,6 +523,17 @@ class VideoWidgetGL(QOpenGLWidget):
         self._last_frame_recv = time.time()
         if self.isVisible():
             self.update()
+
+    def _flush_pending_mouse(self):
+        if not hasattr(self, "_pending_mouse") or self._pending_mouse is None:
+            return
+        now = time.time()
+        if now - self._last_mouse_ts < self._mouse_throttle:
+            return
+        rx, ry, buttons = self._pending_mouse
+        self.send_mouse_packet(2, buttons, rx, ry)
+        self._last_mouse_ts = now
+        self._pending_mouse = None
 
     def send_mouse_packet(self, pkt_type, bmask, x, y):
         msg = f"MOUSE_PKT {pkt_type} {bmask} {x} {y}"
@@ -566,17 +578,17 @@ class VideoWidgetGL(QOpenGLWidget):
         e.accept()
 
     def mouseMoveEvent(self, e):
-        now = time.time()
-        if now - self._last_mouse_ts < self._mouse_throttle:
-            return
-        self._last_mouse_ts = now
-
         rx, ry = self._scaled_mouse_coords(e)
         buttons = 0
         if e.buttons() & Qt.LeftButton: buttons |= 1
         if e.buttons() & Qt.MiddleButton: buttons |= 2
         if e.buttons() & Qt.RightButton: buttons |= 4
-        self.send_mouse_packet(2, buttons, rx, ry)
+
+        if not hasattr(self, "_pending_mouse"):
+            self._pending_mouse = None
+        self._pending_mouse = (rx, ry, buttons)
+
+        self._flush_pending_mouse()
         e.accept()
 
     def mouseReleaseEvent(self, e):
