@@ -358,16 +358,9 @@ class VideoWidgetGL(QOpenGLWidget):
         self.texture_id = None
         self.pbo_ids = []
         self.current_pbo = 0
-
-        self._proc = psutil.Process(os.getpid())
-        self._frame_times = []
-        self._fps = 0.0
-        self._cpu = 0.0
-        self._ram = 0.0
-        self._last_stats_update = 0.0
+        self._last_frame_recv = time.time()
         self._last_mouse_ts = 0.0
         self._mouse_throttle = 0.0025
-        self._last_frame_recv = time.time()
 
     def on_clipboard_change(self):
         new_text = self.clipboard.text()
@@ -419,12 +412,7 @@ class VideoWidgetGL(QOpenGLWidget):
 
     def paintGL(self):
         glClear(GL_COLOR_BUFFER_BIT)
-        now = time.time()
-
-        has_signal = (now - self._last_frame_recv) < 2.5
         if not self.frame_data:
-            self._draw_overlay_text("Waiting for signal…" if not has_signal else "No video")
-            self._flush_pending_mouse()
             return
 
         arr, fw, fh = self.frame_data
@@ -477,6 +465,16 @@ class VideoWidgetGL(QOpenGLWidget):
 
         self.current_pbo = (self.current_pbo + 1) % len(self.pbo_ids)
 
+    def updateFrame(self, frame_tuple):
+        self.frame_data = frame_tuple
+        _, fw, fh = frame_tuple
+        if (fw, fh) != (self.texture_width, self.texture_height):
+            self.resizeTexture(fw, fh)
+        self._last_frame_recv = time.time()
+
+        now = time.time()
+        if not hasattr(self, "_frame_times"):
+            self._frame_times = []
         self._frame_times.append(now)
         if len(self._frame_times) > 90:
             self._frame_times.pop(0)
@@ -484,43 +482,7 @@ class VideoWidgetGL(QOpenGLWidget):
             diffs = [t2 - t1 for t1, t2 in zip(self._frame_times, self._frame_times[1:])]
             mean_diff = statistics.mean(diffs)
             self._fps = 1.0 / mean_diff if mean_diff > 0 else 0.0
-        if now - self._last_stats_update >= 1.0:
-            self._last_stats_update = now
-            try:
-                self._cpu = self._proc.cpu_percent(interval=None)
-                self._ram = self._proc.memory_info().rss / (1024 * 1024)
-            except Exception:
-                pass
 
-        overlay = f"FPS: {self._fps:.0f} | CPU: {self._cpu:.0f}% | RAM: {self._ram:.0f} MB"
-        if not CLIENT_STATE["connected"]:
-            overlay += " | RECONNECTING…"
-        elif CLIENT_STATE["reconnecting"]:
-            overlay += " | Weak Signal"
-        self._draw_overlay_text(overlay)
-
-        self._flush_pending_mouse()
-
-    def _draw_overlay_text(self, text):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.TextAntialiasing)
-        p.setFont(QFont("Menlo", 10, QFont.Medium))
-        rect = p.fontMetrics().boundingRect(text)
-        rect.adjust(-10, -6, 10, 6)
-        rect.moveTopRight(QPoint(self.width() - 12, 10))
-        p.setBrush(QColor(0, 0, 0, 180))
-        p.setPen(Qt.NoPen)
-        p.drawRoundedRect(rect, 8, 8)
-        p.setPen(QColor(240, 240, 240))
-        p.drawText(rect.adjusted(10, 0, 0, 0), Qt.AlignVCenter, text)
-        p.end()
-
-    def updateFrame(self, frame_tuple):
-        self.frame_data = frame_tuple
-        _, fw, fh = frame_tuple
-        if (fw, fh) != (self.texture_width, self.texture_height):
-            self.resizeTexture(fw, fh)
-        self._last_frame_recv = time.time()
         if self.isVisible():
             self.update()
 
@@ -751,7 +713,8 @@ class GamepadThread(threading.Thread):
 
 class MainWindow(QMainWindow):
     def __init__(self, decoder_opts, rwidth, rheight, host_ip, udp_port,
-                 offset_x, offset_y, net_mode='lan', parent=None, ultra=False, gamepad="disable", gamepad_dev=None):
+                 offset_x, offset_y, net_mode='lan', parent=None, ultra=False,
+                 gamepad="disable", gamepad_dev=None):
         super().__init__(parent)
         self.setWindowTitle("LinuxPlay")
         self.texture_width, self.texture_height = rwidth, rheight
@@ -788,6 +751,8 @@ class MainWindow(QMainWindow):
         self.decoder_opts = dict(decoder_opts)
         logging.debug("Decoder options: %s", self.decoder_opts)
 
+        self._proc = psutil.Process(os.getpid())
+
         self._start_decoder_thread()
         self._start_background_threads()
 
@@ -798,6 +763,10 @@ class MainWindow(QMainWindow):
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self._poll_connection_state)
         self.status_timer.start(1000)
+
+        self.stats_timer = QTimer(self)
+        self.stats_timer.timeout.connect(self._update_stats)
+        self.stats_timer.start(1000)
 
     def _start_background_threads(self):
         try:
@@ -817,15 +786,19 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logging.error(f"Clipboard listener failed: {e}")
             self._clip_thread = None
+
         self._gp_thread = None
         if self.gamepad_mode == "enable" and IS_LINUX:
             try:
                 self._gp_thread = GamepadThread(self.host_ip, UDP_GAMEPAD_PORT, self.gamepad_dev)
                 self._gp_thread.start()
-                logging.info("Controller forwarding started from %s -> %s", self.gamepad_dev or "/dev/input/event*", f"{self.host_ip}:{UDP_GAMEPAD_PORT}")
+                logging.info("Controller forwarding started from %s -> %s",
+                             self.gamepad_dev or "/dev/input/event*",
+                             f"{self.host_ip}:{UDP_GAMEPAD_PORT}")
             except Exception as e:
                 logging.error("Gamepad thread failed: %s", e)
                 self._gp_thread = None
+
     def _start_decoder_thread(self):
         self.decoder_thread = DecoderThread(self.video_url, self.decoder_opts, ultra=self.ultra)
         self.decoder_thread.frame_ready.connect(self.video_widget.updateFrame, Qt.DirectConnection)
@@ -857,6 +830,60 @@ class MainWindow(QMainWindow):
         elif age <= 6 and CLIENT_STATE["reconnecting"]:
             CLIENT_STATE["connected"], CLIENT_STATE["reconnecting"] = True, False
             logging.info("Heartbeat restored")
+
+    def _read_gpu_usage(self):
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            return f"{util.gpu}% (NVENC)"
+        except Exception:
+            pass
+
+        try:
+            for card in os.listdir("/sys/class/drm"):
+                busy_path = f"/sys/class/drm/{card}/device/gpu_busy_percent"
+                if os.path.exists(busy_path):
+                    with open(busy_path, "r") as f:
+                        val = f.read().strip()
+                        return f"{val}% (VAAPI)"
+        except Exception:
+            pass
+
+        try:
+            cmd = ["timeout", "0.5", "intel_gpu_top", "-J"]
+            out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode()
+            if '"Busy"' in out:
+                j = json.loads(out)
+                busy = j["engines"]["Render/3D/0"]["busy"]
+                return f"{busy}% (iGPU)"
+        except Exception:
+            pass
+
+        return "N/A"
+
+    def _update_stats(self):
+        try:
+            cpu = self._proc.cpu_percent(interval=None)
+            mem = self._proc.memory_info().rss / (1024 * 1024)
+            gpu = self._read_gpu_usage()
+            fps = getattr(self.video_widget, "_fps", 0.0)
+    
+            base_title = getattr(self, "_base_title", self.windowTitle().split("—")[0].strip())
+            if not hasattr(self, "_base_title"):
+                self._base_title = self.windowTitle()
+
+            status = ""
+            if not CLIENT_STATE["connected"]:
+                status = " | RECONNECTING…"
+            elif CLIENT_STATE["reconnecting"]:
+                status = " | Weak Signal"
+
+            new_title = f"{self._base_title} | FPS: {fps:.0f} | CPU: {cpu:.0f}% | RAM: {mem:.0f} MB | GPU: {gpu}{status}"
+            self.setWindowTitle(new_title)
+        except Exception as e:
+            logging.debug(f"Stats update failed: {e}")
 
     def _drain_clipboard_inbox(self):
         changed = False
@@ -934,7 +961,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logging.debug(f"GOODBYE send failed: {e}")
 
-        for timer_name in ("clip_timer", "status_timer"):
+        for timer_name in ("clip_timer", "status_timer", "stats_timer"):
             timer = getattr(self, timer_name, None)
             if timer:
                 try:
@@ -948,11 +975,13 @@ class MainWindow(QMainWindow):
                 self.decoder_thread.wait(2000)
             except Exception as e:
                 logging.debug(f"Decoder cleanup error: {e}")
+
         if getattr(self, "_gp_thread", None):
             try:
                 self._gp_thread.stop()
             except Exception:
                 pass
+
         global audio_proc
         if audio_proc:
             try:
@@ -971,15 +1000,15 @@ class MainWindow(QMainWindow):
 
 def main():
     p = argparse.ArgumentParser(description="LinuxPlay Client (Linux/Windows)")
-    p.add_argument("--decoder", choices=["none","h.264","h.265"], default="none")
+    p.add_argument("--decoder", choices=["none", "h.264", "h.265"], default="none")
     p.add_argument("--host_ip", required=True)
-    p.add_argument("--audio", choices=["enable","disable"], default="disable")
+    p.add_argument("--audio", choices=["enable", "disable"], default="disable")
     p.add_argument("--monitor", default="0", help="Index or 'all'")
-    p.add_argument("--hwaccel", choices=["auto","cpu","cuda","qsv","d3d11va","dxva2","vaapi"], default="auto")
+    p.add_argument("--hwaccel", choices=["auto", "cpu", "cuda", "qsv", "d3d11va", "dxva2", "vaapi"], default="auto")
     p.add_argument("--debug", action="store_true")
-    p.add_argument("--net", choices=["auto","lan","wifi"], default="auto")
+    p.add_argument("--net", choices=["auto", "lan", "wifi"], default="auto")
     p.add_argument("--ultra", action="store_true", help="Enable ultra-low-latency (LAN only). Auto-disabled on Wi-Fi/WAN.")
-    p.add_argument("--gamepad", choices=["enable","disable"], default="enable")
+    p.add_argument("--gamepad", choices=["enable", "disable"], default="enable")
     p.add_argument("--gamepad_dev", default=None)
     args = p.parse_args()
 
@@ -987,6 +1016,7 @@ def main():
     os.environ["__GL_SYNC_TO_VBLANK"] = "0"
     os.environ["__GL_SYNC_DISPLAY_DEVICE"] = "none"
     os.environ["QT_LOGGING_RULES"] = "qt.qpa.*=false"
+
     if IS_WINDOWS:
         os.environ["QT_OPENGL"] = "angle"
         os.environ["QT_ANGLE_PLATFORM"] = "d3d11"
@@ -1006,9 +1036,11 @@ def main():
         pass
 
     app = QApplication(sys.argv)
-    logging.basicConfig(level=(logging.DEBUG if args.debug else logging.INFO),
-                        format="%(asctime)s [%(levelname)s] %(message)s",
-                        datefmt="%H:%M:%S")
+    logging.basicConfig(
+        level=(logging.DEBUG if args.debug else logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S"
+    )
 
     ok, host_info = tcp_handshake_client(args.host_ip)
     if not ok or not host_info:
@@ -1037,10 +1069,12 @@ def main():
         parts = [p for p in monitor_info_str.split(";") if p]
         for part in parts:
             if "+" in part:
-                res, ox, oy = part.split("+"); w, h = map(int, res.split("x"))
+                res, ox, oy = part.split("+")
+                w, h = map(int, res.split("x"))
                 monitors.append((w, h, int(ox), int(oy)))
             else:
-                w, h = map(int, part.split("x")); monitors.append((w, h, 0, 0))
+                w, h = map(int, part.split("x"))
+                monitors.append((w, h, 0, 0))
         if not monitors:
             raise ValueError
     except Exception:
@@ -1071,14 +1105,15 @@ def main():
             "skip_frame": "noref",
         })
 
+    windows = []
     if args.monitor.lower() == "all":
-        windows = []
         for i, (w, h, ox, oy) in enumerate(monitors):
-            win = MainWindow(decoder_opts, w, h, args.host_ip, DEFAULT_UDP_PORT + i, ox, oy, net_mode, ultra=ultra_active, gamepad=args.gamepad, gamepad_dev=args.gamepad_dev)
-            win.setWindowTitle(f"LinuxPlay - Monitor {i}")
+            win = MainWindow(decoder_opts, w, h, args.host_ip, DEFAULT_UDP_PORT + i,
+                             ox, oy, net_mode, ultra=ultra_active,
+                             gamepad=args.gamepad, gamepad_dev=args.gamepad_dev)
+            win.setWindowTitle(f"LinuxPlay — Monitor {i}")
             win.show()
             windows.append(win)
-        ret = app.exec_()
     else:
         try:
             idx = int(args.monitor)
@@ -1087,16 +1122,14 @@ def main():
         if idx < 0 or idx >= len(monitors):
             idx = 0
         w, h, ox, oy = monitors[idx]
-        win = MainWindow(decoder_opts, w, h, args.host_ip, DEFAULT_UDP_PORT + idx, ox, oy, net_mode, ultra=ultra_active, gamepad=args.gamepad, gamepad_dev=args.gamepad_dev)
-        win.setWindowTitle(f"LinuxPlay - Monitor {idx}")
+        win = MainWindow(decoder_opts, w, h, args.host_ip, DEFAULT_UDP_PORT + idx,
+                         ox, oy, net_mode, ultra=ultra_active,
+                         gamepad=args.gamepad, gamepad_dev=args.gamepad_dev)
+        win.setWindowTitle(f"LinuxPlay — Monitor {idx}")
         win.show()
-        ret = app.exec_()
+        windows.append(win)
 
-    if audio_proc:
-        try:
-            audio_proc.terminate()
-        except Exception as e:
-            logging.error("ffplay term error: %s", e)
+    ret = app.exec_()
     sys.exit(ret)
 
 if __name__ == "__main__":
