@@ -143,6 +143,19 @@ def detect_network_mode(host_ip: str) -> str:
     except Exception:
         return "lan"
 
+def _read_pem_cert_fingerprint(pem_path: str) -> str:
+    import re, base64, hashlib
+    from pathlib import Path as _P
+    try:
+        data = _P(pem_path).read_text(encoding="utf-8")
+        m = re.search(r"-----BEGIN CERTIFICATE-----\s+([A-Za-z0-9+/=\s]+?)\s+-----END CERTIFICATE-----", data, re.S)
+        if not m:
+            return ""
+        der = base64.b64decode("".join(m.group(1).split()))
+        return hashlib.sha256(der).hexdigest().upper()
+    except Exception:
+        return ""
+
 def tcp_handshake_client(host_ip, pin=None):
     from PyQt5.QtWidgets import QLineEdit
 
@@ -151,6 +164,34 @@ def tcp_handshake_client(host_ip, pin=None):
     try:
         logging.info("Handshake to %s:%s", host_ip, TCP_HANDSHAKE_PORT)
         sock.connect((host_ip, TCP_HANDSHAKE_PORT))
+        try:
+            here = os.path.dirname(os.path.abspath(__file__))
+            cert_path = os.path.join(here, 'client_cert.pem')
+            key_path  = os.path.join(here, 'client_key.pem')
+        except Exception:
+            cert_path = 'client_cert.pem'; key_path = 'client_key.pem'
+        if os.path.exists(cert_path) and os.path.exists(key_path):
+            fp_hex = _read_pem_cert_fingerprint(cert_path)
+            if fp_hex:
+                try:
+                    sock.sendall(f'HELLO CERTFP:{fp_hex}'.encode('utf-8'))
+                    resp = sock.recv(1024).decode('utf-8', errors='replace').strip()
+                    logging.debug('Cert handshake response: %s', resp)
+                    if resp.startswith('OK:'):
+                        parts = resp.split(':', 2)
+                        host_encoder = parts[1].strip()
+                        monitor_info = parts[2].strip() if len(parts) > 2 else DEFAULT_RESOLUTION
+                        sock.close()
+                        CLIENT_STATE['connected'] = True
+                        CLIENT_STATE['last_heartbeat'] = time.time()
+                        logging.info('Authenticated via client certificate (FP %s…) — PIN skipped', fp_hex[:12])
+                        return (True, (host_encoder, monitor_info))
+                    elif resp.startswith('FAIL:UNTRUSTEDCERT'):
+                        logging.warning('Client cert not yet trusted by host — falling back to PIN.')
+                    else:
+                        logging.warning('Unexpected response to CERTFP auth (%s) — falling back to PIN', resp)
+                except Exception as _e:
+                    logging.debug('CERTFP path failed: %s — falling back to PIN', _e)
 
         code = (pin or "").strip()
         if not code or len(code) != 6 or not code.isdigit():
