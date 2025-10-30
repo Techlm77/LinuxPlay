@@ -1,34 +1,29 @@
 #!/usr/bin/env python3
-import sys
 import os
-import argparse
-import logging
+import sys
+import mmap
+import ctypes
+import struct
 import socket
+import shutil
+import psutil
 import time
+import json
 import threading
+import statistics
 import subprocess
 import platform as py_platform
-import psutil
-import statistics
-import shutil
-import json
-import av
 import numpy as np
-import struct
+import av
+import logging
+import argparse
 
+from queue import Queue
 from PyQt5.QtWidgets import QApplication, QMainWindow, QMessageBox, QOpenGLWidget
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QPoint
 from PyQt5.QtGui import QSurfaceFormat, QPainter, QFont, QColor
-from OpenGL.GL import *
-from queue import Queue
 
-try:
-    HERE = os.path.dirname(os.path.abspath(__file__))
-    ffbin = os.path.join(HERE, "ffmpeg", "bin")
-    if os.name == "nt" and os.path.exists(os.path.join(ffbin, "ffmpeg.exe")):
-        os.environ["PATH"] = ffbin + os.pathsep + os.environ.get("PATH", "")
-except Exception:
-    pass
+from OpenGL.GL import *
 
 DEFAULT_UDP_PORT = 5000
 CONTROL_PORT = 7000
@@ -52,6 +47,35 @@ CLIENT_STATE = {
     "net_mode": "lan",
     "reconnecting": False
 }
+
+try:
+    HERE = os.path.dirname(os.path.abspath(__file__))
+    ffbin = os.path.join(HERE, "ffmpeg", "bin")
+
+    if os.name == "nt":
+        ffmpeg_exe = os.path.join(ffbin, "ffmpeg.exe")
+        if os.path.exists(ffmpeg_exe):
+            os.environ["PATH"] = ffbin + os.pathsep + os.environ.get("PATH", "")
+    else:
+        ffmpeg_bin = os.path.join(ffbin, "ffmpeg")
+        if os.path.exists(ffmpeg_bin):
+            os.environ["PATH"] = ffbin + os.pathsep + os.environ.get("PATH", "")
+except Exception as e:
+    logging.debug(f"FFmpeg path init failed: {e}")
+
+def _probe_hardware_capabilities():
+    try:
+        import importlib.util
+        vk_spec = importlib.util.find_spec("vulkan")
+        vk_available = vk_spec is not None
+    except Exception:
+        vk_available = False
+
+    gbm_exists = any(os.path.exists(p) for p in ("/dev/dri/renderD128", "/dev/dri/renderD129"))
+    kms_exists = any(os.path.exists(p) for p in ("/dev/dri/card0", "/dev/dri/card1"))
+    logging.info(f"Hardware paths: GBM={gbm_exists}, KMS={kms_exists}, Vulkan={vk_available}")
+
+_probe_hardware_capabilities()
 
 def ffmpeg_hwaccels():
     try:
@@ -246,6 +270,7 @@ class DecoderThread(QThread):
         self._restart_delay = 0.5
         self._last_error = ""
         self._has_first_frame = False
+        self._hw_name = None
 
     def _open_container(self):
         logging.debug("Opening stream with opts: %s", self.decoder_opts)
@@ -261,14 +286,69 @@ class DecoderThread(QThread):
                     logging.warning("No video stream detected, retrying...")
                     time.sleep(0.5)
                     continue
-
+                    
                 cc = vstream.codec_context
                 cc.thread_count = 1 if self.ultra else 2
+
+                for attr, value in (
+                    ("low_delay", True),
+                    ("skip_frame", "NONREF"),
+                    ("has_b_frames", False),
+                    ("strict_std_compliance", "experimental"),
+                    ("framerate", None),
+                    ("delay", 0),
+                ):
+                    try:
+                        setattr(cc, attr, value)
+                    except Exception:
+                        pass
+
                 try:
-                    cc.low_delay = True
-                    cc.skip_frame = "NONREF"
+                    cc.flags2 = "+fast"
                 except Exception:
                     pass
+
+                hw_device = getattr(cc, "hw_device_ctx", None)
+                if hw_device is None and "hwaccel" in self.decoder_opts:
+                    hw_type = self.decoder_opts["hwaccel"]
+                    dev = self.decoder_opts.get("hwaccel_device", None)
+
+                    hw_type_map = {
+                        "vaapi": "vaapi",
+                        "nvdec": "cuda",
+                        "cuda": "cuda",
+                        "qsv": "qsv",
+                        "d3d11va": "d3d11va",
+                        "dxva2": "dxva2",
+                    }
+                    hw_type_norm = hw_type_map.get(hw_type, hw_type)
+
+                    try:
+                        if hasattr(av, "HwDeviceContext"):
+                            if not dev:
+                                if hw_type_norm == "vaapi":
+                                    dev = "/dev/dri/renderD128"
+                                elif hw_type_norm in ("cuda", "nvdec"):
+                                    dev = "cuda"
+                                else:
+                                    dev = None
+                            hw_ctx = av.HwDeviceContext.create(hw_type_norm, device=dev)
+                            cc.hw_device_ctx = hw_ctx
+                            self._hw_name = hw_type_norm
+                            logging.info(f"DecoderThread: Using hardware decode via {hw_type_norm} ({dev or 'auto'})")
+                        else:
+                            logging.warning(f"PyAV build lacks HwDeviceContext; using software decode for {hw_type_norm}.")
+                            self._hw_name = "CPU"
+                            self.decoder_opts.pop("hwaccel", None)
+                            self.decoder_opts.pop("hwaccel_device", None)
+                    except Exception as e:
+                        logging.warning(f"Hardware decode init failed for {hw_type_norm}: {e}")
+                        self._hw_name = "CPU"
+                        self.decoder_opts.pop("hwaccel", None)
+                        self.decoder_opts.pop("hwaccel_device", None)
+
+                hw_frames = None
+                t_decode = []
 
                 for frame in container.decode(video=0):
                     if not self._running:
@@ -277,12 +357,29 @@ class DecoderThread(QThread):
                         continue
 
                     t0 = time.perf_counter()
-                    arr = frame.to_ndarray(format="rgb24")
-                    if not arr.flags["C_CONTIGUOUS"]:
-                        arr = np.ascontiguousarray(arr, dtype=np.uint8)
+                    dmabuf_fd = None
 
-                    self._has_first_frame = True
-                    self.frame_ready.emit((arr, frame.width, frame.height))
+                    try:
+                        if frame.hw_frames_ctx:
+                            hw_frames = frame.hw_frames_ctx
+                        if hasattr(frame, "planes") and frame.planes:
+                            p = frame.planes[0]
+                            if hasattr(p, "fd"):
+                                dmabuf_fd = p.fd
+                            elif hasattr(p, "buffer_ptr") and isinstance(p.buffer_ptr, int):
+                                dmabuf_fd = p.buffer_ptr
+                    except Exception:
+                        dmabuf_fd = None
+
+                    if dmabuf_fd is not None:
+                        self._has_first_frame = True
+                        self.frame_ready.emit(("dmabuf", dmabuf_fd, frame.width, frame.height))
+                    else:
+                        arr = frame.to_ndarray(format="rgb24")
+                        if not arr.flags["C_CONTIGUOUS"]:
+                            arr = np.ascontiguousarray(arr, dtype=np.uint8)
+                        self._has_first_frame = True
+                        self.frame_ready.emit((arr, frame.width, frame.height))
 
                     t1 = time.perf_counter()
                     self._frame_count += 1
@@ -291,6 +388,13 @@ class DecoderThread(QThread):
                         0.9 * self._avg_decode_time + 0.1 * decode_time
                         if self._frame_count > 1 else decode_time
                     )
+
+                    if len(t_decode) < 120:
+                        t_decode.append(decode_time)
+                    else:
+                        avg = statistics.mean(t_decode)
+                        logging.debug(f"Avg decode time: {avg:.2f} ms ({self._hw_name or 'CPU'})")
+                        t_decode.clear()
 
                     if self._emit_interval > 0:
                         elapsed = time.time() - self._last_emit
@@ -332,6 +436,220 @@ class DecoderThread(QThread):
         self._running = False
         time.sleep(0.05)
 
+class RenderBackend:
+    def render_frame(self, frame_tuple):
+        pass
+    def is_valid(self):
+        return False
+    def name(self):
+        return "unknown"
+
+class RenderKMSDRM(RenderBackend):
+    def __init__(self):
+        self.valid = False
+        self.fd = None
+        self.gbm = None
+        self.bo = None
+        self.map = None
+        self.stride = 0
+        self.width = 0
+        self.height = 0
+        self.device_path = None
+
+        for node in ("/dev/dri/renderD128", "/dev/dri/renderD129", "/dev/dri/card0", "/dev/dri/card1"):
+            if os.path.exists(node) and os.access(node, os.W_OK):
+                try:
+                    self.fd = os.open(node, os.O_RDWR | os.O_CLOEXEC)
+                    self.device_path = node
+                    self.valid = True
+                    break
+                except Exception:
+                    continue
+
+        if not self.valid:
+            logging.debug("KMSDRM: no accessible DRM device found.")
+            return
+
+        try:
+            self.libgbm = ctypes.CDLL("libgbm.so.1")
+
+            self.libgbm.gbm_create_device.argtypes = [ctypes.c_int]
+            self.libgbm.gbm_create_device.restype = ctypes.c_void_p
+
+            self.libgbm.gbm_bo_create.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                                                  ctypes.c_uint32, ctypes.c_uint32]
+            self.libgbm.gbm_bo_create.restype = ctypes.c_void_p
+
+            self.libgbm.gbm_bo_get_stride.argtypes = [ctypes.c_void_p]
+            self.libgbm.gbm_bo_get_stride.restype = ctypes.c_uint32
+
+            self.libgbm.gbm_bo_destroy.argtypes = [ctypes.c_void_p]
+            self.libgbm.gbm_device_destroy.argtypes = [ctypes.c_void_p]
+
+            self.gbm = self.libgbm.gbm_create_device(self.fd)
+            if not self.gbm:
+                raise RuntimeError("gbm_create_device() failed")
+
+            self.valid = True
+            logging.info(f"KMSDRM initialized (safe render-node) via {self.device_path}")
+        except Exception as e:
+            logging.debug(f"KMSDRM init failed: {e}")
+            self.valid = False
+
+    def is_valid(self):
+        return self.valid
+
+    def name(self):
+        return "KMSDRM"
+
+    def _alloc_bo(self, w, h):
+        if not self.valid or not self.gbm:
+            return
+        try:
+            if self.bo:
+                self.libgbm.gbm_bo_destroy(self.bo)
+                self.bo = None
+
+            DRM_FORMAT_ARGB8888 = 0x34325241
+            GBM_BO_USE_RENDERING = 1 << 1
+
+            self.bo = self.libgbm.gbm_bo_create(self.gbm, w, h, DRM_FORMAT_ARGB8888, GBM_BO_USE_RENDERING)
+            if not self.bo:
+                raise RuntimeError("gbm_bo_create() failed")
+
+            self.stride = self.libgbm.gbm_bo_get_stride(self.bo)
+            size = self.stride * h
+
+            if self.map:
+                self.map.close()
+            self.map = mmap.mmap(self.fd, size, mmap.MAP_SHARED,
+                                 mmap.PROT_READ | mmap.PROT_WRITE, offset=0)
+            self.width, self.height = w, h
+            logging.debug(f"KMSDRM GBM buffer {w}x{h} stride={self.stride}")
+        except Exception as e:
+            logging.debug(f"KMSDRM alloc failed: {e}")
+            self.valid = False
+
+    def _import_dmabuf(self, fd, w, h):
+        try:
+            size = w * h * 4
+            with mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ) as buf:
+                data = buf.read(size)
+            logging.debug(f"KMSDRM: imported dmabuf FD={fd} ({w}x{h})")
+            return np.frombuffer(data, dtype=np.uint8).reshape(h, w, 4)
+        except Exception as e:
+            logging.debug(f"KMSDRM: dmabuf import failed: {e}")
+            return None
+
+    def render_frame(self, frame_tuple):
+        if not self.valid:
+            return
+        t0 = time.perf_counter()
+        try:
+            is_dmabuf = (
+                isinstance(frame_tuple, tuple)
+                and len(frame_tuple) == 4
+                and isinstance(frame_tuple[0], str)
+                and frame_tuple[0] == "dmabuf"
+            )
+
+            if is_dmabuf:
+                _, fd, w, h = frame_tuple
+                w, h = int(w), int(h)
+                arr = self._import_dmabuf(fd, w, h)
+                if not isinstance(arr, np.ndarray) or arr.size == 0:
+                    return
+            else:
+                arr, w, h = frame_tuple
+                w, h = int(w), int(h)
+                if not isinstance(arr, np.ndarray) or arr.size == 0:
+                    return
+
+            cur_w = int(getattr(self, "width", 0) or 0)
+            cur_h = int(getattr(self, "height", 0) or 0)
+            if (w != cur_w) or (h != cur_h):
+                self._alloc_bo(w, h)
+
+            data = np.ascontiguousarray(arr, dtype=np.uint8)
+            if self.map and hasattr(self.map, "write"):
+                self.map.seek(0)
+                self.map.write(data.tobytes())
+
+            dt = (time.perf_counter() - t0) * 1000.0
+            logging.debug(f"KMSDRM upload {w}x{h} ({data.nbytes/1024/1024:.2f} MB) in {dt:.2f} ms to {self.device_path}")
+        except Exception as e:
+            logging.debug(f"KMSDRM render error: {e}")
+
+class RenderVulkan(RenderBackend):
+    def __init__(self):
+        try:
+            import vulkan as vk
+            self.valid = True
+        except Exception:
+            self.valid = False
+
+    def is_valid(self):
+        return self.valid
+
+    def name(self):
+        return "Vulkan"
+
+    def render_frame(self, frame_tuple):
+        try:
+            if isinstance(frame_tuple, tuple) and len(frame_tuple) == 4 and isinstance(frame_tuple[0], str) and frame_tuple[0] == "dmabuf":
+                return
+            arr, w, h = frame_tuple
+            if not isinstance(arr, np.ndarray) or arr.size == 0:
+                return
+            t0 = time.perf_counter()
+            _ = np.mean(arr)
+            dt = (time.perf_counter() - t0) * 1000.0
+            logging.debug(f"Vulkan simulated render {int(w)}x{int(h)} in {dt:.2f} ms")
+        except Exception as e:
+            logging.debug(f"Vulkan render error: {e}")
+
+class RenderOpenGL(RenderBackend):
+    def __init__(self):
+        self.valid = True
+
+    def is_valid(self):
+        return self.valid
+
+    def name(self):
+        return "OpenGL"
+
+    def render_frame(self, frame_tuple):
+        try:
+            if isinstance(frame_tuple, tuple) and len(frame_tuple) == 4 and isinstance(frame_tuple[0], str) and frame_tuple[0] == "dmabuf":
+                return
+            arr, w, h = frame_tuple
+            if not isinstance(arr, np.ndarray) or arr.size == 0:
+                return
+            t0 = time.perf_counter()
+            _ = np.mean(arr)
+            dt = (time.perf_counter() - t0) * 1000.0
+            logging.debug(f"OpenGL simulated render {int(w)}x{int(h)} in {dt:.2f} ms")
+        except Exception as e:
+            logging.debug(f"OpenGL render error: {e}")
+
+def pick_best_renderer():
+    renderers = (RenderKMSDRM, RenderVulkan, RenderOpenGL)
+    selected = None
+    for renderer_cls in renderers:
+        r = renderer_cls()
+        logging.debug(f"Trying renderer: {r.name()} (valid={r.is_valid()})")
+        if r.is_valid():
+            selected = r
+            logging.info(f"Renderer selected: {r.name()}")
+            if hasattr(r, "device_path") and r.device_path:
+                logging.info(f"Using device path: {r.device_path}")
+            break
+
+    if not selected:
+        logging.warning("No GPU renderer found, using dummy software renderer.")
+        selected = RenderBackend()
+    return selected
+
 class VideoWidgetGL(QOpenGLWidget):
     def __init__(self, control_callback, rwidth, rheight, offset_x, offset_y, host_ip, parent=None):
         super().__init__(parent)
@@ -361,6 +679,28 @@ class VideoWidgetGL(QOpenGLWidget):
         self._last_frame_recv = time.time()
         self._last_mouse_ts = 0.0
         self._mouse_throttle = 0.0025
+
+        if not logging.getLogger().hasHandlers():
+            logging.basicConfig(level=logging.DEBUG,
+                                format="%(asctime)s [%(levelname)s] %(message)s",
+                                datefmt="%H:%M:%S")
+
+        logging.info("────────────────────────────────────────────")
+        logging.info("Renderer Initialization Summary")
+        logging.info(f"Session type: {os.environ.get('XDG_SESSION_TYPE', 'unknown')}")
+        logging.info(f"Desktop: {os.environ.get('XDG_CURRENT_DESKTOP', 'unknown')}")
+        logging.info(f"Display server: {os.environ.get('WAYLAND_DISPLAY') or os.environ.get('DISPLAY', 'n/a')}")
+        for node in ("/dev/dri/renderD128", "/dev/dri/renderD129", "/dev/dri/card0", "/dev/dri/card1"):
+            exists = "✅" if os.path.exists(node) else "❌"
+            access = "🟢" if os.access(node, os.W_OK) else "🔴"
+            logging.info(f"  {node:<20} exists={exists} access={access}")
+        logging.info("Renderer priority order: KMSDRM → Vulkan → OpenGL")
+
+        self.renderer = pick_best_renderer()
+        logging.info(f"Using render backend: {self.renderer.name()}")
+        if hasattr(self.renderer, "device_path") and self.renderer.device_path:
+            logging.info(f"Bound to device: {self.renderer.device_path}")
+        logging.info("────────────────────────────────────────────")
 
     def on_clipboard_change(self):
         new_text = self.clipboard.text()
@@ -411,12 +751,11 @@ class VideoWidgetGL(QOpenGLWidget):
             self._pending_resize = (w, h)
 
     def paintGL(self):
-        glClear(GL_COLOR_BUFFER_BIT)
         if not self.frame_data:
+            glClear(GL_COLOR_BUFFER_BIT)
             return
 
         arr, fw, fh = self.frame_data
-
         if self._pending_resize:
             w, h = self._pending_resize
             self._initialize_texture(w, h)
@@ -424,22 +763,14 @@ class VideoWidgetGL(QOpenGLWidget):
 
         data = np.ascontiguousarray(arr, dtype=np.uint8)
         size = data.nbytes
-
         current_pbo = self.pbo_ids[self.current_pbo]
+
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, current_pbo)
-        try:
-            ptr = glMapBufferRange(
-                GL_PIXEL_UNPACK_BUFFER, 0, size,
-                GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT | GL_MAP_UNSYNCHRONIZED_BIT
-            )
-            if ptr:
-                from ctypes import memmove, c_void_p
-                memmove(c_void_p(ptr), data.ctypes.data, size)
-                glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER)
-            else:
-                glBufferSubData(GL_PIXEL_UNPACK_BUFFER, 0, data)
-        except Exception:
-            pass
+        glBufferData(GL_PIXEL_UNPACK_BUFFER, size, None, GL_STREAM_DRAW)
+        ptr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY)
+        if ptr:
+            ctypes.memmove(ptr, data.ctypes.data, size)
+            glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER)
 
         glBindTexture(GL_TEXTURE_2D, self.texture_id)
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
@@ -453,6 +784,7 @@ class VideoWidgetGL(QOpenGLWidget):
         else:
             sx, sy = 1.0, (aspect_win / aspect_tex)
 
+        glClear(GL_COLOR_BUFFER_BIT)
         glEnable(GL_TEXTURE_2D)
         glBegin(GL_QUADS)
         glTexCoord2f(0.0, 1.0); glVertex2f(-sx, -sy)
@@ -462,6 +794,7 @@ class VideoWidgetGL(QOpenGLWidget):
         glEnd()
         glDisable(GL_TEXTURE_2D)
         glBindTexture(GL_TEXTURE_2D, 0)
+        glFlush()
 
         self.current_pbo = (self.current_pbo + 1) % len(self.pbo_ids)
 
@@ -483,8 +816,16 @@ class VideoWidgetGL(QOpenGLWidget):
             mean_diff = statistics.mean(diffs)
             self._fps = 1.0 / mean_diff if mean_diff > 0 else 0.0
 
+        try:
+            self.renderer.render_frame(frame_tuple)
+        except Exception as e:
+            logging.debug(f"Renderer {self.renderer.name()} failed: {e}")
+
         if self.isVisible():
-            self.update()
+            t = time.time()
+            if not hasattr(self, "_last_draw") or (t - getattr(self, "_last_draw", 0)) > (1/240):
+                self._last_draw = t
+                self.update()
 
     def _flush_pending_mouse(self):
         if not hasattr(self, "_pending_mouse") or self._pending_mouse is None:
@@ -723,6 +1064,7 @@ class MainWindow(QMainWindow):
         self._running, self._restarts = True, 0
         self.gamepad_mode = gamepad
         self.gamepad_dev = gamepad_dev
+
         self.control_addr = (host_ip, CONTROL_PORT)
         self.control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.control_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -755,7 +1097,9 @@ class MainWindow(QMainWindow):
 
         self._start_decoder_thread()
         self._start_background_threads()
+        self._start_timers()
 
+    def _start_timers(self):
         self.clip_timer = QTimer(self)
         self.clip_timer.timeout.connect(self._drain_clipboard_inbox)
         self.clip_timer.start(10)
@@ -869,18 +1213,21 @@ class MainWindow(QMainWindow):
             mem = self._proc.memory_info().rss / (1024 * 1024)
             gpu = self._read_gpu_usage()
             fps = getattr(self.video_widget, "_fps", 0.0)
-    
-            base_title = getattr(self, "_base_title", self.windowTitle().split("—")[0].strip())
-            if not hasattr(self, "_base_title"):
-                self._base_title = self.windowTitle()
+            renderer_name = getattr(self.video_widget.renderer, "name", lambda: "Unknown")()
+            device_info = getattr(self.video_widget.renderer, "device_path", None)
+            backend = f"{renderer_name} ({os.path.basename(device_info)})" if device_info else renderer_name
 
+            base_title = "LinuxPlay"
             status = ""
             if not CLIENT_STATE["connected"]:
                 status = " | RECONNECTING…"
             elif CLIENT_STATE["reconnecting"]:
                 status = " | Weak Signal"
 
-            new_title = f"{self._base_title} | FPS: {fps:.0f} | CPU: {cpu:.0f}% | RAM: {mem:.0f} MB | GPU: {gpu}{status}"
+            new_title = (
+                f"{base_title} — {backend} | "
+                f"FPS: {fps:.0f} | CPU: {cpu:.0f}% | RAM: {mem:.0f} MB | GPU: {gpu}{status}"
+            )
             self.setWindowTitle(new_title)
         except Exception as e:
             logging.debug(f"Stats update failed: {e}")
@@ -999,6 +1346,10 @@ class MainWindow(QMainWindow):
         event.accept()
 
 def main():
+    import os, sys, argparse, psutil, time, logging
+    from PyQt5.QtWidgets import QApplication, QMessageBox
+    from PyQt5.QtGui import QSurfaceFormat
+
     p = argparse.ArgumentParser(description="LinuxPlay Client (Linux/Windows)")
     p.add_argument("--decoder", choices=["none", "h.264", "h.265"], default="none")
     p.add_argument("--host_ip", required=True)
@@ -1012,10 +1363,9 @@ def main():
     p.add_argument("--gamepad_dev", default=None)
     args = p.parse_args()
 
-    os.environ["vblank_mode"] = "0"
-    os.environ["__GL_SYNC_TO_VBLANK"] = "0"
-    os.environ["__GL_SYNC_DISPLAY_DEVICE"] = "none"
-    os.environ["QT_LOGGING_RULES"] = "qt.qpa.*=false"
+    for var in list(os.environ):
+        if var.startswith(("MESA_", "LIBGL_", "__GL_", "QT_LOGGING", "vblank_mode")):
+            del os.environ[var]
 
     if IS_WINDOWS:
         os.environ["QT_OPENGL"] = "angle"
@@ -1029,18 +1379,42 @@ def main():
     fmt.setSwapBehavior(QSurfaceFormat.SingleBuffer)
     QSurfaceFormat.setDefaultFormat(fmt)
 
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
     try:
         ps = psutil.Process(os.getpid())
         ps.nice(-5)
     except Exception:
         pass
 
+    LOG_LEVEL = logging.DEBUG if args.debug else logging.INFO
+    LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+    LOG_DATEFMT = "%H:%M:%S"
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(LOG_LEVEL)
+    for h in list(root_logger.handlers):
+        root_logger.removeHandler(h)
+
+    console = logging.StreamHandler(sys.stdout)
+    console.setLevel(LOG_LEVEL)
+    console.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATEFMT))
+    root_logger.addHandler(console)
+
+    try:
+        file_handler = logging.FileHandler("linuxplay_client.log", mode="w", encoding="utf-8")
+        file_handler.setLevel(LOG_LEVEL)
+        file_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATEFMT))
+        root_logger.addHandler(file_handler)
+    except Exception:
+        pass
+
+    logging.info("────────────────────────────────────────────")
+    logging.info("LinuxPlay Client starting up")
+    logging.info(f"Python: {sys.version.split()[0]}, Platform: {sys.platform}")
+    logging.info("────────────────────────────────────────────")
+
     app = QApplication(sys.argv)
-    logging.basicConfig(
-        level=(logging.DEBUG if args.debug else logging.INFO),
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S"
-    )
 
     ok, host_info = tcp_handshake_client(args.host_ip)
     if not ok or not host_info:
@@ -1062,7 +1436,7 @@ def main():
     if args.ultra and not ultra_active:
         logging.info("Ultra requested but disabled on %s; using safe buffering.", net_mode)
     elif ultra_active:
-        logging.info("⚡ Ultra mode enabled (LAN): minimal buffering, no B-frame reordering.")
+        logging.info("Ultra mode enabled (LAN): minimal buffering, no B-frame reordering.")
 
     try:
         monitors = []
@@ -1085,7 +1459,7 @@ def main():
     chosen = args.hwaccel
     if chosen == "auto":
         chosen = choose_auto_hwaccel()
-    logging.info("HW accel selected: %s", chosen)
+    logging.info(f"HW accel selected: {chosen}")
 
     decoder_opts = {}
     if chosen != "cpu":
@@ -1130,6 +1504,13 @@ def main():
         windows.append(win)
 
     ret = app.exec_()
+
+    try:
+        if audio_proc:
+            audio_proc.terminate()
+    except Exception as e:
+        logging.error("ffplay term error: %s", e)
+
     sys.exit(ret)
 
 if __name__ == "__main__":
