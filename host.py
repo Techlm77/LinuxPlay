@@ -4,6 +4,7 @@ import subprocess
 import argparse
 import sys
 import logging
+import json
 import time
 import threading
 import psutil
@@ -11,6 +12,7 @@ import socket
 import atexit
 import signal
 import struct
+import datetime
 import platform as py_platform
 
 from shutil import which
@@ -29,6 +31,7 @@ FILE_UPLOAD_PORT = 7003
 UDP_HEARTBEAT_PORT = 7004
 UDP_GAMEPAD_PORT = 7005
 UDP_AUDIO_PORT = 6001
+
 ACTIVE_CLIENT = None
 ACTIVE_CLIENT_LOCK = threading.Lock()
 PIN_LENGTH = 6
@@ -44,6 +47,147 @@ IS_LINUX   = py_platform.system() == "Linux"
 HEARTBEAT_INTERVAL = 1.0
 HEARTBEAT_TIMEOUT  = 10.0
 RECONNECT_COOLDOWN = 2.0
+
+try:
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives import serialization, hashes
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.backends import default_backend
+    HAVE_CRYPTO = True
+except Exception:
+    HAVE_CRYPTO = False
+
+CA_CERT = "host_ca.pem"
+CA_KEY  = "host_ca.key"
+TRUSTED_DB = "trusted_clients.json"
+
+def _ensure_ca():
+    if not HAVE_CRYPTO:
+        logging.warning("[AUTH] cryptography not available; certificate auth disabled.")
+        return False
+    if os.path.exists(CA_CERT) and os.path.exists(CA_KEY):
+        return True
+    try:
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, u"LinuxPlay Host CA")])
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.datetime.utcnow())
+            .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=3650))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(key, hashes.SHA256())
+        )
+        with open(CA_KEY, "wb") as f:
+            f.write(key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            ))
+        with open(CA_CERT, "wb") as f:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
+        logging.info("[AUTH] Created new host CA (host_ca.pem / host_ca.key)")
+        return True
+    except Exception as e:
+        logging.error("[AUTH] Failed to create CA: %s", e)
+        return False
+
+def _load_trust_db():
+    db = {"trusted_clients": []}
+    try:
+        if os.path.exists(TRUSTED_DB):
+            with open(TRUSTED_DB, "r", encoding="utf-8") as f:
+                db = json.load(f)
+    except Exception:
+        pass
+    return db
+
+def _save_trust_db(db):
+    try:
+        with open(TRUSTED_DB, "w", encoding="utf-8") as f:
+            json.dump(db, f, indent=2)
+        return True
+    except Exception as e:
+        logging.error("[AUTH] Failed to write %s: %s", TRUSTED_DB, e)
+        return False
+
+def _trust_record_for(fp_hex, db):
+    for rec in db.get("trusted_clients", []):
+        if rec.get("fingerprint") == fp_hex:
+            return rec
+    return None
+
+def _verify_fingerprint_trusted(fp_hex):
+    db = _load_trust_db()
+    rec = _trust_record_for(fp_hex, db)
+    return (rec is not None) and (rec.get("status") == "trusted")
+
+def _issue_client_cert(client_name="linuxplay-client", export_hint_ip=""):
+    if not _ensure_ca():
+        return None
+
+    try:
+        with open(CA_KEY, "rb") as f:
+            ca_key = serialization.load_pem_private_key(f.read(), password=None, backend=default_backend())
+        with open(CA_CERT, "rb") as f:
+            ca_cert = x509.load_pem_x509_certificate(f.read(), default_backend())
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, client_name)])
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(ca_cert.subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.datetime.utcnow())
+            .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=1825))
+            .sign(ca_key, hashes.SHA256())
+        )
+
+        cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+        key_pem = key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+
+        fp_hex = cert.fingerprint(hashes.SHA256()).hex().upper()
+
+        db = _load_trust_db()
+        if _trust_record_for(fp_hex, db) is None:
+            now = datetime.datetime.utcnow().isoformat() + "Z"
+            db.setdefault("trusted_clients", []).append({
+                "fingerprint": fp_hex,
+                "common_name": client_name,
+                "issued_on": now,
+                "trusted_since": now,
+                "last_seen": now,
+                "status": "trusted"
+            })
+            _save_trust_db(db)
+
+        stamp = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        export_dir = os.path.join("issued_clients", f"{stamp}_{export_hint_ip or 'client'}")
+        os.makedirs(export_dir, exist_ok=True)
+        with open(os.path.join(export_dir, "client_cert.pem"), "wb") as f: f.write(cert_pem)
+        with open(os.path.join(export_dir, "client_key.pem"), "wb") as f: f.write(key_pem)
+        try:
+            with open(CA_CERT, "rb") as f: ca_pem = f.read()
+            with open(os.path.join(export_dir, "host_ca.pem"), "wb") as f: f.write(ca_pem)
+        except Exception:
+            pass
+
+        logging.info("[AUTH] Issued client cert '%s' (FP %s…), exported to %s",
+                     client_name, fp_hex[:12], export_dir)
+        return {"fingerprint": fp_hex, "export_dir": export_dir, "cert_pem": cert_pem}
+    except Exception as e:
+        logging.error("[AUTH] Issue client cert failed: %s", e)
+        return None
 
 def _marker_value() -> str:
     marker = os.environ.get("LINUXPLAY_MARKER", "LinuxPlayHost")
@@ -996,6 +1140,8 @@ def tcp_handshake_server(sock, encoder_str, args):
     logging.info("TCP handshake server on %d", TCP_HANDSHAKE_PORT)
     set_status("Waiting for client handshake…")
 
+    _ensure_ca()
+
     while not host_state.should_terminate:
         try:
             conn, addr = sock.accept()
@@ -1010,12 +1156,59 @@ def tcp_handshake_server(sock, encoder_str, args):
                 if peer_ip != host_state.authed_client_ip:
                     logging.warning(f"Rejected handshake from {peer_ip}: active session with {host_state.authed_client_ip}")
                     try:
-                        conn.sendall(b"BUSY")
+                        conn.sendall(b"BUSY:ACTIVESESSION")
                         conn.shutdown(socket.SHUT_WR)
                         time.sleep(0.05)
                     except Exception:
                         pass
                     conn.close()
+                    continue
+
+            if cmd == "HELLO" and len(parts) >= 2 and parts[1].startswith("CERTFP:"):
+                fp_hex = parts[1][len("CERTFP:"):].strip().upper()
+
+                if host_state.session_active:
+                    try:
+                        conn.sendall(b"BUSY:ACTIVESESSION")
+                        conn.shutdown(socket.SHUT_WR)
+                        time.sleep(0.05)
+                    except Exception:
+                        pass
+                    conn.close()
+                    logging.warning(f"[AUTH] Rejected CERTFP client {peer_ip} — active session already running.")
+                    continue
+
+                if fp_hex and _verify_fingerprint_trusted(fp_hex):
+                    host_state.session_active = True
+                    host_state.authed_client_ip = peer_ip
+                    host_state.pin_expiry = 0
+                    host_state.pin_paused = True
+                    host_state.last_pong_ts = time.time()
+                    host_state.client_ip = peer_ip
+
+                    monitors_str = ";".join(
+                        f"{w}x{h}+{ox}+{oy}" for (w, h, ox, oy) in host_state.monitors
+                    ) if host_state.monitors else DEFAULT_RES
+                    resp = f"OK:{encoder_str}:{monitors_str}"
+                    try:
+                        conn.sendall(resp.encode("utf-8"))
+                        conn.shutdown(socket.SHUT_WR)
+                        time.sleep(0.05)
+                    finally:
+                        conn.close()
+
+                    set_status(f"Client (cert): {host_state.client_ip}")
+                    logging.info(f"[AUTH] Client {peer_ip} authenticated via CERTFP.")
+                    continue
+                else:
+                    try:
+                        conn.sendall(b"FAIL:UNTRUSTEDCERT")
+                        conn.shutdown(socket.SHUT_WR)
+                        time.sleep(0.05)
+                    except Exception:
+                        pass
+                    conn.close()
+                    logging.warning(f"[AUTH] Rejected cert from {peer_ip} — not trusted.")
                     continue
 
             if cmd == "HELLO":
@@ -1036,6 +1229,7 @@ def tcp_handshake_server(sock, encoder_str, args):
                         host_state.last_pong_ts = time.time()
                         logging.info(f"[AUTH] Client {peer_ip} authenticated — PIN invalidated and rotation paused.")
 
+                    _issue_client_cert(client_name="linuxplay-client", export_hint_ip=peer_ip)
                     threading.Thread(target=lambda: pin_rotate_if_needed(force=True), daemon=True).start()
 
                     host_state.client_ip = peer_ip
@@ -1057,7 +1251,7 @@ def tcp_handshake_server(sock, encoder_str, args):
                 else:
                     if host_state.session_active:
                         logging.warning(f"[AUTH] {peer_ip} attempted reuse of consumed PIN (session active).")
-                        reply = b"BUSY"
+                        reply = b"BUSY:ACTIVESESSION"
                     else:
                         logging.warning(f"[AUTH] Rejected {peer_ip}: invalid or expired PIN.")
                         reply = b"FAIL:BADPIN"
