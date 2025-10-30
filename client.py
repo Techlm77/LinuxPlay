@@ -19,7 +19,7 @@ import logging
 import argparse
 
 from queue import Queue
-from PyQt5.QtWidgets import QApplication, QMainWindow, QMessageBox, QOpenGLWidget
+from PyQt5.QtWidgets import QApplication, QMainWindow, QMessageBox, QOpenGLWidget, QInputDialog
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QPoint
 from PyQt5.QtGui import QSurfaceFormat, QPainter, QFont, QColor
 
@@ -143,27 +143,79 @@ def detect_network_mode(host_ip: str) -> str:
     except Exception:
         return "lan"
 
-def tcp_handshake_client(host_ip):
+def tcp_handshake_client(host_ip, pin=None):
+    from PyQt5.QtWidgets import QLineEdit
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(5)
     try:
         logging.info("Handshake to %s:%s", host_ip, TCP_HANDSHAKE_PORT)
         sock.connect((host_ip, TCP_HANDSHAKE_PORT))
-        sock.sendall(b"HELLO")
+
+        code = (pin or "").strip()
+        if not code or len(code) != 6 or not code.isdigit():
+            dlg = QInputDialog()
+            dlg.setWindowTitle("Enter Host PIN")
+            dlg.setLabelText("6-digit PIN (rotates every 30s):")
+            dlg.setInputMode(QInputDialog.TextInput)
+            dlg.resize(360, 150)
+
+            le = dlg.findChild(QLineEdit)
+            if le is None:
+                dlg.setTextValue("")
+                le = dlg.findChild(QLineEdit)
+            if le is not None:
+                le.setEchoMode(QLineEdit.Password)
+                le.setMaxLength(6)
+                le.setPlaceholderText("••••••")
+
+            ok = dlg.exec_()
+            code = dlg.textValue().strip()
+            if not ok or not code or not code.isdigit() or len(code) != 6:
+                sock.close()
+                logging.error("PIN entry cancelled or invalid.")
+                QMessageBox.critical(None, "Invalid PIN", "PIN entry was cancelled or invalid.")
+                return (False, None)
+
+        sock.sendall(f"HELLO {code}".encode("utf-8"))
         resp = sock.recv(1024).decode("utf-8", errors="replace").strip()
-        sock.close()
+        logging.debug("Handshake response: %s", resp)
+
+        if resp.startswith("OK:"):
+            parts = resp.split(":", 2)
+            host_encoder = parts[1].strip()
+            monitor_info = parts[2].strip() if len(parts) > 2 else DEFAULT_RESOLUTION
+            sock.close()
+            CLIENT_STATE["connected"] = True
+            CLIENT_STATE["last_heartbeat"] = time.time()
+            return (True, (host_encoder, monitor_info))
+
+        elif resp.startswith("BUSY"):
+            logging.error("Host is already in a session with another client.")
+            QMessageBox.critical(None, "Host Busy", "The host is already connected to another client.")
+            sock.close()
+            return (False, None)
+
+        elif resp.startswith("FAIL:BADPIN"):
+            logging.error("Incorrect or expired PIN.")
+            QMessageBox.critical(None, "Authentication Failed", "The PIN is incorrect or expired. Please try again.")
+            sock.close()
+            return (False, None)
+
+        else:
+            logging.error("Unexpected handshake response: %s", resp)
+            QMessageBox.critical(None, "Handshake Error", f"Unexpected response from host:\n{resp}")
+            sock.close()
+            return (False, None)
+
     except Exception as e:
         logging.error("Handshake failed: %s", e)
+        QMessageBox.critical(None, "Connection Error", f"Handshake failed:\n{e}")
+        try:
+            sock.close()
+        except Exception:
+            pass
         return (False, None)
-    if resp.startswith("OK:"):
-        parts = resp.split(":", 2)
-        host_encoder = parts[1].strip()
-        monitor_info = parts[2].strip() if len(parts) > 2 else DEFAULT_RESOLUTION
-        CLIENT_STATE["connected"] = True
-        CLIENT_STATE["last_heartbeat"] = time.time()
-        return (True, (host_encoder, monitor_info))
-    logging.error("Invalid handshake response: %s", resp)
-    return (False, None)
 
 def heartbeat_responder(host_ip):
     def loop():
@@ -1353,6 +1405,7 @@ def main():
     p = argparse.ArgumentParser(description="LinuxPlay Client (Linux/Windows)")
     p.add_argument("--decoder", choices=["none", "h.264", "h.265"], default="none")
     p.add_argument("--host_ip", required=True)
+    p.add_argument("--pin", default=None, help="6-digit host PIN (optional; will prompt if required)")
     p.add_argument("--audio", choices=["enable", "disable"], default="disable")
     p.add_argument("--monitor", default="0", help="Index or 'all'")
     p.add_argument("--hwaccel", choices=["auto", "cpu", "cuda", "qsv", "d3d11va", "dxva2", "vaapi"], default="auto")
@@ -1416,7 +1469,7 @@ def main():
 
     app = QApplication(sys.argv)
 
-    ok, host_info = tcp_handshake_client(args.host_ip)
+    ok, host_info = tcp_handshake_client(args.host_ip, args.pin)
     if not ok or not host_info:
         QMessageBox.critical(None, "Handshake Failed", "Could not negotiate with host.")
         sys.exit(1)
