@@ -17,6 +17,7 @@
   - Rotating 6-digit **PIN authentication** (changes every 30 s).
   - PIN rotation automatically **pauses during active sessions**.
   - Rejects new clients while another is connected (**BUSY** protection).
+  - **Certificate-based login:** once authenticated via PIN, the host automatically issues your own **client certificate** — allowing future logins without a PIN.
 - **Controller Support:** Full **gamepad forwarding** over UDP using a virtual `uinput` device on the host; compatible with Xbox, DualSense, 8BitDo, and other HID controllers.
 - **Multi-Monitor:** Stream one or multiple displays, with per-monitor resolution and offset auto-detection.
 - **Clipboard & File Transfer:** Bi-directional clipboard sync and client → host file uploads via TCP.
@@ -24,6 +25,32 @@
 - **Resilience:** Heartbeat (PING/PONG) system — host auto-stops and returns to *Waiting for connection* if the client disconnects or times out.
 - **Stats Overlay (Client):** Real-time **FPS, CPU, RAM, GPU** metrics rendered via OpenGL with triple-buffered PBO uploads.
 - **Cross-Platform:** Host on Linux; clients available for Linux and Windows.
+
+---
+
+## One-Time PIN > Permanent Cert Authentication
+
+When you first connect using a **PIN**, the host will issue your own client-side certificate bundle for trusted authentication.  
+This eliminates the need to type a PIN again — ideal for personal or multi-device setups.
+
+### Certificate Files Issued
+After a successful first connection (via PIN), the host automatically generates:
+
+```
+client_cert.pem
+client_key.pem
+host_ca.pem
+```
+
+These files are stored in the host’s `issued_clients/...` directory.
+
+To enable **PIN-free login**:
+1. Copy those three files (`client_cert.pem`, `client_key.pem`, `host_ca.pem`) to a USB stick or secure transfer medium.
+2. On any trusted client device, place them **in the same folder** as your `start.py` and `client.py` files.
+3. LinuxPlay will automatically detect them and skip the PIN entry on startup.
+
+> Tip: The GUI refreshes dynamically, you’ll see “Client certificate detected; PIN not required” once the certs are present.  
+> No restart or re-entry needed; just connect instantly.
 
 ---
 
