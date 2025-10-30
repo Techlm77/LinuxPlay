@@ -29,6 +29,11 @@ FILE_UPLOAD_PORT = 7003
 UDP_HEARTBEAT_PORT = 7004
 UDP_GAMEPAD_PORT = 7005
 UDP_AUDIO_PORT = 6001
+ACTIVE_CLIENT = None
+ACTIVE_CLIENT_LOCK = threading.Lock()
+PIN_LENGTH = 6
+PIN_ROTATE_SECS = 30
+ALLOW_SAME_IP_RECONNECT = True
 
 DEFAULT_FPS = "30"
 LEGACY_BITRATE = "8M"
@@ -75,6 +80,11 @@ except Exception:
 class HostState:
     def __init__(self):
         self.video_threads = []
+        self.session_active = False
+        self.authed_client_ip = None
+        self.pin_code = None
+        self.pin_expiry = 0.0
+        self.pin_lock = threading.Lock()
         self.audio_thread = None
         self.current_bitrate = LEGACY_BITRATE
         self.last_clipboard_content = ""
@@ -255,6 +265,31 @@ def stop_streams_only():
 def cleanup():
     stop_all()
 atexit.register(cleanup)
+
+def _gen_pin(length=PIN_LENGTH):
+    import secrets
+    n = secrets.randbelow(10**length)
+    return f"{n:0{length}d}"
+
+def pin_rotate_if_needed(force=False):
+    now = time.time()
+    with host_state.pin_lock:
+        if host_state.session_active:
+            return
+        if force or not host_state.pin_code or now >= host_state.pin_expiry:
+            host_state.pin_code = _gen_pin()
+            host_state.pin_expiry = now + PIN_ROTATE_SECS
+            logging.info("[AUTH] New PIN: %s (valid %ds)", host_state.pin_code, PIN_ROTATE_SECS)
+            try:
+                set_status(f"Waiting for PIN: {host_state.pin_code}")
+            except Exception:
+                pass
+
+def pin_manager_thread():
+    while not host_state.should_terminate:
+        if not host_state.session_active:
+            pin_rotate_if_needed()
+        time.sleep(1)
 
 def has_nvidia():
     return which("nvidia-smi") is not None
@@ -960,20 +995,90 @@ def _inject_key(action, name):
 def tcp_handshake_server(sock, encoder_str, args):
     logging.info("TCP handshake server on %d", TCP_HANDSHAKE_PORT)
     set_status("Waiting for client handshake…")
+
     while not host_state.should_terminate:
         try:
             conn, addr = sock.accept()
-            logging.info("Handshake from %s", addr)
-            host_state.client_ip = addr[0]
-            data = conn.recv(1024).decode("utf-8", errors="replace").strip()
-            if data == "HELLO":
-                monitors_str = ";".join(f"{w}x{h}+{ox}+{oy}" for (w,h,ox,oy) in host_state.monitors) if host_state.monitors else DEFAULT_RES
-                resp = f"OK:{encoder_str}:{monitors_str}"
-                conn.sendall(resp.encode("utf-8"))
+            peer_ip = addr[0]
+            logging.info(f"Handshake from {peer_ip}")
+
+            raw = conn.recv(1024).decode("utf-8", errors="replace").strip()
+            parts = (raw or "").split()
+            cmd = parts[0] if parts else ""
+
+            if host_state.session_active and host_state.authed_client_ip:
+                if peer_ip != host_state.authed_client_ip:
+                    logging.warning(f"Rejected handshake from {peer_ip}: active session with {host_state.authed_client_ip}")
+                    try:
+                        conn.sendall(b"BUSY")
+                        conn.shutdown(socket.SHUT_WR)
+                        time.sleep(0.05)
+                    except Exception:
+                        pass
+                    conn.close()
+                    continue
+
+            if cmd == "HELLO":
+                provided_pin = parts[1] if len(parts) >= 2 else ""
+                ok = False
+
+                with host_state.pin_lock:
+                    if not host_state.session_active:
+                        if (provided_pin == str(host_state.pin_code)) and (time.time() < host_state.pin_expiry):
+                            ok = True
+
+                if ok:
+                    with host_state.pin_lock:
+                        host_state.session_active = True
+                        host_state.authed_client_ip = peer_ip
+                        host_state.pin_expiry = 0
+                        host_state.pin_paused = True
+                        host_state.last_pong_ts = time.time()
+                        logging.info(f"[AUTH] Client {peer_ip} authenticated — PIN invalidated and rotation paused.")
+
+                    threading.Thread(target=lambda: pin_rotate_if_needed(force=True), daemon=True).start()
+
+                    host_state.client_ip = peer_ip
+                    monitors_str = ";".join(
+                        f"{w}x{h}+{ox}+{oy}" for (w, h, ox, oy) in host_state.monitors
+                    ) if host_state.monitors else DEFAULT_RES
+
+                    resp = f"OK:{encoder_str}:{monitors_str}"
+                    try:
+                        conn.sendall(resp.encode("utf-8"))
+                        conn.shutdown(socket.SHUT_WR)
+                        time.sleep(0.05)
+                    finally:
+                        conn.close()
+
+                    set_status(f"Client: {host_state.client_ip}")
+                    logging.info(f"Client {peer_ip} handshake complete (PIN locked).")
+
+                else:
+                    if host_state.session_active:
+                        logging.warning(f"[AUTH] {peer_ip} attempted reuse of consumed PIN (session active).")
+                        reply = b"BUSY"
+                    else:
+                        logging.warning(f"[AUTH] Rejected {peer_ip}: invalid or expired PIN.")
+                        reply = b"FAIL:BADPIN"
+                        pin_rotate_if_needed(force=True)
+                    try:
+                        conn.sendall(reply)
+                        conn.shutdown(socket.SHUT_WR)
+                        time.sleep(0.05)
+                    except Exception:
+                        pass
+                    conn.close()
+
             else:
-                conn.sendall(b"FAIL")
-            conn.close()
-            set_status(f"Client: {host_state.client_ip}")
+                try:
+                    conn.sendall(b"FAIL")
+                    conn.shutdown(socket.SHUT_WR)
+                    time.sleep(0.05)
+                except Exception:
+                    pass
+                conn.close()
+
         except OSError:
             break
         except Exception as e:
@@ -1027,6 +1132,20 @@ def control_listener(sock):
     while not host_state.should_terminate:
         try:
             data, addr = sock.recvfrom(2048)
+            peer_ip = addr[0]
+
+            if not host_state.session_active:
+                logging.debug(f"Ignoring control packet from {peer_ip} (no active session)")
+                continue
+
+            if host_state.authed_client_ip:
+                if peer_ip != host_state.authed_client_ip:
+                    logging.warning(f"Rejected control packet from {peer_ip} — active client: {host_state.authed_client_ip}")
+                    continue
+            else:
+                logging.debug(f"Ignoring early control packet from {peer_ip} (auth IP not yet set)")
+                continue
+
             msg = data.decode("utf-8", errors="ignore").strip()
             if not msg:
                 continue
@@ -1039,24 +1158,30 @@ def control_listener(sock):
                 if mode in ("wifi", "lan"):
                     old = getattr(host_state, "net_mode", "lan")
                     if mode != old:
-                        logging.info("Network mode switch requested: %s -> %s", old, mode)
+                        logging.info(f"Network mode switch requested: {old} → {mode}")
                         host_state.net_mode = mode
                         try:
                             stop_streams_only()
                             if HOST_ARGS:
                                 start_streams_for_current_client(HOST_ARGS)
                         except Exception as e:
-                            logging.error("Restart after NET failed: %s", e)
+                            logging.error(f"Restart after NET failed: {e}")
                 continue
 
             elif cmd == "GOODBYE":
-                logging.info("Client at %s disconnected cleanly.", addr[0])
+                logging.info(f"Client at {peer_ip} disconnected cleanly.")
                 try:
                     stop_streams_only()
                     host_state.client_ip = None
                     host_state.starting_streams = False
+                    host_state.session_active = False
+                    host_state.authed_client_ip = None
                     set_status("Client disconnected — waiting for connection…")
                     logging.debug("All streams stopped after GOODBYE.")
+
+                    pin_rotate_if_needed(force=True)
+                    logging.info("[AUTH] Client disconnected — PIN rotation resumed.")
+
                     time.sleep(RECONNECT_COOLDOWN)
                 except Exception as e:
                     logging.error(f"Error handling GOODBYE cleanup: {e}")
@@ -1235,7 +1360,7 @@ def heartbeat_manager(args):
             except Exception as e:
                 logging.debug("Heartbeat recv error: %s", e)
 
-            if now - host_state.last_pong_ts > HEARTBEAT_TIMEOUT:
+            if (now - host_state.last_pong_ts) > HEARTBEAT_TIMEOUT and (now - host_state.last_disconnect_ts) > 10:
                 if host_state.client_ip:
                     logging.warning(
                         "Heartbeat timeout from %s — no PONG or GOODBYE, stopping streams.",
@@ -1249,6 +1374,9 @@ def heartbeat_manager(args):
                     host_state.client_ip = None
                     host_state.starting_streams = False
                     set_status("Client disconnected — waiting for connection…")
+                    host_state.session_active = False
+                    host_state.authed_client_ip = None
+                    pin_rotate_if_needed(force=True)
 
                     time.sleep(RECONNECT_COOLDOWN)
 
@@ -1258,6 +1386,21 @@ def heartbeat_manager(args):
 
 def resource_monitor():
     p = psutil.Process(os.getpid())
+
+    def get_host_memory_mb():
+        total = 0
+        try:
+            total += p.memory_info().rss
+            for child in p.children(recursive=True):
+                try:
+                    cname = child.name().lower()
+                    if "ffmpeg" in cname:
+                        total += child.memory_info().rss
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return total / (1024 * 1024)
 
     def read_gpu_usage():
         try:
@@ -1294,18 +1437,35 @@ def resource_monitor():
 
     while not host_state.should_terminate:
         cpu = p.cpu_percent(interval=1)
-        mem = p.memory_info().rss / (1024*1024)
+        mem = get_host_memory_mb()
         gpu_info = read_gpu_usage()
         logging.info(f"[MONITOR] CPU: {cpu:.1f}% | RAM: {mem:.1f} MB" + (f" | {gpu_info}" if gpu_info else ""))
         time.sleep(5)
 
 def stats_broadcast():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    p = psutil.Process(os.getpid())
+
+    def get_host_memory_mb():
+        total = 0
+        try:
+            total += p.memory_info().rss
+            for child in p.children(recursive=True):
+                try:
+                    cname = child.name().lower()
+                    if "ffmpeg" in cname:
+                        total += child.memory_info().rss
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return total / (1024 * 1024)
+
     while not host_state.should_terminate:
         if host_state.client_ip:
             try:
                 cpu = psutil.cpu_percent(interval=None)
-                mem = psutil.virtual_memory().used / (1024 * 1024)
+                mem = get_host_memory_mb()
 
                 gpu = 0.0
                 try:
@@ -1551,6 +1711,7 @@ def core_main(args, use_signals=True) -> int:
     threading.Thread(target=clipboard_listener_host, args=(host_state.clipboard_listener_sock,), daemon=True).start()
     threading.Thread(target=file_upload_listener, daemon=True).start()
 
+    pin_rotate_if_needed(force=True)
     logging.info("Waiting for client handshake…")
 
     threading.Thread(target=heartbeat_manager, args=(args,), daemon=True).start()
@@ -1558,6 +1719,7 @@ def core_main(args, use_signals=True) -> int:
     threading.Thread(target=control_listener, args=(host_state.control_sock,), daemon=True).start()
     threading.Thread(target=resource_monitor, daemon=True).start()
     threading.Thread(target=stats_broadcast, daemon=True).start()
+    threading.Thread(target=pin_manager_thread, daemon=True).start()
     if IS_LINUX:
         try:
             host_state.gamepad_thread = GamepadServer()
