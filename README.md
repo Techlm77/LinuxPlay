@@ -11,14 +11,19 @@
 
 ## Features
 
-- **Codecs:** H.264 / H.265 (HEVC) via NVENC, QSV, VAAPI, AMF, or CPU.
-- **Transport:** Video over MPEG-TS/UDP, audio over UDP, control (mouse, keyboard, gamepad), and clipboard over UDP; handshake & file upload over TCP.
-- **Controller Support:** Forwards gamepad input from client→host using UDP and a `uinput` virtual device on the host; compatible with Xbox, DualSense, 8BitDo, and others.
-- **Multi-monitor:** Stream one or multiple monitors.
-- **Clipboard & Drag-and-Drop:** Bi-directional clipboard; client→host file upload (TCP).
-- **Link-aware:** Client auto-detects **Wi-Fi vs LAN** and the host adapts buffers accordingly.
-- **Resilience:** Heartbeat (PING/PONG); host auto-stops and returns to *Waiting for connection* if the client drops.
-- **Stats Overlay (Client):** FPS / CPU / RAM overlay via OpenGL (triple-buffered PBO uploads).
+- **Codecs:** H.264 / H.265 (HEVC) with hardware acceleration via **NVENC**, **QSV**, **VAAPI**, **AMF**, or CPU fallback.
+- **Transport:** Ultra-low-latency architecture — video over **MPEG-TS/UDP**, audio over UDP, input (mouse, keyboard, gamepad), and clipboard over UDP; handshake and file upload over TCP.
+- **Secure Handshake:**
+  - Rotating 6-digit **PIN authentication** (changes every 30 s).
+  - PIN rotation automatically **pauses during active sessions**.
+  - Rejects new clients while another is connected (**BUSY** protection).
+- **Controller Support:** Full **gamepad forwarding** over UDP using a virtual `uinput` device on the host; compatible with Xbox, DualSense, 8BitDo, and other HID controllers.
+- **Multi-Monitor:** Stream one or multiple displays, with per-monitor resolution and offset auto-detection.
+- **Clipboard & File Transfer:** Bi-directional clipboard sync and client → host file uploads via TCP.
+- **Link-Aware Streaming:** Automatically adjusts buffers for **LAN vs Wi-Fi** to minimize jitter and latency spikes.
+- **Resilience:** Heartbeat (PING/PONG) system — host auto-stops and returns to *Waiting for connection* if the client disconnects or times out.
+- **Stats Overlay (Client):** Real-time **FPS, CPU, RAM, GPU** metrics rendered via OpenGL with triple-buffered PBO uploads.
+- **Cross-Platform:** Host on Linux; clients available for Linux and Windows.
 
 ---
 
