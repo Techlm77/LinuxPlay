@@ -27,6 +27,16 @@ WG_INFO_PATH = "/tmp/linuxplay_wg_info.json"
 CFG_PATH = os.path.join(os.path.expanduser("~"), ".linuxplay_start_cfg.json")
 LINUXPLAY_MARKER = "LinuxPlayHost"
 
+def _client_cert_present(base_dir):
+    try:
+        import os
+        cert_p = os.path.join(base_dir, "client_cert.pem")
+        key_p  = os.path.join(base_dir, "client_key.pem")
+        return os.path.exists(cert_p) and os.path.exists(key_p)
+    except Exception:
+        return False
+
+
 def ffmpeg_ok():
     try:
         subprocess.check_output(["ffmpeg", "-hide_banner", "-version"], stderr=subprocess.STDOUT, universal_newlines=True)
@@ -819,8 +829,15 @@ class ClientTab(QWidget):
         self.pinEdit.setPlaceholderText("Enter 6-digit host PIN")
         form_layout.addRow("Host PIN:", self.pinEdit)
 
-        form_group.setLayout(form_layout)
+        _here = HERE
+        self._cert_auth = _client_cert_present(_here)
+        self._apply_cert_ui_state(self._cert_auth)
 
+        self._cert_refresh_timer = QTimer(self)
+        self._cert_refresh_timer.timeout.connect(self._refresh_cert_detection)
+        self._cert_refresh_timer.start(2000)
+
+        form_group.setLayout(form_layout)
         button_layout = QHBoxLayout()
         self.startButton = QPushButton("Start Client")
         self.startButton.clicked.connect(self.start_client)
@@ -830,6 +847,28 @@ class ClientTab(QWidget):
         main_layout.addLayout(button_layout)
         main_layout.addStretch()
         self.setLayout(main_layout)
+
+    def _apply_cert_ui_state(self, has_cert: bool):
+        if has_cert:
+            self.pinEdit.clear()
+            self.pinEdit.setEnabled(False)
+            self.pinEdit.setPlaceholderText("Client certificate detected — PIN not required")
+            self.pinEdit.setToolTip("Using certificate authentication (client_cert.pem + client_key.pem).")
+        else:
+            self.pinEdit.setEnabled(True)
+            self.pinEdit.setPlaceholderText("Enter 6-digit host PIN")
+            self.pinEdit.setToolTip("Enter PIN shown on host display.")
+
+    def _refresh_cert_detection(self):
+        try:
+            now_has = _client_cert_present(HERE)
+        except Exception:
+            now_has = False
+        if now_has != getattr(self, "_cert_auth", False):
+            self._cert_auth = now_has
+            self._apply_cert_ui_state(now_has)
+            state = "detected" if now_has else "removed"
+            logging.info(f"[AUTO] Client certificate {state}, UI updated.")
 
     def _load_saved_client_extras(self):
         cfg = load_cfg().get("client", {})
@@ -867,6 +906,8 @@ class ClientTab(QWidget):
         gamepad = self.gamepadCombo.currentText()
         gamepad_dev = self.gamepadDevEdit.text().strip() or None
         pin = self.pinEdit.text().strip()
+        if getattr(self, "_cert_auth", False):
+            pin = ""
 
         if not host_ip:
             self.hostIPEdit.setEditText("Enter host IP or WG tunnel IP")
@@ -876,8 +917,7 @@ class ClientTab(QWidget):
         client_cfg = cfg.get("client", {})
         rec = client_cfg.get("recent_ips", [])
         if host_ip and host_ip not in rec:
-            rec = [host_ip] + rec
-            rec = rec[:5]
+            rec = [host_ip] + rec[:4]
 
         client_cfg.update({
             "recent_ips": rec,
@@ -917,7 +957,7 @@ class ClientTab(QWidget):
         try:
             subprocess.Popen(cmd)
         except Exception as e:
-            logging.error("Failed to start client: %s", e)
+            logging.error(f"Failed to start client: {e}")
             QMessageBox.critical(self, "Start Client Failed", str(e))
 
 class HelpTab(QWidget):
