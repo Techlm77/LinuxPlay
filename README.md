@@ -162,27 +162,6 @@ python3 client.py --host_ip 192.168.1.20 --decoder h.264 --hwaccel auto --audio 
 
 ---
 
-## Experimental Features (Next-Gen Client)
-
-A **new experimental client** (`experimental-client.py`) is included for advanced users.  
-This version is a complete rework of the LinuxPlay frontend, faster, smarter, and closer to a true game-streaming platform.
-
-### Highlights
-- **Multi-Renderer Backend:**  
-  Automatically picks the best available GPU path in this order:  
-  → `KMSDRM` (direct /dev/dri) → `Vulkan` → `OpenGL`  
-  with automatic CPU fallback if no renderer is available.
-
-- **Real-Time Stats & Control:**  
-  Shows FPS, CPU, RAM, GPU usage, and renderer info in the title bar.
-
-### Notes
-- Requires PyAV built with FFmpeg hardware-accel support.  
-- GPU decode/encode requires `/dev/dri/renderD128` access.  
-- Experimental, expect instability and occasional performance quirks.
-
----
-
 ## License
 - **LinuxPlay** is licensed under **GNU GPL v2.0 only**. See [LICENSE](./LICENSE).
 - External tools (FFmpeg, xdotool, xclip, ffplay, etc.) are executed as **separate processes** and retain their own licenses.
