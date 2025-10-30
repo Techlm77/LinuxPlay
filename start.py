@@ -815,6 +815,10 @@ class ClientTab(QWidget):
         form_layout.addRow("Gamepad:", self.gamepadCombo)
         form_layout.addRow("Gamepad Device:", self.gamepadDevEdit)
 
+        self.pinEdit = QLineEdit()
+        self.pinEdit.setPlaceholderText("Enter 6-digit host PIN")
+        form_layout.addRow("Host PIN:", self.pinEdit)
+
         form_group.setLayout(form_layout)
 
         button_layout = QHBoxLayout()
@@ -862,6 +866,7 @@ class ClientTab(QWidget):
         ultra = self.ultraCheck.isChecked()
         gamepad = self.gamepadCombo.currentText()
         gamepad_dev = self.gamepadDevEdit.text().strip() or None
+        pin = self.pinEdit.text().strip()
 
         if not host_ip:
             self.hostIPEdit.setEditText("Enter host IP or WG tunnel IP")
@@ -884,7 +889,8 @@ class ClientTab(QWidget):
             "net": net,
             "ultra": bool(ultra),
             "gamepad": gamepad,
-            "gamepad_dev": gamepad_dev
+            "gamepad_dev": gamepad_dev,
+            "pin": pin
         })
         cfg["client"] = client_cfg
         save_cfg(cfg)
@@ -905,6 +911,8 @@ class ClientTab(QWidget):
             cmd.append("--ultra")
         if debug:
             cmd.append("--debug")
+        if pin:
+            cmd.extend(["--pin", pin])
 
         try:
             subprocess.Popen(cmd)
