@@ -12,7 +12,7 @@
 ## Features
 
 - **Codecs**: H.264 and H.265 (HEVC) with hardware acceleration via NVENC, QSV, VAAPI, AMF, or CPU fallback.
-- **Transport**: Ultra low latency design. Video over MPEG TS on UDP. Audio over UDP. Input for mouse, keyboard and gamepad over UDP. Clipboard on UDP. Handshake and file upload on TCP.
+- **Transport**: Ultra low latency design. Video over MPEG-TS on UDP. Audio over UDP. Input for mouse, keyboard and gamepad over UDP. Clipboard on UDP. Handshake and file upload on TCP.
 - **Secure Handshake**
   - Rotating 6 digit PIN authentication that refreshes every 30 seconds.
   - PIN rotation pauses while a session is active.
@@ -186,6 +186,19 @@ python3 client.py --host_ip 192.168.1.20 --decoder h.264 --hwaccel auto --audio 
 - Client GUI now auto detects certificate bundle and disables the PIN field live.
 - Improved heartbeat handling and reconnect behavior.
 - Expanded controller support and stability.
+
+---
+
+## Support LinuxPlay
+
+LinuxPlay is a fully open-source project built from scratch and currently maintained by a single developer in spare time.  
+The long-term goal is to grow into a community-driven project, welcoming developers who are passionate about performance, networking, and open-source streaming tech.
+
+If you enjoy LinuxPlay or use it in your workflow, you can help sustain and expand development through GitHub Sponsors:
+
+[![Sponsor @Techlm77](https://img.shields.io/badge/Sponsor-Techlm77-pink.svg?logo=github-sponsors)](https://github.com/sponsors/Techlm77)
+
+Your support helps cover hardware testing, development time, and ongoing improvements to performance, security, and cross-platform compatibility across many different Linux distros, while encouraging future contributors to join the project.
 
 ---
 
