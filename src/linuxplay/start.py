@@ -1,51 +1,75 @@
 #!/usr/bin/env python3
-import sys
-import os
-import json
 import argparse
+import contextlib
+import json
 import logging
-import subprocess
+import os
 import platform
+import shutil
+import subprocess
+import sys
 import threading
 import uuid
-import shutil
-from PyQt5.QtWidgets import QApplication, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QComboBox, QCheckBox, QPushButton, QGroupBox, QLineEdit, QTextEdit, QLabel, QMessageBox
-from PyQt5.QtGui import QPalette, QColor
-from PyQt5.QtCore import Qt, QTimer
+from pathlib import Path
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QColor, QPalette
+from PyQt5.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QTabWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+
+HERE = Path(__file__).resolve().parent
 try:
-    FFBIN = os.path.join(HERE, "ffmpeg", "bin")
-    if os.name == "nt" and os.path.exists(os.path.join(FFBIN, "ffmpeg.exe")):
-        os.environ["PATH"] = FFBIN + os.pathsep + os.environ.get("PATH", "")
+    FFBIN = HERE / "ffmpeg" / "bin"
+    if os.name == "nt" and (FFBIN / "ffmpeg.exe").exists():
+        os.environ["PATH"] = str(FFBIN) + os.pathsep + os.environ.get("PATH", "")
 except Exception:
     pass
 
 IS_WINDOWS = platform.system() == "Windows"
 IS_LINUX = platform.system() == "Linux"
-WG_INFO_PATH = "/tmp/linuxplay_wg_info.json"
-CFG_PATH = os.path.join(os.path.expanduser("~"), ".linuxplay_start_cfg.json")
+WG_INFO_PATH = Path("/tmp/linuxplay_wg_info.json")
+CFG_PATH = Path.home() / ".linuxplay_start_cfg.json"
 LINUXPLAY_MARKER = "LinuxPlayHost"
+
 
 def _client_cert_present(base_dir):
     try:
-        import os
-        cert_p = os.path.join(base_dir, "client_cert.pem")
-        key_p  = os.path.join(base_dir, "client_key.pem")
-        return os.path.exists(cert_p) and os.path.exists(key_p)
+        base_path = Path(base_dir)
+        cert_p = base_path / "client_cert.pem"
+        key_p = base_path / "client_key.pem"
+        return cert_p.exists() and key_p.exists()
     except Exception:
         return False
 
 
 def ffmpeg_ok():
     try:
-        subprocess.check_output(["ffmpeg", "-hide_banner", "-version"], stderr=subprocess.STDOUT, universal_newlines=True)
+        subprocess.check_output(
+            ["ffmpeg", "-hide_banner", "-version"], stderr=subprocess.STDOUT, universal_newlines=True
+        )
         return True
     except Exception:
         return False
 
+
 _FFENC_CACHE = {}
 _FFDEV_CACHE = {}
+
 
 def ffmpeg_has_encoder(name):
     name = name.lower()
@@ -53,8 +77,7 @@ def ffmpeg_has_encoder(name):
         return _FFENC_CACHE[name]
     try:
         out = subprocess.check_output(
-            ["ffmpeg","-hide_banner","-encoders"],
-            stderr=subprocess.STDOUT, universal_newlines=True
+            ["ffmpeg", "-hide_banner", "-encoders"], stderr=subprocess.STDOUT, universal_newlines=True
         ).lower()
         _FFENC_CACHE[name] = name in out
         return _FFENC_CACHE[name]
@@ -62,27 +85,29 @@ def ffmpeg_has_encoder(name):
         _FFENC_CACHE[name] = False
         return False
 
+
 def ffmpeg_has_device(name):
     name = name.lower()
     if name in _FFDEV_CACHE:
         return _FFDEV_CACHE[name]
     try:
         out = subprocess.check_output(
-            ["ffmpeg","-hide_banner","-devices"],
-            stderr=subprocess.STDOUT, universal_newlines=True
+            ["ffmpeg", "-hide_banner", "-devices"], stderr=subprocess.STDOUT, universal_newlines=True
         ).lower()
-        found=False
+        found = False
         for line in out.splitlines():
-            s=line.strip()
-            if s.startswith("d ") or s.startswith(" d "):
-                parts=s.split()
-                if len(parts)>=2 and parts[1]==name:
-                    found=True; break
-        _FFDEV_CACHE[name]=found
+            s = line.strip()
+            if s.startswith(("d ", " d ")):
+                parts = s.split()
+                if len(parts) >= 2 and parts[1] == name:
+                    found = True
+                    break
+        _FFDEV_CACHE[name] = found
         return found
     except Exception:
-        _FFDEV_CACHE[name]=False
+        _FFDEV_CACHE[name] = False
         return False
+
 
 def check_encoder_support(codec):
     key = codec.lower().replace(".", "")
@@ -94,9 +119,12 @@ def check_encoder_support(codec):
         return False
     return any(ffmpeg_has_encoder(n) for n in names)
 
+
 def check_decoder_support(codec):
     try:
-        output = subprocess.check_output(["ffmpeg", "-hide_banner", "-decoders"], stderr=subprocess.STDOUT, universal_newlines=True).lower()
+        output = subprocess.check_output(
+            ["ffmpeg", "-hide_banner", "-decoders"], stderr=subprocess.STDOUT, universal_newlines=True
+        ).lower()
     except Exception:
         return False
     key = codec.lower().replace(".", "")
@@ -106,19 +134,22 @@ def check_decoder_support(codec):
         return " hevc " in output or "\nhevc\n" in output
     return False
 
+
 def load_cfg():
     try:
-        with open(CFG_PATH, "r") as f:
+        with CFG_PATH.open() as f:
             return json.load(f)
     except Exception:
         return {}
 
+
 def save_cfg(data):
     try:
-        with open(CFG_PATH, "w") as f:
+        with CFG_PATH.open("w") as f:
             json.dump(data, f, indent=2)
     except Exception:
         pass
+
 
 ENCODER_NAME_MAP = {
     ("h.264", "nvenc"): "h264_nvenc",
@@ -130,7 +161,7 @@ ENCODER_NAME_MAP = {
     ("h.265", "qsv"): "hevc_qsv",
     ("h.265", "amf"): "hevc_amf",
     ("h.265", "vaapi"): "hevc_vaapi",
-    ("h.265", "cpu"): "libx265"
+    ("h.265", "cpu"): "libx265",
 }
 
 BACKEND_READABLE = {
@@ -139,17 +170,17 @@ BACKEND_READABLE = {
     "nvenc": "NVIDIA NVENC",
     "qsv": "Intel Quick Sync (QSV)",
     "amf": "AMD AMF",
-    "vaapi": "Linux VAAPI"
+    "vaapi": "Linux VAAPI",
 }
+
 
 def backends_for_codec(codec):
     base = ["auto", "cpu", "nvenc", "qsv", "amf", "vaapi"]
     if IS_WINDOWS:
         if "vaapi" in base:
             base.remove("vaapi")
-    else:
-        if "amf" in base:
-            base.remove("amf")
+    elif "amf" in base:
+        base.remove("amf")
     pruned = []
     for b in base:
         if b in ("auto", "cpu"):
@@ -161,34 +192,50 @@ def backends_for_codec(codec):
     items = [f"{b} - {BACKEND_READABLE[b]}" for b in pruned]
     return pruned, items
 
+
 def _proc_is_running(p):
     try:
         return (p is not None) and (p.poll() is None)
     except Exception:
         return False
 
+
 def _ffmpeg_running_for_us(marker=LINUXPLAY_MARKER):
     if IS_WINDOWS:
         try:
-            out = subprocess.check_output(["powershell", "-NoProfile", "-Command", "Get-CimInstance Win32_Process -Filter \"Name='ffmpeg.exe'\" | Select-Object -Expand CommandLine"], stderr=subprocess.DEVNULL, universal_newlines=True)
+            out = subprocess.check_output(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "Get-CimInstance Win32_Process -Filter \"Name='ffmpeg.exe'\" | Select-Object -Expand CommandLine",
+                ],
+                stderr=subprocess.DEVNULL,
+                universal_newlines=True,
+            )
             for line in out.splitlines():
                 if marker in line:
                     return True
         except Exception:
             pass
         return False
-    else:
-        try:
-            out = subprocess.check_output(["ps", "-eo", "pid,args"], universal_newlines=True)
-            for line in out.splitlines():
-                if "ffmpeg" in line and marker in line:
-                    return True
-        except Exception:
-            pass
-        return False
+    try:
+        out = subprocess.check_output(["ps", "-eo", "pid,args"], universal_newlines=True)
+        for line in out.splitlines():
+            if "ffmpeg" in line and marker in line:
+                return True
+    except Exception:
+        pass
+    return False
+
 
 def _warn_ffmpeg(parent):
-    QMessageBox.critical(parent, "FFmpeg not found", "FFmpeg was not found on PATH.\n\nWindows: keep ffmpeg\\bin next to the app or install FFmpeg.\nLinux: install ffmpeg via your package manager.")
+    QMessageBox.critical(
+        parent,
+        "FFmpeg not found",
+        "FFmpeg was not found on PATH.\n\nWindows: keep ffmpeg\\bin next to the app or install FFmpeg.\nLinux: install ffmpeg via your package manager.",
+    )
+
 
 class HostTab(QWidget):
     def __init__(self, parent=None):
@@ -216,177 +263,138 @@ class HostTab(QWidget):
         self.encoderCombo.currentIndexChanged.connect(self._refresh_backend_choices)
         self.hwencCombo = QComboBox()
         self.framerateCombo = QComboBox()
-        self.framerateCombo.addItems([
-            "15", 
-            "24", 
-            "30", 
-            "45", 
-            "60", 
-            "75", 
-            "90", 
-            "100", 
-            "120", 
-            "144", 
-            "165", 
-            "200", 
-            "240", 
-            "300", 
-            "360"
-        ])
+        self.framerateCombo.addItems(
+            ["15", "24", "30", "45", "60", "75", "90", "100", "120", "144", "165", "200", "240", "300", "360"]
+        )
         self.bitrateCombo = QComboBox()
-        self.bitrateCombo.addItems([
-            "0", 
-            "50k", 
-            "100k", 
-            "200k", 
-            "300k", 
-            "400k", 
-            "500k", 
-            "750k", 
-            "1M", 
-            "1.5M", 
-            "2M", 
-            "3M", 
-            "4M", 
-            "5M", 
-            "6M", 
-            "8M", 
-            "10M", 
-            "12M", 
-            "15M", 
-            "20M", 
-            "25M", 
-            "30M", 
-            "35M", 
-            "40M", 
-            "45M", 
-            "50M", 
-            "60M", 
-            "70M", 
-            "80M", 
-            "90M", 
-            "100M"
-        ])
+        self.bitrateCombo.addItems(
+            [
+                "0",
+                "50k",
+                "100k",
+                "200k",
+                "300k",
+                "400k",
+                "500k",
+                "750k",
+                "1M",
+                "1.5M",
+                "2M",
+                "3M",
+                "4M",
+                "5M",
+                "6M",
+                "8M",
+                "10M",
+                "12M",
+                "15M",
+                "20M",
+                "25M",
+                "30M",
+                "35M",
+                "40M",
+                "45M",
+                "50M",
+                "60M",
+                "70M",
+                "80M",
+                "90M",
+                "100M",
+            ]
+        )
         self.audioCombo = QComboBox()
         self.audioCombo.addItems(["enable", "disable"])
         self.audioModeCombo = QComboBox()
         self.audioModeCombo.addItems(["Voice (low-latency)", "Music (quality)"])
         self.adaptiveCheck = QCheckBox("Enable Adaptive Bitrate")
         self.displayCombo = QComboBox()
-        self.displayCombo.addItems([
-            ":0", 
-            ":1", 
-            ":2", 
-            ":3", 
-            ":4", 
-            ":5", 
-            ":6"
-        ])
+        self.displayCombo.addItems([":0", ":1", ":2", ":3", ":4", ":5", ":6"])
         self.presetCombo = QComboBox()
-        self.presetCombo.addItems([
-            "Default", 
-            "zerolatency", 
-            "ultra-low-latency", 
-            "realtime",
-            "ultrafast", 
-            "superfast", 
-            "veryfast", 
-            "faster", 
-            "fast", 
-            "medium", 
-            "slow", 
-            "slower", 
-            "veryslow",
-            "llhp", 
-            "llhq", 
-            "hp", 
-            "hq",
-            "p1", 
-            "p2", 
-            "p3", 
-            "p4", 
-            "p5", 
-            "p6", 
-            "p7",
-            "lossless", 
-            "speed", 
-            "balanced", 
-            "quality"
-        ])
+        self.presetCombo.addItems(
+            [
+                "Default",
+                "zerolatency",
+                "ultra-low-latency",
+                "realtime",
+                "ultrafast",
+                "superfast",
+                "veryfast",
+                "faster",
+                "fast",
+                "medium",
+                "slow",
+                "slower",
+                "veryslow",
+                "llhp",
+                "llhq",
+                "hp",
+                "hq",
+                "p1",
+                "p2",
+                "p3",
+                "p4",
+                "p5",
+                "p6",
+                "p7",
+                "lossless",
+                "speed",
+                "balanced",
+                "quality",
+            ]
+        )
 
         self.gopCombo = QComboBox()
-        self.gopCombo.addItems([
-            "Auto", 
-            "1", 
-            "2", 
-            "3", 
-            "4", 
-            "5", 
-            "8", 
-            "10",
-            "15", 
-            "20", 
-            "30"])
+        self.gopCombo.addItems(["Auto", "1", "2", "3", "4", "5", "8", "10", "15", "20", "30"])
 
         self.qpCombo = QComboBox()
-        self.qpCombo.addItems([
-            "None",
-            "0", 
-            "5", 
-            "10", 
-            "15", 
-            "18", 
-            "20", 
-            "22", 
-            "25", 
-            "28", 
-            "30", 
-            "32", 
-            "35", 
-            "38", 
-            "40", 
-            "45", 
-            "50"
-        ])
+        self.qpCombo.addItems(
+            ["None", "0", "5", "10", "15", "18", "20", "22", "25", "28", "30", "32", "35", "38", "40", "45", "50"]
+        )
         self.tuneCombo = QComboBox()
-        self.tuneCombo.addItems([
-            "None", 
-            "auto", 
-            "default",
-            "low-latency", 
-            "ultra-low-latency", 
-            "zerolatency",
-            "high-quality", 
-            "high-performance", 
-            "performance",
-            "lossless", 
-            "lossless-highperf", 
-            "blu-ray"
-        ])
+        self.tuneCombo.addItems(
+            [
+                "None",
+                "auto",
+                "default",
+                "low-latency",
+                "ultra-low-latency",
+                "zerolatency",
+                "high-quality",
+                "high-performance",
+                "performance",
+                "lossless",
+                "lossless-highperf",
+                "blu-ray",
+            ]
+        )
         self.pixFmtCombo = QComboBox()
-        self.pixFmtCombo.addItems([
-            "yuv420p", 
-            "nv12", 
-            "yuv422p", 
-            "yuyv422", 
-            "uyvy422", 
-            "yuv444p",
-            "rgb0", 
-            "bgr0", 
-            "rgba",
-            "bgra",
-            "p010le", 
-            "yuv420p10le", 
-            "yuv422p10le", 
-            "yuv444p10le",
-            "p016le", 
-            "yuv444p12le", 
-            "yuv444p16le"
-        ])
+        self.pixFmtCombo.addItems(
+            [
+                "yuv420p",
+                "nv12",
+                "yuv422p",
+                "yuyv422",
+                "uyvy422",
+                "yuv444p",
+                "rgb0",
+                "bgr0",
+                "rgba",
+                "bgra",
+                "p010le",
+                "yuv420p10le",
+                "yuv422p10le",
+                "yuv444p10le",
+                "p016le",
+                "yuv444p12le",
+                "yuv444p16le",
+            ]
+        )
         self.debugCheck = QCheckBox("Enable Debug")
         self.captureHint = QLabel("")
         if ffmpeg_has_device("kmsgrab"):
-            self.captureHint.setText("Capture: kmsgrab available (requires CAP_SYS_ADMIN; cursor not shown). Fallback: x11grab.")
+            self.captureHint.setText(
+                "Capture: kmsgrab available (requires CAP_SYS_ADMIN; cursor not shown). Fallback: x11grab."
+            )
         else:
             self.captureHint.setText("Capture: x11grab (kmsgrab not detected).")
         form_layout.addRow("Encoder (codec):", self.encoderCombo)
@@ -450,7 +458,11 @@ class HostTab(QWidget):
                 pass
         else:
             try:
-                out = subprocess.check_output(["ip", "-d", "link", "show", "type", "wireguard"], stderr=subprocess.DEVNULL, universal_newlines=True)
+                out = subprocess.check_output(
+                    ["ip", "-d", "link", "show", "type", "wireguard"],
+                    stderr=subprocess.DEVNULL,
+                    universal_newlines=True,
+                )
                 active = bool(out.strip())
                 installed = True
             except Exception:
@@ -465,7 +477,7 @@ class HostTab(QWidget):
             self.wgStatus.setText("WireGuard not installed")
             self.wgStatus.setStyleSheet("color: #f44")
 
-    def profileChanged(self, idx):
+    def profileChanged(self, _idx):
         profile = self.profileCombo.currentText()
         if profile == "Lowest Latency":
             self.encoderCombo.setCurrentText("h.264" if self.encoderCombo.findText("h.264") != -1 else "none")
@@ -507,7 +519,11 @@ class HostTab(QWidget):
             self.pixFmtCombo.setCurrentText("yuv444p")
             self._refresh_backend_choices(preselect="auto")
         else:
-            self.encoderCombo.setCurrentText("h.265" if self.encoderCombo.findText("h.265") != -1 else ("h.264" if self.encoderCombo.findText("h.264") != -1 else "none"))
+            self.encoderCombo.setCurrentText(
+                "h.265"
+                if self.encoderCombo.findText("h.265") != -1
+                else ("h.264" if self.encoderCombo.findText("h.264") != -1 else "none")
+            )
             self.framerateCombo.setCurrentText("30")
             self.bitrateCombo.setCurrentText("8M")
             self.audioCombo.setCurrentText("enable")
@@ -532,11 +548,13 @@ class HostTab(QWidget):
             return
         keys, pretty = backends_for_codec(codec)
         if "auto" not in keys:
-            keys.insert(0, "auto"); pretty.insert(0, f"auto - {BACKEND_READABLE['auto']}")
+            keys.insert(0, "auto")
+            pretty.insert(0, f"auto - {BACKEND_READABLE['auto']}")
         if "cpu" not in keys:
             ins = 1 if "auto" in keys else 0
-            keys.insert(ins, "cpu"); pretty.insert(ins, f"cpu - {BACKEND_READABLE['cpu']}")
-        for k, label in zip(keys, pretty):
+            keys.insert(ins, "cpu")
+            pretty.insert(ins, f"cpu - {BACKEND_READABLE['cpu']}")
+        for k, label in zip(keys, pretty, strict=False):
             self.hwencCombo.addItem(label, k)
         want = preselect or "auto"
         idx = self.hwencCombo.findData(want)
@@ -603,17 +621,23 @@ class HostTab(QWidget):
         pix_fmt = self.pixFmtCombo.currentText()
         debug = self.debugCheck.isChecked()
         hwenc = self.hwencCombo.currentData() or "auto"
-    
+
         cmd = [
             sys.executable,
-            os.path.join(HERE, "host.py"),
+            str(HERE / "host.py"),
             "--gui",
-            "--encoder", encoder,
-            "--framerate", framerate,
-            "--bitrate", bitrate,
-            "--audio", audio,
-            "--pix_fmt", pix_fmt,
-            "--hwenc", hwenc,
+            "--encoder",
+            encoder,
+            "--framerate",
+            framerate,
+            "--bitrate",
+            bitrate,
+            "--audio",
+            audio,
+            "--pix_fmt",
+            pix_fmt,
+            "--hwenc",
+            hwenc,
         ]
 
         if adaptive:
@@ -664,7 +688,7 @@ class HostTab(QWidget):
         try:
             self.host_process = subprocess.Popen(
                 cmd,
-                preexec_fn=os.setsid,
+                start_new_session=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 env=env,
@@ -677,10 +701,8 @@ class HostTab(QWidget):
             return
 
         def _watch():
-            try:
+            with contextlib.suppress(Exception):
                 _ = self.host_process.wait()
-            except Exception:
-                pass
 
             def done():
                 self.host_process = None
@@ -688,9 +710,7 @@ class HostTab(QWidget):
 
             QTimer.singleShot(0, done)
 
-        self._exit_watcher_thread = threading.Thread(
-            target=_watch, name="HostExitWatcher", daemon=True
-        )
+        self._exit_watcher_thread = threading.Thread(target=_watch, name="HostExitWatcher", daemon=True)
         self._exit_watcher_thread.start()
         self._update_buttons()
 
@@ -711,7 +731,7 @@ class HostTab(QWidget):
             "qp": self.qpCombo.currentText(),
             "tune": self.tuneCombo.currentText(),
             "pix_fmt": self.pixFmtCombo.currentText(),
-            "capture": (self.linuxCaptureCombo.currentData() if hasattr(self, "linuxCaptureCombo") else "auto")
+            "capture": (self.linuxCaptureCombo.currentData() if hasattr(self, "linuxCaptureCombo") else "auto"),
         }
         save_cfg(data)
 
@@ -719,12 +739,14 @@ class HostTab(QWidget):
         cfg = load_cfg().get("host", {})
         if not cfg:
             return
+
         def set_combo(combo, val):
             if not val:
                 return
             idx = combo.findText(val)
             if idx != -1:
                 combo.setCurrentIndex(idx)
+
         set_combo(self.profileCombo, cfg.get("profile"))
         set_combo(self.encoderCombo, cfg.get("encoder"))
         self._refresh_backend_choices()
@@ -749,6 +771,7 @@ class HostTab(QWidget):
                 if self.linuxCaptureCombo.itemData(i) == cap_val:
                     self.linuxCaptureCombo.setCurrentIndex(i)
                     break
+
 
 class ClientTab(QWidget):
     def __init__(self, parent=None):
@@ -781,9 +804,9 @@ class ClientTab(QWidget):
         self.hostIPEdit.setEditable(True)
         self.hostIPEdit.setToolTip("Host IP (LAN) or WireGuard tunnel IP (e.g., 10.13.13.1)")
 
-        if IS_LINUX and os.path.exists(WG_INFO_PATH):
+        if IS_LINUX and Path(WG_INFO_PATH).exists():
             try:
-                with open(WG_INFO_PATH, "r") as f:
+                with Path(WG_INFO_PATH).open() as f:
                     info = json.load(f)
                 t_ip = info.get("host_tunnel_ip", "")
                 if t_ip:
@@ -917,33 +940,43 @@ class ClientTab(QWidget):
         client_cfg = cfg.get("client", {})
         rec = client_cfg.get("recent_ips", [])
         if host_ip and host_ip not in rec:
-            rec = [host_ip] + rec[:4]
+            rec = [host_ip, *rec[:4]]
 
-        client_cfg.update({
-            "recent_ips": rec,
-            "decoder": decoder,
-            "hwaccel": hwaccel,
-            "audio": audio,
-            "monitor": monitor,
-            "debug": bool(debug),
-            "net": net,
-            "ultra": bool(ultra),
-            "gamepad": gamepad,
-            "gamepad_dev": gamepad_dev,
-            "pin": pin
-        })
+        client_cfg.update(
+            {
+                "recent_ips": rec,
+                "decoder": decoder,
+                "hwaccel": hwaccel,
+                "audio": audio,
+                "monitor": monitor,
+                "debug": bool(debug),
+                "net": net,
+                "ultra": bool(ultra),
+                "gamepad": gamepad,
+                "gamepad_dev": gamepad_dev,
+                "pin": pin,
+            }
+        )
         cfg["client"] = client_cfg
         save_cfg(cfg)
 
         cmd = [
-            sys.executable, os.path.join(HERE, "client.py"),
-            "--decoder", decoder,
-            "--host_ip", host_ip,
-            "--audio", audio,
-            "--monitor", monitor,
-            "--hwaccel", hwaccel,
-            "--net", net,
-            "--gamepad", gamepad
+            sys.executable,
+            str(HERE / "client.py"),
+            "--decoder",
+            decoder,
+            "--host_ip",
+            host_ip,
+            "--audio",
+            audio,
+            "--monitor",
+            monitor,
+            "--hwaccel",
+            hwaccel,
+            "--net",
+            net,
+            "--gamepad",
+            gamepad,
         ]
         if gamepad_dev:
             cmd.extend(["--gamepad_dev", gamepad_dev])
@@ -960,6 +993,7 @@ class ClientTab(QWidget):
             logging.error(f"Failed to start client: {e}")
             QMessageBox.critical(self, "Start Client Failed", str(e))
 
+
 class HelpTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -969,12 +1003,10 @@ class HelpTab(QWidget):
             "<h1>LinuxPlay Help</h1>"
             "<p><b>LinuxPlay</b> provides ultra-low-latency desktop streaming using FFmpeg over UDP, "
             "with TCP used for session handshakes and UDP channels for input, clipboard, and optional audio.</p>"
-
             "<h2>Security</h2>"
             "<p>For internet (WAN) streaming, it is strongly recommended to tunnel all traffic through "
-            "<b>WireGuard</b> on the host system. Clients should connect using the tunnel’s internal IP. "
+            "<b>WireGuard</b> on the host system. Clients should connect using the tunnel's internal IP. "
             "On trusted local networks (LAN), this step can be safely skipped.</p>"
-
             "<h2>Capture Backends</h2>"
             "<ul>"
             "<li><b>kmsgrab</b> (KMS/DRM): Provides the lowest capture latency but requires elevated privileges. "
@@ -982,21 +1014,18 @@ class HelpTab(QWidget):
             "Note that the hardware cursor is not drawn by kmsgrab.</li>"
             "<li><b>x11grab</b>: Compatible with most X11 sessions; easier to set up but slightly higher latency.</li>"
             "</ul>"
-
             "<h2>Platform Support</h2>"
             "<p>The <b>Host</b> is supported on Linux only. Clients are available for Linux and Windows. "
             "macOS clients may function via compatibility layers but are not officially supported.</p>"
-
             "<h2>Performance Tips</h2>"
             "<ul>"
             "<li>Enable <b>Ultra Mode</b> for LAN use only; it disables internal buffering for minimum delay.</li>"
             "<li>Recommended baseline for smooth playback: "
             "<code>H.264</code> codec, preset <code>llhq</code> or <code>ultrafast</code>, GOP <code>10</code>, "
-            "audio disabled (optional), and moderate bitrates (e.g. 8–12&nbsp;Mbps for 1080p).</li>"
+            "audio disabled (optional), and moderate bitrates (e.g. 8-12&nbsp;Mbps for 1080p).</li>"
             "<li>Select your encoder backend explicitly — NVENC, QSV, AMF, VAAPI, or CPU — "
             "to ensure consistent performance across sessions.</li>"
             "</ul>"
-
             "<h2>General Notes</h2>"
             "<ul>"
             "<li>Multi-monitor streaming is supported. Choose a specific monitor index or <b>all</b> to capture every display.</li>"
@@ -1010,6 +1039,7 @@ class HelpTab(QWidget):
         help_view.setHtml(help_text)
         layout.addWidget(help_view)
         self.setLayout(layout)
+
 
 class StartWindow(QWidget):
     def __init__(self):
@@ -1026,14 +1056,20 @@ class StartWindow(QWidget):
         main_layout = QVBoxLayout()
         main_layout.addWidget(self.tabs)
         self.setLayout(main_layout)
+
     def closeEvent(self, event):
         event.accept()
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", action="store_true")
     args, _ = parser.parse_known_args()
-    logging.basicConfig(level=(logging.DEBUG if args.debug else logging.INFO), format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
+    logging.basicConfig(
+        level=(logging.DEBUG if args.debug else logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+    )
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     palette = app.palette()
@@ -1053,6 +1089,7 @@ def main():
     w.resize(860, 620)
     w.show()
     sys.exit(app.exec_())
+
 
 if __name__ == "__main__":
     main()

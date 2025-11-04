@@ -64,7 +64,7 @@ TCP upload (7003)      --------------------->  File upload handler
 
 ```bash
 sudo apt update
-sudo apt install -y ffmpeg xdotool xclip pulseaudio-utils libcap2-bin wireguard-tools qrencode python3 python3-venv python3-pip libgl1 python3-evdev
+sudo apt install -y ffmpeg xdotool xclip pulseaudio-utils libcap2-bin wireguard-tools qrencode python3 python3-venv python3-pip libgl1 libegl1 python3-evdev
 ```
 
 If `pip install av` fails, install FFmpeg development headers:
@@ -73,17 +73,42 @@ If `pip install av` fails, install FFmpeg development headers:
 sudo apt install -y pkg-config python3-dev libavdevice-dev libavfilter-dev libavformat-dev libavcodec-dev libswscale-dev libswresample-dev libavutil-dev
 ```
 
-### Create and activate a virtual environment
+### Modern Setup with uv (Recommended)
+
+[uv](https://github.com/astral-sh/uv) is a fast Python package manager written in Rust. It's significantly faster than pip and provides better dependency resolution.
+
+#### Install uv
+
+```bash
+# Linux/macOS
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Or with pip
+pip install uv
+```
+
+#### Setup project with uv
+
+```bash
+# Clone the repository
+git clone https://github.com/Techlm77/LinuxPlay.git
+cd LinuxPlay
+
+# Create virtual environment and install dependencies (uv does this automatically)
+uv venv
+uv pip install -e ".[dev]"
+
+# Or use the Makefile
+make install-dev
+```
+
+### Traditional Setup
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate   # Linux or macOS
 # .venv\Scripts\activate    # Windows PowerShell
-```
 
-### Python packages
-
-```bash
 python3 -m pip install -U pip wheel setuptools
 python3 -m pip install PyQt5 PyOpenGL PyOpenGL_accelerate av numpy pynput pyperclip psutil evdev
 ```
@@ -95,10 +120,26 @@ Hosting already requires Linux. Controller forwarding currently supports Linux t
 
 ## Usage
 
+### Quick Start with Makefile
+
+```bash
+# Install dependencies
+make install-dev
+
+# Run the GUI launcher
+make run-gui
+
+# Or directly
+make run-host    # Start host
+make run-client  # Show client help
+```
+
 ### GUI launcher
 
 ```bash
 python3 start.py
+# Or with uv
+uv run python start.py
 ```
 - Host tab. Pick a preset and select Start Host.
 - Client tab. Enter the host LAN IP or WireGuard tunnel IP and select Start Client.
@@ -186,6 +227,79 @@ python3 client.py --host_ip 192.168.1.20 --decoder h.264 --hwaccel auto --audio 
 - Client GUI now auto detects certificate bundle and disables the PIN field live.
 - Improved heartbeat handling and reconnect behavior.
 - Expanded controller support and stability.
+
+---
+
+## Development
+
+### Code Quality Tools
+
+LinuxPlay uses modern Python tooling for development:
+
+- **[uv](https://github.com/astral-sh/uv)**: Fast Python package manager (pip replacement)
+- **[ruff](https://github.com/astral-sh/ruff)**: Extremely fast Python linter and formatter
+- **[pytest](https://pytest.org)**: Comprehensive testing framework
+
+### Running Tests
+
+LinuxPlay includes a comprehensive test suite with 150+ tests covering utilities, authentication, and network protocols.
+
+```bash
+# Install test dependencies
+make install-test
+
+# Run all tests
+make test
+
+# Run unit tests only
+make test-unit
+
+# Run integration tests only
+make test-integration
+
+# Run tests with coverage
+make test-cov
+
+# Quick interactive test runner
+./run_tests.sh
+```
+
+See [tests/README.md](tests/README.md) for detailed testing documentation.
+
+### Using ruff
+
+```bash
+# Format code
+make format
+# Or directly
+uv run ruff format .
+
+# Check for issues
+make lint
+# Or
+uv run ruff check .
+
+# Auto-fix issues
+make fix
+# Or
+uv run ruff check . --fix
+```
+
+### Available Make Commands
+
+```bash
+make help          # Show all available commands
+make install       # Install project dependencies
+make install-dev   # Install with dev dependencies
+make lint          # Run ruff linter
+make format        # Format code with ruff
+make check         # Check without making changes
+make fix           # Auto-fix linting issues
+make run-host      # Run the host application
+make run-client    # Run the client application
+make run-gui       # Run the GUI launcher
+make clean         # Clean cache and build artifacts
+```
 
 ---
 
