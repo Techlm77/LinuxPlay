@@ -1,24 +1,32 @@
 """Unit tests for client.py utility functions."""
 
+import subprocess
+from pathlib import Path
+
+from linuxplay.client import (
+    CLIENT_STATE,
+    _best_ts_pkt_size,
+    _probe_hardware_capabilities,
+    choose_auto_hwaccel,
+    detect_network_mode,
+    ffmpeg_hwaccels,
+    pick_best_renderer,
+)
+
 
 class TestNetworkModeDetection:
     """Tests for network mode detection."""
 
     def test_detect_network_mode_wifi_linux(self, monkeypatch):
         """Test WiFi detection on Linux."""
-        import subprocess
-        from pathlib import Path
-
-        from linuxplay.client import detect_network_mode
-
-        def mock_check_output(cmd, **kwargs):
+        def mock_check_output(cmd, **_kwargs):
             if cmd[0] == "ip":
                 return "dev wlp3s0 src 192.168.1.100"
             return ""
 
-        def mock_path_exists(self):
+        def mock_path_exists(_self):
             # /sys/class/net/wlp3s0/wireless exists for WiFi
-            return "wireless" in str(self)
+            return "wireless" in str(_self)
 
         monkeypatch.setattr(subprocess, "check_output", mock_check_output)
         monkeypatch.setattr(Path, "exists", mock_path_exists)
@@ -28,17 +36,12 @@ class TestNetworkModeDetection:
 
     def test_detect_network_mode_lan_linux(self, monkeypatch):
         """Test LAN detection on Linux."""
-        import subprocess
-        from pathlib import Path
-
-        from linuxplay.client import detect_network_mode
-
-        def mock_check_output(cmd, **kwargs):
+        def mock_check_output(cmd, **_kwargs):
             if cmd[0] == "ip":
                 return "dev eth0 src 192.168.1.100"
             return ""
 
-        def mock_path_exists(self):
+        def mock_path_exists(_self):
             return False  # No wireless directory
 
         monkeypatch.setattr(subprocess, "check_output", mock_check_output)
@@ -49,11 +52,7 @@ class TestNetworkModeDetection:
 
     def test_detect_network_mode_fallback(self, monkeypatch):
         """Test fallback to LAN on detection failure."""
-        import subprocess
-
-        from linuxplay.client import detect_network_mode
-
-        def mock_check_output(*args, **kwargs):
+        def mock_check_output(*_args, **_kwargs):
             raise Exception("Command failed")
 
         monkeypatch.setattr(subprocess, "check_output", mock_check_output)
@@ -67,8 +66,6 @@ class TestHardwareAccelSelection:
 
     def test_choose_auto_hwaccel_windows(self, monkeypatch):
         """Test auto hardware accel selection on Windows."""
-        from linuxplay.client import choose_auto_hwaccel
-
         def mock_hwaccels():
             return {"d3d11va", "cuda", "dxva2"}
 
@@ -79,8 +76,6 @@ class TestHardwareAccelSelection:
 
     def test_choose_auto_hwaccel_linux(self, monkeypatch):
         """Test auto hardware accel selection on Linux."""
-        from linuxplay.client import choose_auto_hwaccel
-
         def mock_hwaccels():
             return {"vaapi", "cuda"}
 
@@ -91,8 +86,6 @@ class TestHardwareAccelSelection:
 
     def test_choose_auto_hwaccel_cpu_fallback(self, monkeypatch):
         """Test CPU fallback when no hardware accel available."""
-        from linuxplay.client import choose_auto_hwaccel
-
         def mock_hwaccels():
             return set()  # No hardware acceleration
 
@@ -107,24 +100,18 @@ class TestMPEGTSPacketSize:
 
     def test_best_ts_pkt_size_ipv4(self):
         """Test packet size for IPv4."""
-        from linuxplay.client import _best_ts_pkt_size
-
         result = _best_ts_pkt_size(1500, False)
         assert result == 1316
         assert result % 188 == 0
 
     def test_best_ts_pkt_size_ipv6(self):
         """Test packet size for IPv6."""
-        from linuxplay.client import _best_ts_pkt_size
-
         result = _best_ts_pkt_size(1500, True)
         assert result == 1316
         assert result % 188 == 0
 
     def test_best_ts_pkt_size_minimum(self):
         """Test minimum packet size handling."""
-        from linuxplay.client import _best_ts_pkt_size
-
         result = _best_ts_pkt_size(400, False)
         assert result >= 188
         assert result % 188 == 0
@@ -135,8 +122,6 @@ class TestClientStateManagement:
 
     def test_client_state_initial(self):
         """Test initial client state."""
-        from linuxplay.client import CLIENT_STATE
-
         assert CLIENT_STATE["connected"] is False
         assert CLIENT_STATE["last_heartbeat"] >= 0
         assert CLIENT_STATE["net_mode"] in ["lan", "wifi"]
@@ -144,8 +129,6 @@ class TestClientStateManagement:
 
     def test_client_state_update(self):
         """Test updating client state."""
-        from linuxplay.client import CLIENT_STATE
-
         # Update state
         CLIENT_STATE["connected"] = True
         CLIENT_STATE["net_mode"] = "wifi"
@@ -163,8 +146,6 @@ class TestRendererSelection:
 
     def test_pick_best_renderer_returns_valid(self):
         """Test that pick_best_renderer returns a valid renderer."""
-        from linuxplay.client import pick_best_renderer
-
         renderer = pick_best_renderer()
         assert renderer is not None
         assert hasattr(renderer, "render_frame")
@@ -173,8 +154,6 @@ class TestRendererSelection:
 
     def test_renderer_has_name(self):
         """Test that renderer has a name."""
-        from linuxplay.client import pick_best_renderer
-
         renderer = pick_best_renderer()
         name = renderer.name()
         assert isinstance(name, str)
@@ -190,11 +169,7 @@ class TestHardwareCapabilities:
 
     def test_probe_hardware_capabilities_no_error(self, monkeypatch):
         """Test hardware probing doesn't raise errors."""
-        from pathlib import Path
-
-        from linuxplay.client import _probe_hardware_capabilities
-
-        def mock_path_exists(self):
+        def mock_path_exists(_self):
             return False
 
         monkeypatch.setattr(Path, "exists", mock_path_exists)
@@ -204,11 +179,7 @@ class TestHardwareCapabilities:
 
     def test_ffmpeg_hwaccels_returns_set(self, monkeypatch):
         """Test ffmpeg_hwaccels returns a set."""
-        import subprocess
-
-        from linuxplay.client import ffmpeg_hwaccels
-
-        def mock_check_output(*args, **kwargs):
+        def mock_check_output(*_args, **_kwargs):
             return "Hardware acceleration methods:\ncuda\nvaapi\n"
 
         monkeypatch.setattr(subprocess, "check_output", mock_check_output)
@@ -220,11 +191,7 @@ class TestHardwareCapabilities:
 
     def test_ffmpeg_hwaccels_handles_error(self, monkeypatch):
         """Test ffmpeg_hwaccels handles errors gracefully."""
-        import subprocess
-
-        from linuxplay.client import ffmpeg_hwaccels
-
-        def mock_check_output(*args, **kwargs):
+        def mock_check_output(*_args, **_kwargs):
             raise Exception("Command failed")
 
         monkeypatch.setattr(subprocess, "check_output", mock_check_output)

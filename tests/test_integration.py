@@ -1,10 +1,24 @@
 """Integration tests for network communication and streaming."""
 
 import socket
+import subprocess
 import threading
 import time
 
 import pytest
+
+from linuxplay.host import (
+    FILE_UPLOAD_PORT,
+    TCP_HANDSHAKE_PORT,
+    UDP_AUDIO_PORT,
+    UDP_CLIPBOARD_PORT,
+    UDP_CONTROL_PORT,
+    UDP_GAMEPAD_PORT,
+    UDP_HEARTBEAT_PORT,
+    UDP_VIDEO_PORT,
+    StreamThread,
+    detect_monitors,
+)
 
 
 @pytest.mark.integration
@@ -34,7 +48,7 @@ class TestUDPCommunication:
         client.sendto(test_message, ("127.0.0.1", port))
 
         # Receive message
-        data, addr = server.recvfrom(1024)
+        data, _addr = server.recvfrom(1024)
         assert data == test_message
 
         client.close()
@@ -94,7 +108,7 @@ class TestTCPHandshake:
         thread.start()
 
         # Accept connection
-        conn, addr = server.accept()
+        conn, _addr = server.accept()
         data = conn.recv(1024)
         assert data == b"HELLO"
 
@@ -108,17 +122,6 @@ class TestPortConstants:
 
     def test_port_constants_defined(self):
         """Test that all required port constants are defined."""
-        from linuxplay.host import (
-            FILE_UPLOAD_PORT,
-            TCP_HANDSHAKE_PORT,
-            UDP_AUDIO_PORT,
-            UDP_CLIPBOARD_PORT,
-            UDP_CONTROL_PORT,
-            UDP_GAMEPAD_PORT,
-            UDP_HEARTBEAT_PORT,
-            UDP_VIDEO_PORT,
-        )
-
         assert UDP_VIDEO_PORT == 5000
         assert UDP_CONTROL_PORT == 7000
         assert TCP_HANDSHAKE_PORT == 7001
@@ -130,17 +133,6 @@ class TestPortConstants:
 
     def test_ports_unique(self):
         """Test that all port numbers are unique."""
-        from linuxplay.host import (
-            FILE_UPLOAD_PORT,
-            TCP_HANDSHAKE_PORT,
-            UDP_AUDIO_PORT,
-            UDP_CLIPBOARD_PORT,
-            UDP_CONTROL_PORT,
-            UDP_GAMEPAD_PORT,
-            UDP_HEARTBEAT_PORT,
-            UDP_VIDEO_PORT,
-        )
-
         ports = [
             UDP_VIDEO_PORT,
             UDP_CONTROL_PORT,
@@ -170,7 +162,6 @@ class TestHeartbeatProtocol:
 
     def test_heartbeat_message_exchange(self):
         """Test heartbeat message exchange."""
-        # Server (host)
         server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         server.bind(("127.0.0.1", 0))
         server.settimeout(2.0)
@@ -306,8 +297,6 @@ class TestStreamThreadManagement:
 
     def test_stream_thread_creation(self):
         """Test StreamThread creation."""
-        from linuxplay.host import StreamThread
-
         cmd = ["echo", "test"]
         thread = StreamThread(cmd, "TestStream")
 
@@ -317,8 +306,6 @@ class TestStreamThreadManagement:
 
     def test_stream_thread_stop(self):
         """Test stopping a StreamThread."""
-        from linuxplay.host import StreamThread
-
         cmd = ["sleep", "10"]
         thread = StreamThread(cmd, "TestStream")
 
@@ -332,11 +319,7 @@ class TestMonitorDetection:
 
     def test_detect_monitors_returns_list(self, monkeypatch):
         """Test detect_monitors returns a list."""
-        import subprocess
-
-        from linuxplay.host import detect_monitors
-
-        def mock_check_output(*args, **kwargs):
+        def mock_check_output(*_args, **_kwargs):
             # Mock xrandr output
             return """Monitors: 2
  0: +*HDMI-1 1920/527x1080/296+0+0  HDMI-1
@@ -350,11 +333,7 @@ class TestMonitorDetection:
 
     def test_detect_monitors_handles_error(self, monkeypatch):
         """Test detect_monitors handles errors gracefully."""
-        import subprocess
-
-        from linuxplay.host import detect_monitors
-
-        def mock_check_output(*args, **kwargs):
+        def mock_check_output(*_args, **_kwargs):
             raise Exception("xrandr not found")
 
         monkeypatch.setattr(subprocess, "check_output", mock_check_output)

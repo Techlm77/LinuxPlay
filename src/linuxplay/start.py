@@ -554,7 +554,7 @@ class HostTab(QWidget):
             ins = 1 if "auto" in keys else 0
             keys.insert(ins, "cpu")
             pretty.insert(ins, f"cpu - {BACKEND_READABLE['cpu']}")
-        for k, label in zip(keys, pretty):
+        for k, label in zip(keys, pretty, strict=False):
             self.hwencCombo.addItem(label, k)
         want = preselect or "auto"
         idx = self.hwencCombo.findData(want)

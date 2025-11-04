@@ -969,7 +969,7 @@ class VideoWidgetGL(QOpenGLWidget):
         if len(self._frame_times) > 90:
             self._frame_times.pop(0)
         if len(self._frame_times) >= 2:
-            diffs = [t2 - t1 for t1, t2 in zip(self._frame_times, self._frame_times[1:])]
+            diffs = [t2 - t1 for t1, t2 in zip(self._frame_times, self._frame_times[1:], strict=False)]
             mean_diff = statistics.mean(diffs)
             self._fps = 1.0 / mean_diff if mean_diff > 0 else 0.0
 
