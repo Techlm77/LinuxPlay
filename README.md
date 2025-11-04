@@ -305,14 +305,16 @@ make clean         # Clean cache and build artifacts
 
 ## Support LinuxPlay
 
-LinuxPlay is a fully open-source project built from scratch and currently maintained by a single developer in spare time.  
-The long-term goal is to grow into a community-driven project, welcoming developers who are passionate about performance, networking, and open-source streaming tech.
+LinuxPlay is a fully open-source project built from scratch and originally maintained by a single developer in spare time.  
+It has since grown into a collaborative, community-driven project thanks to contributors who share a passion for performance, networking, and open-source streaming technology.
 
 If you enjoy LinuxPlay or use it in your workflow, you can help sustain and expand development through GitHub Sponsors:
 
 [![Sponsor @Techlm77](https://img.shields.io/badge/Sponsor-Techlm77-pink.svg?logo=github-sponsors)](https://github.com/sponsors/Techlm77)
 
-Your support helps cover hardware testing, development time, and ongoing improvements to performance, security, and cross-platform compatibility across many different Linux distros, while encouraging future contributors to join the project.
+Your support helps cover hardware testing, development time, and ongoing improvements to performance, security, and cross-platform compatibility across many different Linux distros, while encouraging future contributors to join and help LinuxPlay continue to evolve.
+
+Special thanks to @bjornjorgensen for helping bring LinuxPlay’s tooling, testing, and CI to a production-grade level.
 
 ---
 
