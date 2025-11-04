@@ -176,6 +176,7 @@ def detect_network_mode(host_ip: str) -> str:
             return "lan"
     except Exception:
         return "lan"
+    return "lan"
 
 
 def _read_pem_cert_fingerprint(pem_path: str) -> str:
