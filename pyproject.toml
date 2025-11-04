@@ -3,7 +3,7 @@ name = "linuxplay"
 version = "0.1.0"
 description = "Ultra low latency remote desktop and game streaming for Linux"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = {text = "GPL-2.0-only"}
 authors = [
     {name = "Techlm77", email = "techlm77@users.noreply.github.com"}
@@ -16,7 +16,6 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -27,36 +26,45 @@ dependencies = [
     "PyQt5>=5.15.0",
     "PyOpenGL>=3.1.6",
     "PyOpenGL-accelerate>=3.1.6",
-    "av>=10.0.0",
+    "av>=16.0.0",
     "numpy>=1.21.0",
     "pynput>=1.7.6",
     "pyperclip>=1.8.2",
     "psutil>=5.9.0",
     "evdev>=1.6.0; sys_platform == 'linux'",
-    "cryptography>=41.0.0",
+    "cryptography>=46.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "ruff>=0.1.0",
+    "ruff>=0.14.3",
+]
+test = [
+    "pytest>=8.4.2",
+    "pytest-cov>=7.0.0",
+    "pytest-mock>=3.11.0",
+    "pytest-timeout>=2.1.0",
 ]
 
 [project.scripts]
-linuxplay = "start:main"
-linuxplay-host = "host:main"
-linuxplay-client = "client:main"
+linuxplay = "linuxplay.start:main"
+linuxplay-host = "linuxplay.host:main"
+linuxplay-client = "linuxplay.client:main"
 
 [project.urls]
-Homepage = "https://github.com/bjornjorgensen/LinuxPlay"
-Repository = "https://github.com/bjornjorgensen/LinuxPlay"
-Issues = "https://github.com/bjornjorgensen/LinuxPlay/issues"
+Homepage = "https://github.com/Techlm77/LinuxPlay"
+Repository = "https://github.com/Techlm77/LinuxPlay"
+Issues = "https://github.com/Techlm77/LinuxPlay/issues"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+packages = ["src/linuxplay"]
+
 [tool.ruff]
-target-version = "py39"
+target-version = "py310"
 line-length = 120
 indent-width = 4
 
@@ -122,5 +130,57 @@ docstring-code-line-length = 80
 
 [tool.uv]
 dev-dependencies = [
-    "ruff>=0.1.0",
+    "ruff>=0.14.3",
+    "pytest>=8.4.2",
+    "pytest-cov>=7.0.0",
+    "pytest-mock>=3.11.0",
+    "pytest-timeout>=2.1.0",
+]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--showlocals",
+]
+testpaths = ["tests"]
+pythonpath = ["src"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "tests/*",
+    "*/__pycache__/*",
+    "*/site-packages/*",
+    ".venv/*",
+]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
 ]

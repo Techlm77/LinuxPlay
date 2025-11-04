@@ -91,7 +91,7 @@ pip install uv
 
 ```bash
 # Clone the repository
-git clone https://github.com/bjornjorgensen/LinuxPlay.git
+git clone https://github.com/Techlm77/LinuxPlay.git
 cd LinuxPlay
 
 # Create virtual environment and install dependencies (uv does this automatically)
@@ -238,6 +238,33 @@ LinuxPlay uses modern Python tooling for development:
 
 - **[uv](https://github.com/astral-sh/uv)**: Fast Python package manager (pip replacement)
 - **[ruff](https://github.com/astral-sh/ruff)**: Extremely fast Python linter and formatter
+- **[pytest](https://pytest.org)**: Comprehensive testing framework
+
+### Running Tests
+
+LinuxPlay includes a comprehensive test suite with 150+ tests covering utilities, authentication, and network protocols.
+
+```bash
+# Install test dependencies
+make install-test
+
+# Run all tests
+make test
+
+# Run unit tests only
+make test-unit
+
+# Run integration tests only
+make test-integration
+
+# Run tests with coverage
+make test-cov
+
+# Quick interactive test runner
+./run_tests.sh
+```
+
+See [tests/README.md](tests/README.md) for detailed testing documentation.
 
 ### Using ruff
 
