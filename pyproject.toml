@@ -1,7 +1,7 @@
 [project]
 name = "linuxplay"
 version = "0.1.0"
-description = "Ultra low latency remote desktop and game streaming for Linux"
+description = "Ultra low latency remote desktop and game streaming. Host on Linux, client on Linux or Windows."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "GPL-2.0-only"}
