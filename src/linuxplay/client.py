@@ -64,6 +64,7 @@ CLIPBOARD_INBOX = Queue()
 
 class AudioProcessManager:
     """Manages the audio process to avoid global state."""
+
     proc = None
 
 

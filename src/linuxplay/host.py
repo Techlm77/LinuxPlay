@@ -284,6 +284,7 @@ host_state = HostState()
 
 class HostArgsManager:
     """Manages the host arguments to avoid global state."""
+
     args = None
 
 

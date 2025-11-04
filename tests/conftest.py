@@ -9,6 +9,7 @@ import pytest
 @pytest.fixture
 def mock_ffmpeg_available(monkeypatch):
     """Mock FFmpeg as available."""
+
     def mock_check_output(*_args, **_kwargs):
         return b"ffmpeg version 6.0"
 

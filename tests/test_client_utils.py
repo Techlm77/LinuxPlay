@@ -19,6 +19,7 @@ class TestNetworkModeDetection:
 
     def test_detect_network_mode_wifi_linux(self, monkeypatch):
         """Test WiFi detection on Linux."""
+
         def mock_check_output(cmd, **_kwargs):
             if cmd[0] == "ip":
                 return "dev wlp3s0 src 192.168.1.100"
@@ -36,6 +37,7 @@ class TestNetworkModeDetection:
 
     def test_detect_network_mode_lan_linux(self, monkeypatch):
         """Test LAN detection on Linux."""
+
         def mock_check_output(cmd, **_kwargs):
             if cmd[0] == "ip":
                 return "dev eth0 src 192.168.1.100"
@@ -52,6 +54,7 @@ class TestNetworkModeDetection:
 
     def test_detect_network_mode_fallback(self, monkeypatch):
         """Test fallback to LAN on detection failure."""
+
         def mock_check_output(*_args, **_kwargs):
             raise Exception("Command failed")
 
@@ -66,6 +69,7 @@ class TestHardwareAccelSelection:
 
     def test_choose_auto_hwaccel_windows(self, monkeypatch):
         """Test auto hardware accel selection on Windows."""
+
         def mock_hwaccels():
             return {"d3d11va", "cuda", "dxva2"}
 
@@ -76,6 +80,7 @@ class TestHardwareAccelSelection:
 
     def test_choose_auto_hwaccel_linux(self, monkeypatch):
         """Test auto hardware accel selection on Linux."""
+
         def mock_hwaccels():
             return {"vaapi", "cuda"}
 
@@ -86,6 +91,7 @@ class TestHardwareAccelSelection:
 
     def test_choose_auto_hwaccel_cpu_fallback(self, monkeypatch):
         """Test CPU fallback when no hardware accel available."""
+
         def mock_hwaccels():
             return set()  # No hardware acceleration
 
@@ -169,6 +175,7 @@ class TestHardwareCapabilities:
 
     def test_probe_hardware_capabilities_no_error(self, monkeypatch):
         """Test hardware probing doesn't raise errors."""
+
         def mock_path_exists(_self):
             return False
 
@@ -179,6 +186,7 @@ class TestHardwareCapabilities:
 
     def test_ffmpeg_hwaccels_returns_set(self, monkeypatch):
         """Test ffmpeg_hwaccels returns a set."""
+
         def mock_check_output(*_args, **_kwargs):
             return "Hardware acceleration methods:\ncuda\nvaapi\n"
 
@@ -191,6 +199,7 @@ class TestHardwareCapabilities:
 
     def test_ffmpeg_hwaccels_handles_error(self, monkeypatch):
         """Test ffmpeg_hwaccels handles errors gracefully."""
+
         def mock_check_output(*_args, **_kwargs):
             raise Exception("Command failed")
 

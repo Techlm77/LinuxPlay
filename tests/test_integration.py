@@ -319,6 +319,7 @@ class TestMonitorDetection:
 
     def test_detect_monitors_returns_list(self, monkeypatch):
         """Test detect_monitors returns a list."""
+
         def mock_check_output(*_args, **_kwargs):
             # Mock xrandr output
             return """Monitors: 2
@@ -333,6 +334,7 @@ class TestMonitorDetection:
 
     def test_detect_monitors_handles_error(self, monkeypatch):
         """Test detect_monitors handles errors gracefully."""
+
         def mock_check_output(*_args, **_kwargs):
             raise Exception("xrandr not found")
 
