@@ -125,7 +125,7 @@ def _save_trust_db(db):
             json.dump(db, f, indent=2)
         return True
     except Exception as e:
-        logging.error("[AUTH] Failed to write %s: %s", TRUSTED_DB, e)
+        logging.error("[AUTH] Failed to write %s: %s", TRUSTED_DB, type(e).__name__)
         return False
 
 
