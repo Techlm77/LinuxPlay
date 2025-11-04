@@ -316,10 +316,11 @@ def audio_listener(host_ip):
         global audio_proc
         cmd = [
             "ffplay",
-            "-hide_banner", "-loglevel", "error",
+            "-hide_banner", "-loglevel", "info",
             "-nodisp", "-autoexit",
             "-fflags", "nobuffer",
             "-flags", "low_delay",
+            "-af", "aresample=matrix_encoding=none",
             "-f", "mpegts",
             f"udp://{host_ip}:{UDP_AUDIO_PORT}?overrun_nonfatal=1&buffer_size=32768"
         ]
@@ -327,9 +328,13 @@ def audio_listener(host_ip):
         try:
             audio_proc = subprocess.Popen(
                 cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True
             )
+            for line in audio_proc.stdout:
+                if "Stream #" in line and "Audio" in line:
+                    logging.info(line.strip())
             audio_proc.wait()
         except Exception as e:
             logging.error("Audio listener failed: %s", e)
