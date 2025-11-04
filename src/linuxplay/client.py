@@ -357,8 +357,10 @@ def clipboard_listener(app_clipboard, host_ip):
                             app_clipboard.setText(text)
                             app_clipboard.blockSignals(False)
                 except TimeoutError:
+                    # Normal timeout during wait for clipboard data - no action needed
                     pass
                 except Exception:
+                    # Network error or decode failure - retry after brief delay
                     time.sleep(0.2)
                     continue
 
