@@ -124,8 +124,8 @@ def _save_trust_db(db):
         with Path(TRUSTED_DB).open("w", encoding="utf-8") as f:
             json.dump(db, f, indent=2)
         return True
-    except Exception as e:
-        logging.error("[AUTH] Failed to write %s: %s", TRUSTED_DB, type(e).__name__)
+    except Exception:
+        logging.error("[AUTH] Failed to write trust database")
         return False
 
 
