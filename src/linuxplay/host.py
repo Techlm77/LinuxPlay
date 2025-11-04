@@ -280,7 +280,14 @@ class HostState:
 
 
 host_state = HostState()
-HOST_ARGS = None
+
+
+class HostArgsManager:
+    """Manages the host arguments to avoid global state."""
+    args = None
+
+
+host_args_manager = HostArgsManager()
 
 
 def _map_nvenc_tune(tune: str) -> str:
@@ -791,7 +798,7 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
         else:
             hwenc = "cpu"
 
-    adaptive = getattr(HOST_ARGS, "adaptive", False)
+    adaptive = getattr(host_args_manager.args, "adaptive", False)
     str(bitrate or "").lower()
 
     if "vaapi" in hwenc:
@@ -1632,8 +1639,8 @@ def control_listener(sock):
                         host_state.net_mode = mode
                         try:
                             stop_streams_only()
-                            if HOST_ARGS:
-                                start_streams_for_current_client(HOST_ARGS)
+                            if host_args_manager.args:
+                                start_streams_for_current_client(host_args_manager.args)
                         except Exception as e:
                             logging.error(f"Restart after NET failed: {e}")
                 continue
@@ -2176,8 +2183,7 @@ def core_main(args, use_signals=True) -> int:
     host_state.current_bitrate = args.bitrate
     host_state.monitors = detect_monitors() or [(1920, 1080, 0, 0)]
 
-    global HOST_ARGS
-    HOST_ARGS = args
+    host_args_manager.args = args
 
     try:
         host_state.handshake_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

@@ -60,7 +60,14 @@ IS_WINDOWS = py_platform.system() == "Windows"
 IS_LINUX = py_platform.system() == "Linux"
 
 CLIPBOARD_INBOX = Queue()
-audio_proc = None
+
+
+class AudioProcessManager:
+    """Manages the audio process to avoid global state."""
+    proc = None
+
+
+audio_proc_manager = AudioProcessManager()
 CLIENT_STATE = {"connected": False, "last_heartbeat": 0.0, "net_mode": "lan", "reconnecting": False}
 
 try:
@@ -342,7 +349,6 @@ def clipboard_listener(app_clipboard):
 
 def audio_listener(host_ip):
     def loop():
-        global audio_proc
         cmd = [
             "ffplay",
             "-hide_banner",
@@ -362,13 +368,13 @@ def audio_listener(host_ip):
         ]
         logging.info("Audio listener: %s", " ".join(cmd))
         try:
-            audio_proc = subprocess.Popen(
+            audio_proc_manager.proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True
             )
-            for line in audio_proc.stdout:
+            for line in audio_proc_manager.proc.stdout:
                 if "Stream #" in line and "Audio" in line:
                     logging.info(line.strip())
-            audio_proc.wait()
+            audio_proc_manager.proc.wait()
         except Exception as e:
             logging.error("Audio listener failed: %s", e)
 
@@ -1511,14 +1517,13 @@ class MainWindow(QMainWindow):
             with contextlib.suppress(Exception):
                 self._gp_thread.stop()
 
-        global audio_proc
-        if audio_proc:
+        if audio_proc_manager.proc:
             try:
-                audio_proc.terminate()
-                audio_proc.wait(timeout=2)
+                audio_proc_manager.proc.terminate()
+                audio_proc_manager.proc.wait(timeout=2)
             except Exception as e:
                 logging.error(f"ffplay term error: {e}")
-            audio_proc = None
+            audio_proc_manager.proc = None
 
         with contextlib.suppress(Exception):
             self.control_sock.close()
@@ -1708,8 +1713,8 @@ def main():
     ret = app.exec_()
 
     try:
-        if audio_proc:
-            audio_proc.terminate()
+        if audio_proc_manager.proc:
+            audio_proc_manager.proc.terminate()
     except Exception as e:
         logging.error("ffplay term error: %s", e)
 
