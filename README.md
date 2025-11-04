@@ -3,8 +3,9 @@
 > The open source, ultra low latency remote desktop and game streaming stack for Linux. Built with FFmpeg, UDP and Qt.
 
 ![License: GPLv2](https://img.shields.io/badge/License-GPLv2-blue.svg)
-![Platform: Linux](https://img.shields.io/badge/Platform-Linux-green.svg)
-![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-blue)
+![Platform: Linux Host](https://img.shields.io/badge/Host-Linux-green.svg)
+![Platform: Windows Client](https://img.shields.io/badge/Client-Windows%20%7C%20Linux-blue.svg)
+![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![FFmpeg](https://img.shields.io/badge/FFmpeg-Required-critical)
 
 ---
@@ -21,7 +22,7 @@
 - **PIN to Certificate Upgrade**
   - On the first successful PIN login the host issues a per device client certificate and key signed by a local host CA.
   - The bundle contains `client_cert.pem`, `client_key.pem`, `host_ca.pem` (exported under `issued_clients/...`).
-  - Copy these three files with a USB drive to the client folder next to `start.py` and `client.py`.
+  - Copy these three files to the client's `src/linuxplay/` folder (next to `start.py` and `client.py`).
   - The client detects the files and skips the PIN. The GUI disables the PIN field automatically (no restart needed).
 - **Controller Support**: Full gamepad forwarding over UDP using a virtual uinput device on the host. Works with Xbox, DualSense, 8BitDo and other HID controllers.
 - **Multi Monitor**: Stream one or more displays. Resolution and offsets are detected per display.
@@ -29,7 +30,7 @@
 - **Link Aware Streaming**: Buffers adapt for LAN and Wi Fi to reduce jitter and stalls.
 - **Resilience**: Heartbeat with ping and pong. The host stops streams and returns to the waiting state on timeout or disconnect.
 - **Stats Overlay (Client)**: Real time FPS, CPU, RAM and GPU metrics via OpenGL with triple buffered PBO uploads.
-- **Cross Platform**: Host on Linux. Clients available for Linux and Windows.
+- **Cross Platform**: Host runs on Linux. Clients support both Linux and Windows 10/11.
 
 ---
 
@@ -60,11 +61,27 @@ TCP upload (7003)      --------------------->  File upload handler
 
 ## Installation
 
+### System Requirements
+
+**Host (Linux):**
+- Ubuntu 22.04+ (or equivalent)
+- Python 3.10 or higher
+- FFmpeg with hardware encoding support
+- X11 or Wayland display server
+
+**Client (Linux or Windows):**
+- Python 3.10 or higher
+- FFmpeg for audio playback
+- OpenGL 3.0+ support
+
 ### Ubuntu 24.04 packages
 
 ```bash
 sudo apt update
-sudo apt install -y ffmpeg xdotool xclip pulseaudio-utils libcap2-bin wireguard-tools qrencode python3 python3-venv python3-pip libgl1 libegl1 python3-evdev
+sudo apt install -y ffmpeg xdotool xclip pulseaudio-utils libcap2-bin \
+    wireguard-tools qrencode python3 python3-venv python3-pip libgl1 libegl1 \
+    python3-evdev libxcb-xinerama0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+    libxcb-keysyms1 libxcb-randr0 libxcb-render-util0
 ```
 
 If `pip install av` fails, install FFmpeg development headers:
@@ -137,9 +154,9 @@ make run-client  # Show client help
 ### GUI launcher
 
 ```bash
-python3 start.py
+python3 src/linuxplay/start.py
 # Or with uv
-uv run python start.py
+uv run python src/linuxplay/start.py
 ```
 - Host tab. Pick a preset and select Start Host.
 - Client tab. Enter the host LAN IP or WireGuard tunnel IP and select Start Client.
@@ -148,11 +165,18 @@ uv run python start.py
 ### Command line
 
 ```bash
-# Host
-python3 host.py --gui --encoder h.264 --hwenc auto --framerate 60 --bitrate 8M --audio enable --gop 15 --pix_fmt yuv420p
+# Host (with GUI - requires desktop session)
+uv run python src/linuxplay/host.py --gui --encoder h.264 --hwenc auto --framerate 60 --bitrate 8M --audio enable --gop 15 --pix_fmt yuv420p
 
-# Client
-python3 client.py --host_ip 192.168.1.20 --decoder h.264 --hwaccel auto --audio enable --monitor 0 --gamepad enable --debug
+# Host (headless/SSH - no GUI)
+uv run python src/linuxplay/host.py --encoder h.264 --hwenc auto --framerate 60 --bitrate 8M --audio enable --gop 15 --pix_fmt yuv420p
+
+# Client (Linux or Windows)
+uv run python src/linuxplay/client.py --host_ip SERVER_IP --decoder h.264 --hwaccel auto --audio enable --monitor 0 --gamepad enable --debug
+
+# Or with traditional python3 (if not using uv)
+python3 src/linuxplay/host.py --encoder h.264 --hwenc auto --framerate 60 --bitrate 8M --audio enable
+python3 src/linuxplay/client.py --host_ip SERVER_IP --decoder h.264 --hwaccel auto --audio enable
 ```
 
 ---
@@ -213,7 +237,7 @@ python3 client.py --host_ip 192.168.1.20 --decoder h.264 --hwaccel auto --audio 
 - One active client at a time. Additional clients receive BUSY until the session ends.
 - Certificate based login after first PIN:
   - On first trusted connection the host creates a mini CA and issues a per device certificate.
-  - Copy `client_cert.pem`, `client_key.pem`, `host_ca.pem` to the client folder next to `start.py` and `client.py`.
+  - Copy `client_cert.pem`, `client_key.pem`, `host_ca.pem` to the client's `src/linuxplay/` folder (next to `start.py` and `client.py`).
   - The client detects the files, disables the PIN field and authenticates with the certificate.
   - Private keys never leave the client. Only a fingerprint is sent during handshake.
 - Revoke a client by removing or marking the entry in `trusted_clients.json` on the host.
@@ -227,6 +251,142 @@ python3 client.py --host_ip 192.168.1.20 --decoder h.264 --hwaccel auto --audio 
 - Client GUI now auto detects certificate bundle and disables the PIN field live.
 - Improved heartbeat handling and reconnect behavior.
 - Expanded controller support and stability.
+
+---
+
+## Troubleshooting
+
+### Host Issues
+
+#### PyQt5 module not found
+
+```bash
+# Install all dependencies
+uv pip install -e ".[dev]"
+# Or with traditional pip
+pip3 install PyQt5
+```
+
+#### Qt platform plugin "xcb" error
+
+Install required X11 libraries:
+
+```bash
+sudo apt install -y libxcb-xinerama0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 \
+    libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 \
+    libxcb-xfixes0 libxcb-xkb1 libxkbcommon-x11-0
+```
+
+If running over SSH, either:
+- Run on the actual desktop session (recommended)
+- Use SSH with X11 forwarding: `ssh -X user@host`
+- Set display: `export DISPLAY=:0`
+
+#### VAAPI error: "No VA display found for device /dev/dri/renderD128"
+
+Add your user to the video and render groups:
+
+```bash
+sudo usermod -a -G video,render $USER
+# Log out and log back in for changes to take effect
+```
+
+Create persistent udev rule:
+
+```bash
+echo 'KERNEL=="renderD*", GROUP="render", MODE="0660"' | sudo tee /etc/udev/rules.d/70-render.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+Verify access:
+
+```bash
+ls -l /dev/dri/renderD128
+# Should show: crw-rw---- 1 root render ...
+groups
+# Should include: video render
+```
+
+Alternatively, use CPU encoding:
+
+```bash
+python src/linuxplay/host.py --hwenc cpu --encoder h.264
+```
+
+#### Gamepad error: "/dev/uinput" cannot be opened
+
+```bash
+sudo chmod 666 /dev/uinput
+# Or add to input group:
+sudo usermod -a -G input $USER
+```
+
+### Windows Client Issues
+
+#### ffplay not found (Audio error)
+
+Download and install FFmpeg for Windows:
+1. Download from [FFmpeg Builds](https://github.com/BtbN/FFmpeg-Builds/releases)
+2. Extract and add to PATH
+3. Or disable audio: `--audio disable`
+
+#### Windows Firewall blocking UDP packets
+
+Add firewall rule for Python:
+
+```powershell
+# Run PowerShell as Administrator
+New-NetFirewallRule -DisplayName "LinuxPlay Client" -Direction Inbound `
+    -Program "C:\Path\To\python.exe" -Action Allow -Profile Private
+```
+
+Or through GUI:
+1. Windows Security → Firewall & network protection
+2. Advanced settings → Inbound Rules → New Rule
+3. Program → Browse to your Python executable
+4. Allow the connection → Private networks
+5. Name: "LinuxPlay Client"
+
+#### OpenGL GLError on Windows
+
+Use ANGLE backend for better Windows compatibility:
+
+```powershell
+$env:QT_OPENGL="angle"
+$env:QT_ANGLE_PLATFORM="d3d11"
+python src/linuxplay/client.py --host_ip YOUR_HOST_IP --decoder h.264 --hwaccel auto
+```
+
+#### Network socket error (WinError 10014)
+
+This indicates firewall is blocking UDP. See "Windows Firewall blocking UDP packets" above.
+
+### General Issues
+
+#### PIN rotation or connection timeouts
+
+- Ensure UDP ports 5000-7005 are accessible between client and host
+- Check firewall rules on both machines
+- Verify network connectivity: `ping YOUR_HOST_IP`
+- For WAN connections, use WireGuard VPN
+
+#### Certificate authentication not working
+
+Ensure all three certificate files are in the client's `src/linuxplay/` folder:
+- `client_cert.pem`
+- `client_key.pem`
+- `host_ca.pem`
+
+They should be next to `client.py` and `start.py` in `src/linuxplay/`.
+
+#### Poor streaming quality or stuttering
+
+- Check network bandwidth: `iperf3` between client and host
+- Lower bitrate: `--bitrate 4M` or `--bitrate 6M`
+- Reduce framerate: `--framerate 30`
+- On WiFi, ensure good signal strength (> -60 dBm)
+- Try `--net wifi` mode for WiFi connections
 
 ---
 
