@@ -55,7 +55,7 @@ jobs:
           sudo apt-get install -y \
             ffmpeg \
             xvfb \
-            libgl1-mesa-glx \
+            libgl1 \
             libxcb-xinerama0 \
             libxkbcommon-x11-0 \
             libxcb-icccm4 \
@@ -65,7 +65,7 @@ jobs:
             libxcb-render-util0 \
             libxcb-shape0 \
             libxcb-xfixes0 \
-            libegl1-mesa \
+            libegl1 \
             libxcb-cursor0
 
       - name: Install uv
@@ -103,7 +103,7 @@ jobs:
           sudo apt-get install -y \
             ffmpeg \
             xvfb \
-            libgl1-mesa-glx \
+            libgl1 \
             libxcb-xinerama0 \
             libxkbcommon-x11-0 \
             libxcb-icccm4 \
@@ -113,7 +113,7 @@ jobs:
             libxcb-render-util0 \
             libxcb-shape0 \
             libxcb-xfixes0 \
-            libegl1-mesa \
+            libegl1 \
             libxcb-cursor0
 
       - name: Install uv
