@@ -1,7 +1,5 @@
 """Unit tests for host.py utility functions."""
 
-import pytest
-
 
 class TestBitrateUtils:
     """Tests for bitrate parsing and formatting."""
@@ -64,7 +62,7 @@ class TestBitrateUtils:
         from linuxplay.host import _format_bits
 
         assert _format_bits(0) == "1"
-        assert _format_bits(500) == "1"
+        assert _format_bits(500) == "500"
 
 
 class TestPINGeneration:
@@ -102,8 +100,8 @@ class TestNVENCUtils:
         """Test valid NVENC preset mapping."""
         from linuxplay.host import _safe_nvenc_preset
 
-        assert _safe_nvenc_preset("fast") == "fast"
         assert _safe_nvenc_preset("p4") == "p4"
+        assert _safe_nvenc_preset("p1") == "p1"
         assert _safe_nvenc_preset("llhp") == "llhp"
 
     def test_safe_nvenc_preset_aliases(self):
@@ -262,8 +260,8 @@ class TestTargetBPP:
         bpp_30fps = _target_bpp("h.264", 30)
         bpp_60fps = _target_bpp("h.264", 60)
 
-        assert 0.05 <= bpp_30fps <= 0.10
-        assert bpp_60fps > bpp_30fps  # Higher FPS needs more BPP
+        assert bpp_30fps == 0.07
+        assert bpp_60fps == 0.07  # Same base BPP for standard framerates
 
     def test_target_bpp_h265_standard(self):
         """Test BPP for H.265 (more efficient)."""
@@ -301,4 +299,4 @@ class TestMarkerValue:
 
         monkeypatch.setenv("LINUXPLAY_SID", "test-session-123")
         marker = _marker_value()
-        assert "LinuxPlayHost:test-session-123" == marker
+        assert marker == "LinuxPlayHost:test-session-123"

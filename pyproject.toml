@@ -128,8 +128,8 @@ line-ending = "auto"
 docstring-code-format = true
 docstring-code-line-length = 80
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "ruff>=0.14.3",
     "pytest>=8.4.2",
     "pytest-cov>=7.0.0",

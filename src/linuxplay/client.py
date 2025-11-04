@@ -298,7 +298,7 @@ def heartbeat_responder(_host_ip):
                     if data == b"PING":
                         sock.sendto(b"PONG", addr)
                         CLIENT_STATE["last_heartbeat"] = time.time()
-                except socket.timeout:  # noqa: PERF203
+                except TimeoutError:  # noqa: PERF203
                     if time.time() - CLIENT_STATE["last_heartbeat"] > 10:
                         CLIENT_STATE["connected"] = False
                         CLIENT_STATE["reconnecting"] = True

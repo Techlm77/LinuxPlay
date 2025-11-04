@@ -1,7 +1,6 @@
 """Tests for authentication and security features."""
 
 import json
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -112,7 +111,7 @@ class TestTrustedClientsDatabase:
         assert len(loaded["trusted_clients"]) == 1
         assert loaded["trusted_clients"][0]["fingerprint"] == "ABCD1234"
 
-    def test_trust_record_for_existing(self, tmp_path, monkeypatch):
+    def test_trust_record_for_existing(self):
         """Test finding existing trust record."""
         from linuxplay.host import _trust_record_for
 
@@ -225,6 +224,7 @@ class TestMarkerValue:
 
 class TestCertificateFingerprint:
     """Tests for certificate fingerprint handling."""
+
 
 class TestSecurityConstants:
     """Tests for security-related constants."""

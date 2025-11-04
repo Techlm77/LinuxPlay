@@ -1,12 +1,10 @@
 """Unit tests for client.py utility functions."""
 
-import pytest
-
 
 class TestNetworkModeDetection:
     """Tests for network mode detection."""
 
-    def test_detect_network_mode_wifi_linux(self, mock_linux_platform, monkeypatch):
+    def test_detect_network_mode_wifi_linux(self, monkeypatch):
         """Test WiFi detection on Linux."""
         import subprocess
         from pathlib import Path
@@ -28,7 +26,7 @@ class TestNetworkModeDetection:
         mode = detect_network_mode("192.168.1.1")
         assert mode == "wifi"
 
-    def test_detect_network_mode_lan_linux(self, mock_linux_platform, monkeypatch):
+    def test_detect_network_mode_lan_linux(self, monkeypatch):
         """Test LAN detection on Linux."""
         import subprocess
         from pathlib import Path
@@ -67,9 +65,9 @@ class TestNetworkModeDetection:
 class TestHardwareAccelSelection:
     """Tests for hardware acceleration selection."""
 
-    def test_choose_auto_hwaccel_windows(self, mock_windows_platform, monkeypatch):
+    def test_choose_auto_hwaccel_windows(self, monkeypatch):
         """Test auto hardware accel selection on Windows."""
-        from linuxplay.client import choose_auto_hwaccel, ffmpeg_hwaccels
+        from linuxplay.client import choose_auto_hwaccel
 
         def mock_hwaccels():
             return {"d3d11va", "cuda", "dxva2"}
@@ -79,9 +77,9 @@ class TestHardwareAccelSelection:
         result = choose_auto_hwaccel()
         assert result in ["d3d11va", "cuda", "dxva2", "qsv"]
 
-    def test_choose_auto_hwaccel_linux(self, mock_linux_platform, monkeypatch):
+    def test_choose_auto_hwaccel_linux(self, monkeypatch):
         """Test auto hardware accel selection on Linux."""
-        from linuxplay.client import choose_auto_hwaccel, ffmpeg_hwaccels
+        from linuxplay.client import choose_auto_hwaccel
 
         def mock_hwaccels():
             return {"vaapi", "cuda"}
@@ -93,7 +91,7 @@ class TestHardwareAccelSelection:
 
     def test_choose_auto_hwaccel_cpu_fallback(self, monkeypatch):
         """Test CPU fallback when no hardware accel available."""
-        from linuxplay.client import choose_auto_hwaccel, ffmpeg_hwaccels
+        from linuxplay.client import choose_auto_hwaccel
 
         def mock_hwaccels():
             return set()  # No hardware acceleration
@@ -163,7 +161,7 @@ class TestClientStateManagement:
 class TestRendererSelection:
     """Tests for renderer backend selection."""
 
-    def test_pick_best_renderer_returns_valid(self, monkeypatch):
+    def test_pick_best_renderer_returns_valid(self):
         """Test that pick_best_renderer returns a valid renderer."""
         from linuxplay.client import pick_best_renderer
 
@@ -173,7 +171,7 @@ class TestRendererSelection:
         assert hasattr(renderer, "is_valid")
         assert hasattr(renderer, "name")
 
-    def test_renderer_has_name(self, monkeypatch):
+    def test_renderer_has_name(self):
         """Test that renderer has a name."""
         from linuxplay.client import pick_best_renderer
 
@@ -185,6 +183,7 @@ class TestRendererSelection:
 
 class TestKeyMapping:
     """Tests for key name mapping."""
+
 
 class TestHardwareCapabilities:
     """Tests for hardware capability probing."""

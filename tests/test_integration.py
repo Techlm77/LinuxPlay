@@ -247,6 +247,7 @@ class TestControlMessages:
 @pytest.mark.integration
 class TestClipboardProtocol:
     """Tests for clipboard synchronization protocol."""
+
     """Tests for clipboard synchronization protocol."""
 
     def test_clipboard_message_format(self):

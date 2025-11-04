@@ -64,7 +64,7 @@ TCP upload (7003)      --------------------->  File upload handler
 
 ```bash
 sudo apt update
-sudo apt install -y ffmpeg xdotool xclip pulseaudio-utils libcap2-bin wireguard-tools qrencode python3 python3-venv python3-pip libgl1 python3-evdev
+sudo apt install -y ffmpeg xdotool xclip pulseaudio-utils libcap2-bin wireguard-tools qrencode python3 python3-venv python3-pip libgl1 libegl1 python3-evdev
 ```
 
 If `pip install av` fails, install FFmpeg development headers:

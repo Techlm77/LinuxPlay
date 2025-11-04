@@ -1843,7 +1843,7 @@ def heartbeat_manager(_args):
                 msg = data.decode("utf-8", errors="ignore").strip()
                 if msg.startswith("PONG") and addr[0] == host_state.client_ip:
                     host_state.last_pong_ts = now
-            except socket.timeout:
+            except TimeoutError:
                 pass
             except Exception as e:
                 logging.debug("Heartbeat recv error: %s", e)
