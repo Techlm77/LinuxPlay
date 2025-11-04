@@ -290,22 +290,29 @@ def tcp_handshake_client(host_ip, pin=None):
         return (False, None)
 
 
-def heartbeat_responder(_host_ip):
+def heartbeat_responder(host_ip):
     def loop():
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                sock.bind(("", UDP_HEARTBEAT_PORT))
-            except OSError as e:
-                logging.error(f"Heartbeat bind failed: {e}")
-                return
+            # No bind() - use ephemeral port for outbound connection
             sock.settimeout(2)
-            logging.info("Heartbeat responder active on UDP %s", UDP_HEARTBEAT_PORT)
+            logging.info("Heartbeat responder active (outbound-only, no firewall port needed)")
+            host_addr = (host_ip, UDP_HEARTBEAT_PORT)
+
+            # Send initial PONG to establish connection with host
+            try:
+                sock.sendto(b"PONG", host_addr)
+                logging.debug("Sent initial PONG to establish heartbeat connection")
+            except Exception as e:
+                logging.warning(f"Initial PONG send failed: {e}")
+
             while CLIENT_STATE["connected"]:
                 try:
+                    # Receive PING from host (will arrive on our ephemeral port)
                     data, addr = sock.recvfrom(256)
-                    if data == b"PING":
-                        sock.sendto(b"PONG", addr)
+                    if data == b"PING" and addr[0] == host_ip:
+                        # Reply to host
+                        sock.sendto(b"PONG", host_addr)
                         CLIENT_STATE["last_heartbeat"] = time.time()
                 except TimeoutError:  # noqa: PERF203
                     if time.time() - CLIENT_STATE["last_heartbeat"] > 10:
@@ -320,19 +327,28 @@ def heartbeat_responder(_host_ip):
     return t
 
 
-def clipboard_listener(app_clipboard):
+def clipboard_listener(app_clipboard, host_ip):
     def loop():
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # No bind() - use ephemeral port for receiving on same socket used for sending
+            sock.settimeout(2)
+            logging.info("Clipboard listener active (outbound-only, no firewall port needed)")
+            host_addr = (host_ip, UDP_CLIPBOARD_PORT)
+
+            # Send a keepalive to establish connection path through NAT/firewall
             try:
-                sock.bind(("", UDP_CLIPBOARD_PORT))
-            except OSError as e:
-                logging.error(f"Clipboard listener bind failed: {e}")
-                return
-            logging.info("Listening for clipboard updates on UDP %s", UDP_CLIPBOARD_PORT)
+                sock.sendto(b"CLIPBOARD_KEEPALIVE", host_addr)
+                logging.debug("Sent clipboard keepalive to establish connection")
+            except Exception as e:
+                logging.warning(f"Clipboard keepalive send failed: {e}")
+
             while CLIENT_STATE["connected"]:
                 try:
-                    data, _ = sock.recvfrom(65535)
+                    data, addr = sock.recvfrom(65535)
+                    # Only accept from authenticated host
+                    if addr[0] != host_ip:
+                        continue
                     msg = data.decode("utf-8", errors="replace").strip()
                     if msg.startswith("CLIPBOARD_UPDATE HOST"):
                         text = msg.split("HOST", 1)[1].strip()
@@ -340,7 +356,9 @@ def clipboard_listener(app_clipboard):
                             app_clipboard.blockSignals(True)
                             app_clipboard.setText(text)
                             app_clipboard.blockSignals(False)
-                except Exception:  # noqa: PERF203
+                except TimeoutError:
+                    pass
+                except Exception:
                     time.sleep(0.2)
                     continue
 
@@ -1320,7 +1338,7 @@ class MainWindow(QMainWindow):
             self._audio_thread = None
 
         try:
-            self._clip_thread = clipboard_listener(QApplication.clipboard())
+            self._clip_thread = clipboard_listener(QApplication.clipboard(), self.host_ip)
         except Exception as e:
             logging.error(f"Clipboard listener failed: {e}")
             self._clip_thread = None
