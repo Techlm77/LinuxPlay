@@ -1775,7 +1775,7 @@ def file_upload_listener():
     host_state.file_upload_sock = s
     try:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(("", FILE_UPLOAD_PORT))
+        s.bind((host_args_manager.args.bind_address, FILE_UPLOAD_PORT))
         s.listen(5)
         logging.info("File upload listener TCP %d", FILE_UPLOAD_PORT)
     except Exception as e:
@@ -1824,7 +1824,7 @@ def heartbeat_manager(_args):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(("", UDP_HEARTBEAT_PORT))
+        s.bind((_args.bind_address, UDP_HEARTBEAT_PORT))
         host_state.heartbeat_sock = s
         logging.info("Heartbeat manager running on UDP %d", UDP_HEARTBEAT_PORT)
     except Exception as e:
@@ -2006,7 +2006,7 @@ class GamepadServer(threading.Thread):
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVLOWAT, 1)
-        s.bind(("", UDP_GAMEPAD_PORT))
+        s.bind((host_args_manager.args.bind_address, UDP_GAMEPAD_PORT))
         s.setblocking(False)
         return s
 
@@ -2189,7 +2189,7 @@ def core_main(args, use_signals=True) -> int:
     try:
         host_state.handshake_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         host_state.handshake_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        host_state.handshake_sock.bind(("", TCP_HANDSHAKE_PORT))
+        host_state.handshake_sock.bind((args.bind_address, TCP_HANDSHAKE_PORT))
         host_state.handshake_sock.listen(5)
     except Exception as e:
         trigger_shutdown(f"Handshake socket error: {e}")
@@ -2199,7 +2199,7 @@ def core_main(args, use_signals=True) -> int:
     try:
         host_state.control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         host_state.control_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        host_state.control_sock.bind(("", UDP_CONTROL_PORT))
+        host_state.control_sock.bind((args.bind_address, UDP_CONTROL_PORT))
     except Exception as e:
         trigger_shutdown(f"Control socket error: {e}")
         stop_all()
@@ -2208,7 +2208,7 @@ def core_main(args, use_signals=True) -> int:
     try:
         host_state.clipboard_listener_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         host_state.clipboard_listener_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        host_state.clipboard_listener_sock.bind(("", UDP_CLIPBOARD_PORT))
+        host_state.clipboard_listener_sock.bind((args.bind_address, UDP_CLIPBOARD_PORT))
     except Exception as e:
         trigger_shutdown(f"Clipboard socket error: {e}")
         stop_all()
@@ -2392,6 +2392,12 @@ class HostWindow(QWidget):
 def parse_args():
     p = argparse.ArgumentParser(description="LinuxPlay Host (Linux only)")
     p.add_argument("--gui", action="store_true", help="Show host GUI window.")
+    p.add_argument(
+        "--bind-address",
+        default="0.0.0.0",
+        help="IP address to bind server sockets to. Use 0.0.0.0 for all interfaces (default), "
+        "127.0.0.1 for localhost only, or a specific interface IP for better security.",
+    )
     p.add_argument("--encoder", choices=["none", "h.264", "h.265"], default="none")
     p.add_argument(
         "--hwenc",
