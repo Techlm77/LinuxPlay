@@ -1011,18 +1011,35 @@ def build_audio_cmd():
 
     logging.info("Using PulseAudio source: %s", mon)
 
+    channels = 2
+    if which("pactl"):
+        try:
+            probe = subprocess.check_output(
+                ["bash", "-c", f"pactl list sources | grep -A2 '{mon}' | grep 'Channels' | head -n1 | awk '{{print $2}}'"],
+                text=True
+            ).strip()
+            if probe.isdigit():
+                channels = int(probe)
+        except Exception as e:
+            logging.warning("Audio channel detection failed: %s", e)
+    if channels not in [1, 2, 6, 8]:
+        channels = 2
+
+    logging.info("Detected %s channel(s): %s", channels, "Surround" if channels > 2 else "Stereo")
+
     input_side = [
         *(_ffmpeg_base_cmd()),
         *(_input_ll_flags()),
         "-f", "pulse",
         "-i", mon,
+        "-ac", str(channels),
     ]
 
     output_side = _output_sync_flags()
 
     encode = [
         "-c:a", "libopus",
-        "-b:a", "128k",
+        "-b:a", "384k" if channels > 2 else "128k",
         "-application", opus_app,
         "-frame_duration", opus_fd,
     ]
