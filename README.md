@@ -474,9 +474,6 @@ If you enjoy LinuxPlay or use it in your workflow, you can help sustain and expa
 
 Your support helps cover hardware testing, development time, and ongoing improvements to performance, security, and cross-platform compatibility across many different Linux distros, while encouraging future contributors to join and help LinuxPlay continue to evolve.
 
-Special thanks to **@bjornjorgensen** for helping bring LinuxPlay’s tooling, testing, and CI to a production-grade level.  
-This collaboration marks a major step toward making LinuxPlay a robust, scalable, and community-driven open-source streaming platform.
-
 ---
 
 ## License
