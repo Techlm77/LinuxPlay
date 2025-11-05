@@ -12,14 +12,20 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║     LinuxPlay Test Suite Runner       ║${NC}"
+echo -e "${BLUE}║      LinuxPlay Test Suite Runner       ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
 echo
+
+# Ensure ~/.local/bin is on PATH (uv default install location)
+if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+    export PATH="$HOME/.local/bin:$PATH"
+fi
 
 # Check if uv is installed
 if ! command -v uv &> /dev/null; then
     echo -e "${RED}✗ uv is not installed${NC}"
     echo "Install it with: curl -LsSf https://astral.sh/uv/install.sh | sh"
+    echo "Or ensure ~/.local/bin is in your PATH"
     exit 1
 fi
 
