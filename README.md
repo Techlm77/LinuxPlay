@@ -30,6 +30,7 @@
 - **Link Aware Streaming**: Buffers adapt for LAN and Wi Fi to reduce jitter and stalls.
 - **Resilience**: Heartbeat with ping and pong. The host stops streams and returns to the waiting state on timeout or disconnect.
 - **Stats Overlay (Client)**: Real time FPS, CPU, RAM and GPU metrics via OpenGL with triple buffered PBO uploads.
+- **Firewall Friendly**: Windows clients no longer require firewall configuration. Uses outbound-only connections with ephemeral ports that work through NAT and firewalls automatically.
 - **Cross Platform**: Host runs on Linux. Clients support both Linux and Windows 10/11.
 
 ---
@@ -44,18 +45,27 @@ You pick the codec, bitrate, buffers and behavior. Every knob is exposed and doe
 
 ## Architecture
 
+**Network Design:**  
+LinuxPlay uses a firewall-friendly architecture where the client initiates all connections using ephemeral ports. This allows Windows clients to work without firewall configuration, as Windows automatically permits responses to outbound connections.
+
 ```
 Client                        Network           Host
 ------                        -------           ----
 TCP handshake (7001)   <-------------------->  Handshake
 UDP control (7000)      -------------------->  Input (mouse/keyboard)
-UDP clipboard (7002)   <-------------------->  Clipboard sync
-UDP heartbeat (7004)   <-------------------->  Keepalive (PING/PONG)
+UDP clipboard (7002)   <-------------------->  Clipboard sync (client initiates)
+UDP heartbeat (7004)   <-------------------->  Keepalive (client sends PONG first)
 UDP gamepad (7005)      -------------------->  Virtual gamepad (uinput)
 UDP video (5000+idx)   <--------------------   FFmpeg capture + encode
 UDP audio (6001)       <--------------------   FFmpeg Opus audio
 TCP upload (7003)      --------------------->  File upload handler
 ```
+
+**Key Design:**
+- Client uses ephemeral (random high) ports for heartbeat and clipboard
+- Host learns and responds to client's actual source port
+- No client-side firewall rules needed on Windows
+- Works through NAT/routers automatically
 
 ---
 
@@ -199,16 +209,20 @@ python3 src/linuxplay/client.py --host_ip SERVER_IP --decoder h.264 --hwaccel au
 
 ## Ports on Host
 
-| Purpose                  | Protocol | Port            |
-|--------------------------|----------|-----------------|
-| Handshake                | TCP      | 7001            |
-| Video per monitor        | UDP      | 5000 plus index |
-| Audio                    | UDP      | 6001            |
-| Control mouse keyboard   | UDP      | 7000            |
-| Clipboard                | UDP      | 7002            |
-| File upload              | TCP      | 7003            |
-| Heartbeat ping pong      | UDP      | 7004            |
-| Gamepad controller       | UDP      | 7005            |
+The host listens on these ports. **The client does not need any firewall rules** as it uses outbound-only connections with ephemeral (randomly assigned) ports.
+
+| Purpose                  | Protocol | Port            | Client Port        |
+|--------------------------|----------|-----------------|-------------------|
+| Handshake                | TCP      | 7001            | Ephemeral         |
+| Video per monitor        | UDP      | 5000 plus index | Ephemeral         |
+| Audio                    | UDP      | 6001            | Ephemeral         |
+| Control mouse keyboard   | UDP      | 7000            | Ephemeral         |
+| Clipboard                | UDP      | 7002            | Ephemeral         |
+| File upload              | TCP      | 7003            | Ephemeral         |
+| Heartbeat ping pong      | UDP      | 7004            | Ephemeral         |
+| Gamepad controller       | UDP      | 7005            | Ephemeral         |
+
+**Windows Client**: No firewall configuration needed. The client initiates all UDP connections, and Windows automatically allows responses on the same connection.
 
 ---
 
@@ -246,6 +260,7 @@ python3 src/linuxplay/client.py --host_ip SERVER_IP --decoder h.264 --hwaccel au
 
 ## Changelog (recent)
 
+- **Firewall-free Windows clients**: Redesigned network architecture to use outbound-only connections with ephemeral ports. Windows clients no longer require firewall configuration.
 - Added certificate based authentication with automatic PIN to certificate upgrade flow.
 - Added session lock. New handshakes are rejected with BUSY while a client is active.
 - Client GUI now auto detects certificate bundle and disables the PIN field live.
@@ -324,6 +339,20 @@ sudo usermod -a -G input $USER
 
 ### Windows Client Issues
 
+#### Windows Firewall blocking UDP packets (Legacy Issue - Fixed)
+
+**As of the latest version, Windows clients no longer need firewall configuration!**
+
+The client now uses outbound-only connections with ephemeral ports. Windows Firewall automatically allows responses to outbound connections, so no manual firewall rules are needed.
+
+If you previously added firewall rules for LinuxPlay, you can safely remove them - they're no longer necessary.
+
+**How it works:**
+- Client initiates connections using random high ports (ephemeral)
+- Host learns the client's actual port and responds there
+- Windows sees these as responses to outbound connections and allows them
+- Works through NAT and home routers automatically
+
 #### ffplay not found (Audio error)
 
 Download and install FFmpeg for Windows:
@@ -358,16 +387,12 @@ $env:QT_ANGLE_PLATFORM="d3d11"
 python src/linuxplay/client.py --host_ip YOUR_HOST_IP --decoder h.264 --hwaccel auto
 ```
 
-#### Network socket error (WinError 10014)
-
-This indicates firewall is blocking UDP. See "Windows Firewall blocking UDP packets" above.
-
 ### General Issues
 
 #### PIN rotation or connection timeouts
 
-- Ensure UDP ports 5000-7005 are accessible between client and host
-- Check firewall rules on both machines
+- Ensure UDP ports 5000-7005 are accessible on the **host** (no client firewall config needed)
+- Check firewall rules on the **host** machine
 - Verify network connectivity: `ping YOUR_HOST_IP`
 - For WAN connections, use WireGuard VPN
 

@@ -1711,6 +1711,8 @@ def clipboard_monitor_host():
         logging.info("pyperclip not available; host clipboard sync disabled.")
         return
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    client_clipboard_addr = None  # Track client's ephemeral port
+
     while not host_state.should_terminate:
         current = ""
         with contextlib.suppress(Exception):
@@ -1725,10 +1727,19 @@ def clipboard_monitor_host():
                 host_state.last_clipboard_content = current
                 msg = f"CLIPBOARD_UPDATE HOST {current}".encode()
                 try:
-                    sock.sendto(msg, (host_state.client_ip, UDP_CLIPBOARD_PORT))
+                    # Send to client's ephemeral port if known, otherwise to well-known port
+                    if client_clipboard_addr:
+                        sock.sendto(msg, client_clipboard_addr)
+                    else:
+                        sock.sendto(msg, (host_state.client_ip, UDP_CLIPBOARD_PORT))
                 except Exception as e:
                     trigger_shutdown(f"Clipboard send error: {e}")
                     break
+
+        # Check if we should update client address from listener
+        if hasattr(host_state, "client_clipboard_addr"):
+            client_clipboard_addr = host_state.client_clipboard_addr
+
         time.sleep(1)
     sock.close()
 
@@ -1738,10 +1749,23 @@ def clipboard_listener_host(sock):
         return
     while not host_state.should_terminate:
         try:
-            data, _addr = sock.recvfrom(65535)
+            data, addr = sock.recvfrom(65535)
             msg = data.decode("utf-8", errors="ignore")
+
+            # Handle keepalive messages from client (used to establish connection)
+            if msg.strip() == "CLIPBOARD_KEEPALIVE":
+                if addr[0] == host_state.client_ip or not host_state.client_ip:
+                    host_state.client_clipboard_addr = addr
+                    logging.debug(f"Client clipboard address registered from keepalive: {addr}")
+                continue
+
             tokens = msg.split(maxsplit=2)
             if len(tokens) >= 3 and tokens[0] == "CLIPBOARD_UPDATE" and tokens[1] == "CLIENT":
+                # Remember client's ephemeral port for responses
+                if addr[0] == host_state.client_ip:
+                    host_state.client_clipboard_addr = addr
+                    logging.debug(f"Client clipboard address updated to {addr}")
+
                 new_content = tokens[2]
                 with host_state.clipboard_lock:
                     host_state.ignore_clipboard_update = True
@@ -1826,21 +1850,27 @@ def heartbeat_manager(_args):
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind((_args.bind_address, UDP_HEARTBEAT_PORT))
         host_state.heartbeat_sock = s
-        logging.info("Heartbeat manager running on UDP %d", UDP_HEARTBEAT_PORT)
+        logging.info("Heartbeat manager running on UDP %d (responds to client's source port)", UDP_HEARTBEAT_PORT)
     except Exception as e:
         trigger_shutdown(f"Heartbeat socket error: {e}")
         return
 
     last_ping = 0.0
     host_state.last_pong_ts = time.time()
+    client_heartbeat_addr = None  # Track client's ephemeral port
 
     while not host_state.should_terminate:
         now = time.time()
 
         if host_state.client_ip:
+            # Send initial PING to the well-known port
             if now - last_ping >= HEARTBEAT_INTERVAL:
                 try:
-                    s.sendto(b"PING", (host_state.client_ip, UDP_HEARTBEAT_PORT))
+                    # Send to client's ephemeral port if known, otherwise to well-known port
+                    if client_heartbeat_addr:
+                        s.sendto(b"PING", client_heartbeat_addr)
+                    else:
+                        s.sendto(b"PING", (host_state.client_ip, UDP_HEARTBEAT_PORT))
                     last_ping = now
                 except Exception as e:
                     logging.warning("Heartbeat send error: %s", e)
@@ -1851,6 +1881,10 @@ def heartbeat_manager(_args):
                 msg = data.decode("utf-8", errors="ignore").strip()
                 if msg.startswith("PONG") and addr[0] == host_state.client_ip:
                     host_state.last_pong_ts = now
+                    # Remember the client's ephemeral port for future PINGs
+                    if not client_heartbeat_addr or client_heartbeat_addr != addr:
+                        client_heartbeat_addr = addr
+                        logging.debug(f"Client heartbeat address updated to {addr}")
             except TimeoutError:
                 pass
             except Exception as e:
@@ -1871,12 +1905,14 @@ def heartbeat_manager(_args):
                     set_status("Client disconnected — waiting for connection…")
                     host_state.session_active = False
                     host_state.authed_client_ip = None
+                    client_heartbeat_addr = None  # Reset on disconnect
                     pin_rotate_if_needed(force=True)
 
                     time.sleep(RECONNECT_COOLDOWN)
 
                 host_state.last_pong_ts = now
         else:
+            client_heartbeat_addr = None  # Reset when no client
             time.sleep(0.5)
 
 
