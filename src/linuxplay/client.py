@@ -29,7 +29,6 @@ from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QSurfaceFormat
 from PyQt5.QtWidgets import QApplication, QInputDialog, QLineEdit, QMainWindow, QMessageBox, QOpenGLWidget
 
-
 try:
     from evdev import InputDevice, ecodes, list_devices
 
@@ -43,7 +42,6 @@ try:
     HAVE_PYNVML = True
 except ImportError:
     HAVE_PYNVML = False
-
 
 DEFAULT_UDP_PORT = 5000
 CONTROL_PORT = 7000
@@ -61,12 +59,8 @@ IS_LINUX = py_platform.system() == "Linux"
 
 CLIPBOARD_INBOX = Queue()
 
-
 class AudioProcessManager:
-    """Manages the audio process to avoid global state."""
-
     proc = None
-
 
 audio_proc_manager = AudioProcessManager()
 CLIENT_STATE = {"connected": False, "last_heartbeat": 0.0, "net_mode": "lan", "reconnecting": False}
@@ -86,7 +80,6 @@ try:
 except Exception as e:
     logging.debug(f"FFmpeg path init failed: {e}")
 
-
 def _probe_hardware_capabilities():
     try:
         vk_spec = importlib.util.find_spec("vulkan")
@@ -98,9 +91,7 @@ def _probe_hardware_capabilities():
     kms_exists = any(Path(p).exists() for p in ("/dev/dri/card0", "/dev/dri/card1"))
     logging.info(f"Hardware paths: GBM={gbm_exists}, KMS={kms_exists}, Vulkan={vk_available}")
 
-
 _probe_hardware_capabilities()
-
 
 def ffmpeg_hwaccels():
     try:
@@ -116,7 +107,6 @@ def ffmpeg_hwaccels():
     except Exception:
         return set()
 
-
 def choose_auto_hwaccel():
     accels = ffmpeg_hwaccels()
     if IS_WINDOWS:
@@ -129,14 +119,12 @@ def choose_auto_hwaccel():
             return cand
     return "cpu"
 
-
 def _best_ts_pkt_size(mtu_guess: int, ipv6: bool) -> int:
     if mtu_guess <= 0:
         mtu_guess = 1500
     overhead = 48 if ipv6 else 28
     max_payload = max(512, mtu_guess - overhead)
     return max(188, (max_payload // 188) * 188)
-
 
 def detect_network_mode(host_ip: str) -> str:
     try:
@@ -160,7 +148,6 @@ def detect_network_mode(host_ip: str) -> str:
             ]
             alias = subprocess.check_output(ps, universal_newlines=True, stderr=subprocess.DEVNULL).strip()
             if alias:
-                # Remove quotes from alias name
                 alias_clean = alias.replace('"', "")
                 ps2 = [
                     "powershell",
@@ -178,7 +165,6 @@ def detect_network_mode(host_ip: str) -> str:
         return "lan"
     return "lan"
 
-
 def _read_pem_cert_fingerprint(pem_path: str) -> str:
     try:
         data = Path(pem_path).read_text(encoding="utf-8")
@@ -189,7 +175,6 @@ def _read_pem_cert_fingerprint(pem_path: str) -> str:
         return hashlib.sha256(der).hexdigest().upper()
     except Exception:
         return ""
-
 
 def tcp_handshake_client(host_ip, pin=None):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -289,17 +274,14 @@ def tcp_handshake_client(host_ip, pin=None):
             sock.close()
         return (False, None)
 
-
 def heartbeat_responder(host_ip):
     def loop():
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            # No bind() - use ephemeral port for outbound connection
             sock.settimeout(2)
             logging.info("Heartbeat responder active (outbound-only, no firewall port needed)")
             host_addr = (host_ip, UDP_HEARTBEAT_PORT)
 
-            # Send initial PONG to establish connection with host
             try:
                 sock.sendto(b"PONG", host_addr)
                 logging.debug("Sent initial PONG to establish heartbeat connection")
@@ -308,13 +290,11 @@ def heartbeat_responder(host_ip):
 
             while CLIENT_STATE["connected"]:
                 try:
-                    # Receive PING from host (will arrive on our ephemeral port)
                     data, addr = sock.recvfrom(256)
                     if data == b"PING" and addr[0] == host_ip:
-                        # Reply to host
                         sock.sendto(b"PONG", host_addr)
                         CLIENT_STATE["last_heartbeat"] = time.time()
-                except TimeoutError:  # noqa: PERF203
+                except TimeoutError:
                     if time.time() - CLIENT_STATE["last_heartbeat"] > 10:
                         CLIENT_STATE["connected"] = False
                         CLIENT_STATE["reconnecting"] = True
@@ -326,17 +306,14 @@ def heartbeat_responder(host_ip):
     t.start()
     return t
 
-
 def clipboard_listener(app_clipboard, host_ip):
     def loop():
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            # No bind() - use ephemeral port for receiving on same socket used for sending
             sock.settimeout(2)
             logging.info("Clipboard listener active (outbound-only, no firewall port needed)")
             host_addr = (host_ip, UDP_CLIPBOARD_PORT)
 
-            # Send a keepalive to establish connection path through NAT/firewall
             try:
                 sock.sendto(b"CLIPBOARD_KEEPALIVE", host_addr)
                 logging.debug("Sent clipboard keepalive to establish connection")
@@ -346,7 +323,6 @@ def clipboard_listener(app_clipboard, host_ip):
             while CLIENT_STATE["connected"]:
                 try:
                     data, addr = sock.recvfrom(65535)
-                    # Only accept from authenticated host
                     if addr[0] != host_ip:
                         continue
                     msg = data.decode("utf-8", errors="replace").strip()
@@ -357,17 +333,14 @@ def clipboard_listener(app_clipboard, host_ip):
                             app_clipboard.setText(text)
                             app_clipboard.blockSignals(False)
                 except TimeoutError:
-                    # Normal timeout during wait for clipboard data - no action needed
                     pass
                 except Exception:
-                    # Network error or decode failure - retry after brief delay
                     time.sleep(0.2)
                     continue
 
     t = threading.Thread(target=loop, daemon=True)
     t.start()
     return t
-
 
 def audio_listener(host_ip):
     def loop():
@@ -403,7 +376,6 @@ def audio_listener(host_ip):
     t = threading.Thread(target=loop, daemon=True)
     t.start()
     return t
-
 
 class DecoderThread(QThread):
     frame_ready = pyqtSignal(object)
@@ -593,7 +565,6 @@ class DecoderThread(QThread):
         self._running = False
         time.sleep(0.05)
 
-
 class RenderBackend:
     def render_frame(self, frame_tuple):
         pass
@@ -603,7 +574,6 @@ class RenderBackend:
 
     def name(self):
         return "unknown"
-
 
 class RenderKMSDRM(RenderBackend):
     def __init__(self):
@@ -748,7 +718,6 @@ class RenderKMSDRM(RenderBackend):
         except Exception as e:
             logging.debug(f"KMSDRM render error: {e}")
 
-
 class RenderVulkan(RenderBackend):
     def __init__(self):
         try:
@@ -781,7 +750,6 @@ class RenderVulkan(RenderBackend):
         except Exception as e:
             logging.debug(f"Vulkan render error: {e}")
 
-
 class RenderOpenGL(RenderBackend):
     def __init__(self):
         self.valid = True
@@ -811,7 +779,6 @@ class RenderOpenGL(RenderBackend):
         except Exception as e:
             logging.debug(f"OpenGL render error: {e}")
 
-
 def pick_best_renderer():
     renderers = (RenderKMSDRM, RenderVulkan, RenderOpenGL)
     selected = None
@@ -829,7 +796,6 @@ def pick_best_renderer():
         logging.warning("No GPU renderer found, using dummy software renderer.")
         selected = RenderBackend()
     return selected
-
 
 class VideoWidgetGL(QOpenGLWidget):
     def __init__(self, control_callback, rwidth, rheight, offset_x, offset_y, host_ip, parent=None):
@@ -1156,7 +1122,6 @@ class VideoWidgetGL(QOpenGLWidget):
                 pass
         return text or None
 
-
 class GamepadThread(threading.Thread):
     def __init__(self, host_ip, port, path_hint=None):
         super().__init__(daemon=True)
@@ -1253,7 +1218,6 @@ class GamepadThread(threading.Thread):
         self._running = False
         with contextlib.suppress(Exception):
             self.sock.close()
-
 
 class MainWindow(QMainWindow):
     def __init__(
@@ -1552,7 +1516,6 @@ class MainWindow(QMainWindow):
 
         event.accept()
 
-
 def main():
     p = argparse.ArgumentParser(description="LinuxPlay Client (Linux/Windows)")
     p.add_argument("--decoder", choices=["none", "h.264", "h.265"], default="none")
@@ -1741,7 +1704,6 @@ def main():
         logging.error("ffplay term error: %s", e)
 
     sys.exit(ret)
-
 
 if __name__ == "__main__":
     main()
