@@ -11,7 +11,7 @@ I know not everything is perfect yet, and that’s okay. That’s what open sour
 Constructive input and collaboration are what help LinuxPlay evolve in the right direction.
 
 ## Community Shoutout  
-If you make a YouTube video showing your LinuxPlay setup, performance tests, feature ideas, or just want to share your experience, use the hashtag **#LinuxPlay**!  
+If you make a YouTube video showing your LinuxPlay setup, performance tests, feature ideas, or just want to share your experience, use the hashtag **#LinuxPlay**
 I’d *love* to see what people are doing with it, learn from your feedback, and feature community showcases in future updates. Seeing how others use LinuxPlay keeps the motivation alive more than anything else.
 
 For now, I’m taking a short break to rest and recharge, but LinuxPlay isn’t going anywhere. It’ll keep improving, step by step, just like it has since the first line of code.
