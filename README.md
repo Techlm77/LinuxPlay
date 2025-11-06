@@ -1,3 +1,25 @@
+> ### A Message from the Developer
+
+Hey everyone,
+I just wanted to take a moment to thank everyone who’s supported, tested or shared feedback on LinuxPlay.
+
+This project has been a **one-person journey for over a year**, every feature, every bug fix, every idea has been hand-built during my spare time. There’s no team, no funding, and no automation behind it, just me, learning and coding because I love Linux and wanted to prove what’s possible with open-source creativity.
+
+LinuxPlay started as a fun experiment, but over time it’s grown into something much bigger, something that people actually use and enjoy. That means the world to me. ❤️
+
+I know not everything is perfect yet, and that’s okay. That’s what open source is about: progress, not perfection. If you’ve got ideas, improvements, or features you’d love to see, please share them in the [GitHub Discussions](https://github.com/Techlm77/LinuxPlay/discussions).  
+Constructive input and collaboration are what help LinuxPlay evolve in the right direction.
+
+- Community Shoutout  
+If you make a YouTube video showing your LinuxPlay setup, performance tests, feature ideas, or just want to share your experience, use the hashtag **#linuxPlay**!  
+I’d *love* to see what people are doing with it, learn from your feedback, and feature community showcases in future updates. Seeing how others use LinuxPlay keeps the motivation alive more than anything else.
+
+For now, I’m taking a short break to rest and recharge, but LinuxPlay isn’t going anywhere. It’ll keep improving, step by step, just like it has since the first line of code.
+
+Thank you all for believing in something made by one person, from scratch, with genuine passion.
+
+- Techlm77
+
 # LinuxPlay
 
 > The open source, ultra low latency remote desktop and game streaming stack for Linux. Built with FFmpeg, UDP and Qt.
