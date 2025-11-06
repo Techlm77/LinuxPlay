@@ -1506,6 +1506,35 @@ def recvall(sock, n):
     return data
 
 def file_upload_listener():
+    import re
+    from pathlib import Path
+    import tempfile
+
+    SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._ -]{1,255}$")
+    MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
+
+    def _safe_filename(name: str) -> str:
+        base = os.path.basename(name).strip().replace("\\", "_").replace("/", "_")
+        base = re.sub(r"\s+", " ", base)
+        if base in (".", "..") or not base:
+            return ""
+        if not SAFE_NAME_RE.match(base):
+            base = re.sub(r"[^A-Za-z0-9._ -]", "_", base)
+        return base[:255]
+
+    def _unique_path(dir_path: Path, fname: str) -> Path:
+        p = dir_path / fname
+        if not p.exists():
+            return p
+        stem = p.stem
+        suffix = p.suffix
+        i = 1
+        while True:
+            cand = dir_path / f"{stem} ({i}){suffix}"
+            if not cand.exists():
+                return cand
+            i += 1
+
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     host_state.file_upload_sock = s
     try:
@@ -1515,7 +1544,8 @@ def file_upload_listener():
         logging.info("File upload listener TCP %d", FILE_UPLOAD_PORT)
     except Exception as e:
         trigger_shutdown(f"File upload listener bind/listen failed: {e}")
-        try: s.close()
+        try:
+            s.close()
         finally:
             host_state.file_upload_sock = None
         return
@@ -1523,29 +1553,105 @@ def file_upload_listener():
     while not host_state.should_terminate:
         try:
             conn, addr = s.accept()
-            header = recvall(conn, 4)
-            if not header:
+            conn.settimeout(10.0)
+            peer_ip = addr[0]
+
+            if not host_state.session_active or peer_ip != host_state.authed_client_ip:
+                logging.warning(f"[UPLOAD] Rejected unauthorized upload from {peer_ip}")
                 conn.close()
                 continue
-            filename_length = int.from_bytes(header, "big")
-            filename = recvall(conn, filename_length).decode("utf-8")
-            file_size = int.from_bytes(recvall(conn, 8), "big")
-            dest_dir = os.path.join(os.path.expanduser("~"), "LinuxPlayDrop")
-            os.makedirs(dest_dir, exist_ok=True)
-            dest_path = os.path.join(dest_dir, filename)
-            with open(dest_path, "wb") as f:
-                remaining = file_size
-                while remaining > 0:
-                    chunk = conn.recv(min(4096, remaining))
-                    if not chunk: break
-                    f.write(chunk); remaining -= len(chunk)
+
+            h = recvall(conn, 4)
+            if not h:
+                conn.close()
+                continue
+            name_len = int.from_bytes(h, "big")
+            if name_len <= 0 or name_len > 4096:
+                logging.warning(f"[UPLOAD] Invalid name length from {peer_ip}: {name_len}")
+                conn.close()
+                continue
+
+            raw_name = recvall(conn, name_len)
+            if not raw_name:
+                conn.close()
+                continue
+            filename_in = raw_name.decode("utf-8", errors="ignore")
+            filename = _safe_filename(filename_in)
+            if not filename:
+                logging.warning(f"[UPLOAD] Bad filename from {peer_ip!r}: {filename_in!r}")
+                conn.close()
+                continue
+
+            sz_bytes = recvall(conn, 8)
+            if not sz_bytes:
+                conn.close()
+                continue
+            file_size = int.from_bytes(sz_bytes, "big", signed=False)
+            if file_size < 0 or file_size > MAX_FILE_BYTES:
+                logging.warning(f"[UPLOAD] Invalid/oversized file from {peer_ip}: {file_size} bytes")
+                conn.close()
+                continue
+
+            dest_dir = Path(os.path.expanduser("~")) / "LinuxPlayDrop"
+            dest_dir.mkdir(parents=True, exist_ok=True)
+
+            final_path = _unique_path(dest_dir, filename)
+            real_dest_dir = dest_dir.resolve()
+            real_final_parent = final_path.parent.resolve()
+            if real_final_parent != real_dest_dir:
+                logging.warning(f"[UPLOAD] Traversal blocked from {peer_ip}: {filename_in!r}")
+                conn.close()
+                continue
+
+            bytes_left = file_size
+            try:
+                with tempfile.NamedTemporaryFile("wb", delete=False, dir=str(dest_dir)) as tf:
+                    tmp_path = Path(tf.name)
+                    while bytes_left > 0:
+                        chunk = conn.recv(min(65536, bytes_left))
+                        if not chunk:
+                            break
+                        tf.write(chunk)
+                        bytes_left -= len(chunk)
+                    tf.flush()
+                    os.fsync(tf.fileno())
+            except Exception as e:
+                try:
+                    if 'tmp_path' in locals() and tmp_path.exists():
+                        tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                conn.close()
+                logging.error(f"[UPLOAD] Write failed from {peer_ip}: {e}")
+                continue
+
+            try:
+                actual = tmp_path.stat().st_size
+                if actual != file_size:
+                    tmp_path.unlink(missing_ok=True)
+                    conn.close()
+                    logging.warning(f"[UPLOAD] Size mismatch from {peer_ip}: expected {file_size}, got {actual}")
+                    continue
+            except Exception:
+                conn.close()
+                logging.warning(f"[UPLOAD] Temp file missing after write for {peer_ip}")
+                continue
+
+            os.replace(str(tmp_path), str(final_path))
+            try:
+                os.chmod(str(final_path), 0o600)
+            except Exception:
+                pass
+
             conn.close()
-            logging.info("Received file %s (%d bytes)", dest_path, file_size)
+            logging.info("Received file from %s -> %s (%d bytes)", peer_ip, str(final_path), file_size)
+
         except OSError:
             break
         except Exception as e:
             trigger_shutdown(f"File upload error: {e}")
             break
+
     try:
         s.close()
     finally:
