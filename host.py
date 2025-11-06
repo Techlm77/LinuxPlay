@@ -1,36 +1,27 @@
 #!/usr/bin/env python3
-import argparse
-import atexit
-import contextlib
-import datetime
-import json
-import logging
 import os
-import platform as py_platform
-import secrets
-import signal
-import socket
-import struct
 import subprocess
+import argparse
 import sys
-import threading
+import logging
+import json
 import time
-from pathlib import Path
+import threading
+import psutil
+import socket
+import atexit
+import signal
+import struct
+import datetime
+import platform as py_platform
+
 from shutil import which
 
-import psutil
-from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QKeySequence, QPalette
-from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget
-
-
-try:
-    import pynvml
-
-    HAVE_PYNVML = True
-except ImportError:
-    HAVE_PYNVML = False
-
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QTextEdit, QPushButton, QLabel, QHBoxLayout
+)
+from PyQt5.QtGui import QFont, QPalette, QColor, QKeySequence
+from PyQt5.QtCore import Qt, QTimer, QObject, pyqtSignal
 
 UDP_VIDEO_PORT = 5000
 UDP_CONTROL_PORT = 7000
@@ -51,83 +42,78 @@ DEFAULT_FPS = "30"
 LEGACY_BITRATE = "8M"
 DEFAULT_RES = "1920x1080"
 
-IS_LINUX = py_platform.system() == "Linux"
+IS_LINUX   = py_platform.system() == "Linux"
 
 HEARTBEAT_INTERVAL = 1.0
-HEARTBEAT_TIMEOUT = 10.0
+HEARTBEAT_TIMEOUT  = 10.0
 RECONNECT_COOLDOWN = 2.0
 
 try:
     from cryptography import x509
-    from cryptography.hazmat.backends import default_backend
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
     from cryptography.x509.oid import NameOID
-
+    from cryptography.hazmat.primitives import serialization, hashes
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.backends import default_backend
     HAVE_CRYPTO = True
 except Exception:
     HAVE_CRYPTO = False
 
 CA_CERT = "host_ca.pem"
-CA_KEY = "host_ca.key"
+CA_KEY  = "host_ca.key"
 TRUSTED_DB = "trusted_clients.json"
-
 
 def _ensure_ca():
     if not HAVE_CRYPTO:
         logging.warning("[AUTH] cryptography not available; certificate auth disabled.")
         return False
-    if Path(CA_CERT).exists() and Path(CA_KEY).exists():
+    if os.path.exists(CA_CERT) and os.path.exists(CA_KEY):
         return True
     try:
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "LinuxPlay Host CA")])
+        subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, u"LinuxPlay Host CA")])
         cert = (
             x509.CertificateBuilder()
             .subject_name(subject)
             .issuer_name(issuer)
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
-            .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=3650))
+            .not_valid_before(datetime.datetime.utcnow())
+            .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=3650))
             .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
             .sign(key, hashes.SHA256())
         )
-        Path(CA_KEY).write_bytes(
-            key.private_bytes(
+        with open(CA_KEY, "wb") as f:
+            f.write(key.private_bytes(
                 serialization.Encoding.PEM,
                 serialization.PrivateFormat.TraditionalOpenSSL,
                 serialization.NoEncryption(),
-            )
-        )
-        Path(CA_CERT).write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+            ))
+        with open(CA_CERT, "wb") as f:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
         logging.info("[AUTH] Created new host CA (host_ca.pem / host_ca.key)")
         return True
     except Exception as e:
         logging.error("[AUTH] Failed to create CA: %s", e)
         return False
 
-
 def _load_trust_db():
     db = {"trusted_clients": []}
     try:
-        if Path(TRUSTED_DB).exists():
-            with Path(TRUSTED_DB).open(encoding="utf-8") as f:
+        if os.path.exists(TRUSTED_DB):
+            with open(TRUSTED_DB, "r", encoding="utf-8") as f:
                 db = json.load(f)
     except Exception:
         pass
     return db
 
-
 def _save_trust_db(db):
     try:
-        with Path(TRUSTED_DB).open("w", encoding="utf-8") as f:
+        with open(TRUSTED_DB, "w", encoding="utf-8") as f:
             json.dump(db, f, indent=2)
         return True
-    except Exception:
-        logging.error("[AUTH] Failed to write trust database")
+    except Exception as e:
+        logging.error("[AUTH] Failed to write %s: %s", TRUSTED_DB, e)
         return False
-
 
 def _trust_record_for(fp_hex, db):
     for rec in db.get("trusted_clients", []):
@@ -135,21 +121,19 @@ def _trust_record_for(fp_hex, db):
             return rec
     return None
 
-
 def _verify_fingerprint_trusted(fp_hex):
     db = _load_trust_db()
     rec = _trust_record_for(fp_hex, db)
     return (rec is not None) and (rec.get("status") == "trusted")
-
 
 def _issue_client_cert(client_name="linuxplay-client", export_hint_ip=""):
     if not _ensure_ca():
         return None
 
     try:
-        with Path(CA_KEY).open("rb") as f:
+        with open(CA_KEY, "rb") as f:
             ca_key = serialization.load_pem_private_key(f.read(), password=None, backend=default_backend())
-        with Path(CA_CERT).open("rb") as f:
+        with open(CA_CERT, "rb") as f:
             ca_cert = x509.load_pem_x509_certificate(f.read(), default_backend())
 
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -160,8 +144,8 @@ def _issue_client_cert(client_name="linuxplay-client", export_hint_ip=""):
             .issuer_name(ca_cert.subject)
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
-            .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1825))
+            .not_valid_before(datetime.datetime.utcnow())
+            .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=1825))
             .sign(ca_key, hashes.SHA256())
         )
 
@@ -176,57 +160,49 @@ def _issue_client_cert(client_name="linuxplay-client", export_hint_ip=""):
 
         db = _load_trust_db()
         if _trust_record_for(fp_hex, db) is None:
-            now = datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z"
-            db.setdefault("trusted_clients", []).append(
-                {
-                    "fingerprint": fp_hex,
-                    "common_name": client_name,
-                    "issued_on": now,
-                    "trusted_since": now,
-                    "last_seen": now,
-                    "status": "trusted",
-                }
-            )
+            now = datetime.datetime.utcnow().isoformat() + "Z"
+            db.setdefault("trusted_clients", []).append({
+                "fingerprint": fp_hex,
+                "common_name": client_name,
+                "issued_on": now,
+                "trusted_since": now,
+                "last_seen": now,
+                "status": "trusted"
+            })
             _save_trust_db(db)
 
-        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S")
-        export_dir = Path("issued_clients") / f"{stamp}_{export_hint_ip or 'client'}"
-        export_dir.mkdir(parents=True, exist_ok=True)
-        (export_dir / "client_cert.pem").write_bytes(cert_pem)
-        (export_dir / "client_key.pem").write_bytes(key_pem)
+        stamp = datetime.datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        export_dir = os.path.join("issued_clients", f"{stamp}_{export_hint_ip or 'client'}")
+        os.makedirs(export_dir, exist_ok=True)
+        with open(os.path.join(export_dir, "client_cert.pem"), "wb") as f: f.write(cert_pem)
+        with open(os.path.join(export_dir, "client_key.pem"), "wb") as f: f.write(key_pem)
         try:
-            ca_pem = Path(CA_CERT).read_bytes()
-            (export_dir / "host_ca.pem").write_bytes(ca_pem)
+            with open(CA_CERT, "rb") as f: ca_pem = f.read()
+            with open(os.path.join(export_dir, "host_ca.pem"), "wb") as f: f.write(ca_pem)
         except Exception:
             pass
 
-        logging.info("[AUTH] Issued client cert '%s' (FP %s…), exported to %s", client_name, fp_hex[:12], export_dir)
+        logging.info("[AUTH] Issued client cert '%s' (FP %s…), exported to %s",
+                     client_name, fp_hex[:12], export_dir)
         return {"fingerprint": fp_hex, "export_dir": export_dir, "cert_pem": cert_pem}
     except Exception as e:
         logging.error("[AUTH] Issue client cert failed: %s", e)
         return None
-
 
 def _marker_value() -> str:
     marker = os.environ.get("LINUXPLAY_MARKER", "LinuxPlayHost")
     sid = os.environ.get("LINUXPLAY_SID", "")
     return f"{marker}:{sid}" if sid else marker
 
-
 def _ffmpeg_base_cmd() -> list:
     return ["ffmpeg", "-hide_banner", "-loglevel", "error"]
-
 
 def _marker_opt() -> list:
     return ["-metadata", f"comment={_marker_value()}"]
 
-
 try:
-    from pynput.keyboard import Controller as KeyCtl
-    from pynput.keyboard import Key
-    from pynput.mouse import Button
-    from pynput.mouse import Controller as MouseCtl
-
+    from pynput.mouse import Controller as MouseCtl, Button
+    from pynput.keyboard import Controller as KeyCtl, Key
     HAVE_PYNPUT = True
     _mouse = MouseCtl()
     _keys = KeyCtl()
@@ -235,18 +211,15 @@ except Exception:
 
 try:
     import pyperclip
-
     HAVE_PYPERCLIP = True
 except Exception:
     HAVE_PYPERCLIP = False
 
 try:
-    from evdev import AbsInfo, UInput, ecodes
-
+    from evdev import UInput, ecodes, AbsInfo
     HAVE_UINPUT = True
 except Exception:
     HAVE_UINPUT = False
-
 
 class HostState:
     def __init__(self):
@@ -278,18 +251,8 @@ class HostState:
         self.starting_streams = False
         self.gamepad_thread = None
 
-
 host_state = HostState()
-
-
-class HostArgsManager:
-    """Manages the host arguments to avoid global state."""
-
-    args = None
-
-
-host_args_manager = HostArgsManager()
-
+HOST_ARGS = None
 
 def _map_nvenc_tune(tune: str) -> str:
     t = (tune or "").strip().lower()
@@ -302,9 +265,11 @@ def _map_nvenc_tune(tune: str) -> str:
         "ultra_low_latency": "ull",
         "zerolatency": "ull",
         "realtime": "ull",
+
         "low-latency": "ll",
         "low_latency": "ll",
         "ll": "ll",
+
         "hq": "hq",
         "high-quality": "hq",
         "high_quality": "hq",
@@ -312,9 +277,11 @@ def _map_nvenc_tune(tune: str) -> str:
         "high-performance": "hp",
         "high_performance": "hp",
         "performance": "hp",
+
         "lossless": "lossless",
         "lossless-highperf": "losslesshp",
         "lossless_highperf": "losslesshp",
+
         "blu-ray": "bd",
         "bluray": "bd",
     }
@@ -326,31 +293,15 @@ def _map_nvenc_tune(tune: str) -> str:
     logging.warning("Unrecognized NVENC tune '%s' — passing through as-is.", t)
     return t
 
-
 def _vaapi_fmt_for_pix_fmt(pix_fmt: str, codec: str) -> str:
     pf = (pix_fmt or "").strip().lower()
 
     valid_vaapi_fmts = {
-        "nv12",
-        "yuv420p",
-        "yuyv422",
-        "uyvy422",
-        "yuv422p",
-        "yuv444p",
-        "rgb0",
-        "bgr0",
-        "rgba",
-        "bgra",
-        "p010",
-        "p010le",
-        "yuv420p10",
-        "yuv420p10le",
-        "yuv422p10",
-        "yuv422p10le",
-        "yuv444p10",
-        "yuv444p10le",
-        "yuv444p12le",
-        "yuv444p16le",
+        "nv12", "yuv420p", "yuyv422", "uyvy422", "yuv422p",
+        "yuv444p", "rgb0", "bgr0", "rgba", "bgra",
+        "p010", "p010le", "yuv420p10", "yuv420p10le",
+        "yuv422p10", "yuv422p10le", "yuv444p10", "yuv444p10le",
+        "yuv444p12le", "yuv444p16le",
     }
 
     if pf in valid_vaapi_fmts:
@@ -367,7 +318,6 @@ def _vaapi_fmt_for_pix_fmt(pix_fmt: str, codec: str) -> str:
     logging.warning("Unrecognized pix_fmt '%s' — falling back to 'nv12'.", pf)
     return "nv12"
 
-
 def trigger_shutdown(reason: str):
     with host_state.shutdown_lock:
         if host_state.should_terminate:
@@ -382,14 +332,17 @@ def trigger_shutdown(reason: str):
             host_state.clipboard_listener_sock,
             host_state.file_upload_sock,
         ):
-            if s:
-                with contextlib.suppress(Exception):
-                    s.shutdown(socket.SHUT_RDWR)
-                with contextlib.suppress(Exception):
+            try:
+                if s:
+                    try:
+                        s.shutdown(socket.SHUT_RDWR)
+                    except Exception:
+                        pass
                     s.close()
+            except Exception:
+                pass
 
         set_status(f"Stopping… ({reason})")
-
 
 def stop_all():
     host_state.should_terminate = True
@@ -417,23 +370,28 @@ def stop_all():
         host_state.clipboard_listener_sock,
         host_state.file_upload_sock,
     ):
-        if s:
-            with contextlib.suppress(Exception):
-                s.shutdown(socket.SHUT_RDWR)
-            with contextlib.suppress(Exception):
+        try:
+            if s:
+                try:
+                    s.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
                 s.close()
+        except Exception:
+            pass
 
     host_state.starting_streams = False
-
 
 def stop_streams_only():
     with host_state.video_thread_lock:
         if host_state.video_threads:
             logging.info("Stopping active video streams...")
             for t in host_state.video_threads:
-                with contextlib.suppress(Exception):
+                try:
                     t.stop()
                     t.join(timeout=2)
+                except Exception as e:
+                    logging.debug(f"Error stopping video thread: {e}")
             host_state.video_threads.clear()
 
         if host_state.audio_thread:
@@ -448,18 +406,14 @@ def stop_streams_only():
         host_state.last_disconnect_ts = time.time()
         logging.info("All streams stopped and cooldown set.")
 
-
 def cleanup():
     stop_all()
-
-
 atexit.register(cleanup)
 
-
 def _gen_pin(length=PIN_LENGTH):
+    import secrets
     n = secrets.randbelow(10**length)
     return f"{n:0{length}d}"
-
 
 def pin_rotate_if_needed(force=False):
     now = time.time()
@@ -470,9 +424,10 @@ def pin_rotate_if_needed(force=False):
             host_state.pin_code = _gen_pin()
             host_state.pin_expiry = now + PIN_ROTATE_SECS
             logging.info("[AUTH] New PIN: %s (valid %ds)", host_state.pin_code, PIN_ROTATE_SECS)
-            with contextlib.suppress(Exception):
+            try:
                 set_status(f"Waiting for PIN: {host_state.pin_code}")
-
+            except Exception:
+                pass
 
 def pin_manager_thread():
     while not host_state.should_terminate:
@@ -480,66 +435,63 @@ def pin_manager_thread():
             pin_rotate_if_needed()
         time.sleep(1)
 
-
 def has_nvidia():
     return which("nvidia-smi") is not None
-
 
 def is_intel_cpu():
     try:
         if IS_LINUX:
-            return "GenuineIntel" in Path("/proc/cpuinfo").read_text()
+            with open("/proc/cpuinfo","r") as f:
+                return "GenuineIntel" in f.read()
         p = (py_platform.processor() or "").lower()
         return "intel" in p or "intel" in py_platform.platform().lower()
     except Exception:
         return False
 
-
 def has_vaapi():
-    return IS_LINUX and Path("/dev/dri/renderD128").exists()
-
+    return IS_LINUX and os.path.exists("/dev/dri/renderD128")
 
 def ffmpeg_has_encoder(name: str) -> bool:
     try:
         out = subprocess.check_output(
-            ["ffmpeg", "-hide_banner", "-encoders"], stderr=subprocess.STDOUT, universal_newlines=True
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            stderr=subprocess.STDOUT, universal_newlines=True
         ).lower()
         return name.lower() in out
     except Exception:
         return False
 
-
 def ffmpeg_has_demuxer(name: str) -> bool:
     try:
         out = subprocess.check_output(
-            ["ffmpeg", "-hide_banner", "-demuxers"], stderr=subprocess.STDOUT, universal_newlines=True
+            ["ffmpeg", "-hide_banner", "-demuxers"],
+            stderr=subprocess.STDOUT, universal_newlines=True
         ).lower()
         for line in out.splitlines():
-            stripped_line = line.strip().lower()
-            if stripped_line.startswith(("d ", " d ")):
-                parts = stripped_line.split()
+            line = line.strip().lower()
+            if line.startswith("d ") or line.startswith(" d "):
+                parts = line.split()
                 if len(parts) >= 2 and parts[1] == name.lower():
                     return True
         return False
     except Exception:
         return False
-
 
 def ffmpeg_has_device(name: str) -> bool:
     try:
         out = subprocess.check_output(
-            ["ffmpeg", "-hide_banner", "-devices"], stderr=subprocess.STDOUT, universal_newlines=True
+            ["ffmpeg", "-hide_banner", "-devices"],
+            stderr=subprocess.STDOUT, universal_newlines=True
         ).lower()
         for line in out.splitlines():
-            stripped_line = line.strip().lower()
-            if stripped_line.startswith(("d ", " d ")):
-                parts = stripped_line.split()
+            line = line.strip().lower()
+            if line.startswith("d ") or line.startswith(" d "):
+                parts = line.split()
                 if len(parts) >= 2 and parts[1] == name.lower():
                     return True
         return False
     except Exception:
         return False
-
 
 class StreamThread(threading.Thread):
     def __init__(self, cmd, name):
@@ -553,15 +505,19 @@ class StreamThread(threading.Thread):
         logging.info("Starting %s: %s", self.name, " ".join(self.cmd))
         try:
             self.process = subprocess.Popen(
-                self.cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, universal_newlines=True
+                self.cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                universal_newlines=True
             )
 
             try:
+                import psutil, os
                 ps = psutil.Process(self.process.pid)
                 ps.nice(-10)
                 cpu_count = os.cpu_count()
                 if cpu_count and cpu_count > 4:
-                    ps.cpu_affinity(list(range(min(cpu_count, 8))))
+                    ps.cpu_affinity(list(range(0, min(cpu_count, 8))))
                 logging.debug(f"Affinity + priority applied to {self.name}")
             except Exception as e:
                 logging.debug(f"Affinity set failed: {e}")
@@ -595,7 +551,6 @@ class StreamThread(threading.Thread):
         except Exception:
             pass
 
-
 def _detect_monitors_linux():
     try:
         out = subprocess.check_output(["xrandr", "--listmonitors"], universal_newlines=True)
@@ -606,58 +561,33 @@ def _detect_monitors_linux():
     for line in out.strip().splitlines()[1:]:
         parts = line.split()
         for part in parts:
-            if "x" in part and "+" in part:
+            if 'x' in part and '+' in part:
                 try:
-                    res, ox, oy = part.split("+")
-                    w, h = res.split("x")
-                    w = int(w.split("/")[0])
-                    h = int(h.split("/")[0])
-                    mons.append((w, h, int(ox), int(oy)))
-                    break
+                    res, ox, oy = part.split('+')
+                    w,h = res.split('x')
+                    w = int(w.split('/')[0]); h = int(h.split('/')[0])
+                    mons.append((w,h,int(ox),int(oy))); break
                 except Exception:
                     continue
     return mons
 
-
 def detect_monitors():
     return _detect_monitors_linux()
 
-
 def _input_ll_flags():
     return [
-        "-fflags",
-        "nobuffer",
-        "-avioflags",
-        "direct",
-        "-use_wallclock_as_timestamps",
-        "1",
-        "-thread_queue_size",
-        "64",
-        "-probesize",
-        "32",
-        "-analyzeduration",
-        "0",
+        "-fflags","nobuffer","-avioflags","direct",
+        "-use_wallclock_as_timestamps","1",
+        "-thread_queue_size","64",
+        "-probesize","32",
+        "-analyzeduration","0",
     ]
-
 
 def _output_sync_flags():
-    return ["-fps_mode", "passthrough"]
-
+    return ["-fps_mode","passthrough"]
 
 def _mpegts_ll_mux_flags():
-    return [
-        "-flush_packets",
-        "1",
-        "-max_interleave_delta",
-        "0",
-        "-muxdelay",
-        "0",
-        "-muxpreload",
-        "0",
-        "-mpegts_flags",
-        "resend_headers",
-    ]
-
+    return ["-flush_packets","1","-max_interleave_delta","0","-muxdelay","0","-muxpreload","0","-mpegts_flags","resend_headers"]
 
 def _best_ts_pkt_size(mtu_guess: int, ipv6: bool) -> int:
     if mtu_guess <= 0:
@@ -666,10 +596,8 @@ def _best_ts_pkt_size(mtu_guess: int, ipv6: bool) -> int:
     max_payload = max(512, mtu_guess - overhead)
     return max(188, (max_payload // 188) * 188)
 
-
 def _parse_bitrate_bits(bstr: str) -> int:
-    if not bstr:
-        return 0
+    if not bstr: return 0
     s = str(bstr).strip().lower()
     try:
         if s.endswith("k"):
@@ -682,78 +610,46 @@ def _parse_bitrate_bits(bstr: str) -> int:
     except Exception:
         return 0
 
-
 def _format_bits(bits: int) -> str:
     if bits >= 1_000_000:
-        return f"{max(1, int(bits / 1_000_000))}M"
+        return f"{max(1, int(bits/1_000_000))}M"
     if bits >= 1000:
-        return f"{max(1, int(bits / 1000))}k"
+        return f"{max(1, int(bits/1000))}k"
     return str(max(1, bits))
-
 
 def _target_bpp(codec: str, fps: int) -> float:
     c = (codec or "h.264").lower()
-    base = 0.045 if c in ("h.265", "hevc") else 0.07
+    if c in ("h.265","hevc"):
+        base = 0.045
+    else:
+        base = 0.07
     if fps >= 90:
         base += 0.02
     return base
 
-
 def _safe_nvenc_preset(preset: str) -> str:
     preset = (preset or "").strip().lower()
     alias_map = {
-        "ultrafast": "p1",
-        "superfast": "p2",
-        "veryfast": "p3",
-        "fast": "p4",
-        "medium": "p5",
-        "slow": "p6",
-        "slower": "p7",
+        "ultrafast": "p1", "superfast": "p2", "veryfast": "p3",
+        "fast": "p4", "medium": "p5", "slow": "p6", "slower": "p7",
         "veryslow": "p7",
-        "ll": "ll",
-        "low-latency": "ll",
-        "low_latency": "ll",
-        "llhq": "llhq",
-        "llhp": "llhp",
-        "ull": "llhp",
-        "ultra-low-latency": "llhp",
-        "ultra_low_latency": "llhp",
-        "zerolatency": "llhp",
-        "realtime": "llhp",
-        "hq": "hq",
-        "hp": "hp",
-        "lossless": "lossless",
-        "lossless-highperf": "losslesshp",
-        "bd": "bd",
-        "high-quality": "hq",
-        "high-performance": "hp",
+        "ll": "ll", "low-latency": "ll", "low_latency": "ll",
+        "llhq": "llhq", "llhp": "llhp",
+        "ull": "llhp", "ultra-low-latency": "llhp", "ultra_low_latency": "llhp",
+        "zerolatency": "llhp", "realtime": "llhp",
+        "hq": "hq", "hp": "hp",
+        "lossless": "lossless", "lossless-highperf": "losslesshp",
+        "bd": "bd", "high-quality": "hq", "high-performance": "hp"
     }
 
     allowed = {
-        "default",
-        "fast",
-        "medium",
-        "slow",
-        "hp",
-        "hq",
-        "bd",
-        "ll",
-        "llhq",
-        "llhp",
-        "lossless",
-        "losslesshp",
-        "p1",
-        "p2",
-        "p3",
-        "p4",
-        "p5",
-        "p6",
-        "p7",
+        "default", "fast", "medium", "slow", "hp", "hq", "bd",
+        "ll", "llhq", "llhp", "lossless", "losslesshp",
+        "p1", "p2", "p3", "p4", "p5", "p6", "p7"
     }
 
     mapped = alias_map.get(preset, preset)
     return mapped if mapped in allowed else "p4"
-
 
 def _norm_qp(qp):
     try:
@@ -762,8 +658,8 @@ def _norm_qp(qp):
     except Exception:
         return ""
 
-
-def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, tune: str, bitrate: str, pix_fmt: str):
+def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str,
+                       tune: str, bitrate: str, pix_fmt: str):
     codec = (codec or "h.264").lower()
     hwenc = (hwenc or "auto").lower()
     preset_l = (preset or "").strip().lower()
@@ -799,55 +695,43 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
         else:
             hwenc = "cpu"
 
-    adaptive = getattr(host_args_manager.args, "adaptive", False)
-    str(bitrate or "").lower()
+    adaptive = getattr(HOST_ARGS, "adaptive", False)
+    bitrate_s = str(bitrate or "").lower()
 
     if "vaapi" in hwenc:
         qp_val = qp or "23"
         dynamic_flags = [
-            "-rc_mode",
-            "CQP",
-            "-qp",
-            qp_val,
+            "-rc_mode", "CQP",
+            "-qp", qp_val,
         ]
         if bitrate and str(bitrate).lower() not in ("0", "auto"):
             dynamic_flags += [
-                "-b:v",
-                bitrate,
-                "-maxrate",
-                bitrate,
-                "-bufsize",
-                bitrate,
+                "-b:v", bitrate,
+                "-maxrate", bitrate,
+                "-bufsize", bitrate,
             ]
 
     elif "nvenc" in hwenc:
         if adaptive:
             dynamic_flags = [
-                "-rc",
-                "vbr",
-                "-maxrate",
-                bitrate or "15M",
-                "-cq",
-                qp or "23",
+                "-rc", "vbr",
+                "-maxrate", bitrate or "15M",
+                "-cq", qp or "23",
             ]
         else:
             dynamic_flags = [
-                "-rc",
-                "constqp",
+                "-rc", "constqp",
             ] + (["-qp", qp] if qp else [])
 
     elif "qsv" in hwenc:
         dynamic_flags = [
-            "-rc_mode",
-            "ICQ",
-            "-icq_quality",
-            qp or "23",
+            "-rc_mode", "ICQ",
+            "-icq_quality", qp or "23",
         ]
 
     else:
         dynamic_flags = [
-            "-crf",
-            qp or "23",
+            "-crf", qp or "23",
         ]
 
     try:
@@ -870,49 +754,44 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
     if codec == "h.264":
         if hwenc == "nvenc" and ensure("h264_nvenc"):
             enc = [
-                "-c:v",
-                "h264_nvenc",
-                "-preset",
-                _safe_nvenc_preset(preset_l or "llhq"),
+                "-c:v", "h264_nvenc",
+                "-preset", _safe_nvenc_preset(preset_l or "llhq"),
                 *(["-g", str(gop_val)] if use_gop else []),
-                "-bf",
-                "0",
-                "-rc-lookahead",
-                "0",
-                "-refs",
-                "1",
-                "-flags2",
-                "+fast",
+                "-bf", "0", "-rc-lookahead", "0", "-refs", "1",
+                "-flags2", "+fast",
                 *dynamic_flags,
-                "-pix_fmt",
-                pix_fmt,
-                "-bsf:v",
-                "h264_mp4toannexb",
-                *_nvenc_tune_args(),
+                "-pix_fmt", pix_fmt,
+                "-bsf:v", "h264_mp4toannexb",
+                *_nvenc_tune_args()
             ]
 
         elif hwenc == "qsv" and ensure("h264_qsv"):
-            enc = ["-c:v", "h264_qsv", *dynamic_flags, "-pix_fmt", pix_fmt, "-bsf:v", "h264_mp4toannexb"]
+            enc = ["-c:v", "h264_qsv", *dynamic_flags,
+                   "-pix_fmt", pix_fmt, "-bsf:v", "h264_mp4toannexb"]
 
         elif hwenc == "vaapi" and has_vaapi() and ensure("h264_vaapi"):
             va_fmt = _vaapi_fmt_for_pix_fmt(pix_fmt, codec)
-            extra_filters += ["-vf", f"format={va_fmt},hwupload", "-vaapi_device", "/dev/dri/renderD128"]
-            enc = ["-c:v", "h264_vaapi", "-bf", "0", *dynamic_flags, "-pix_fmt", pix_fmt, "-bsf:v", "h264_mp4toannexb"]
+            extra_filters += [
+                "-vf", f"format={va_fmt},hwupload",
+                "-vaapi_device", "/dev/dri/renderD128"
+            ]
+            enc = [
+                "-c:v", "h264_vaapi",
+                "-bf", "0",
+                *dynamic_flags,
+                "-pix_fmt", pix_fmt,
+                "-bsf:v", "h264_mp4toannexb"
+            ]
 
         else:
             enc = [
-                "-c:v",
-                "libx264",
-                "-preset",
-                preset_l or "ultrafast",
-                "-tune",
-                tune_l or "zerolatency",
+                "-c:v", "libx264",
+                "-preset", preset_l or "ultrafast",
+                "-tune", tune_l or "zerolatency",
                 *(["-g", str(gop_val)] if use_gop else []),
                 *dynamic_flags,
-                "-pix_fmt",
-                pix_fmt,
-                "-bsf:v",
-                "h264_mp4toannexb",
+                "-pix_fmt", pix_fmt,
+                "-bsf:v", "h264_mp4toannexb"
             ]
             if tune_l in ("zerolatency", "ultra-low-latency", "ull", "low-latency", "ll"):
                 enc += ["-x264-params", "scenecut=0"]
@@ -920,63 +799,56 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
     elif codec == "h.265":
         if hwenc == "nvenc" and ensure("hevc_nvenc"):
             enc = [
-                "-c:v",
-                "hevc_nvenc",
-                "-preset",
-                _safe_nvenc_preset(preset_l or "p5"),
+                "-c:v", "hevc_nvenc",
+                "-preset", _safe_nvenc_preset(preset_l or "p5"),
                 *(["-g", str(gop_val)] if use_gop else []),
-                "-bf",
-                "0",
-                "-rc-lookahead",
-                "0",
-                "-refs",
-                "1",
-                "-flags2",
-                "+fast",
+                "-bf", "0", "-rc-lookahead", "0", "-refs", "1",
+                "-flags2", "+fast",
                 *dynamic_flags,
-                "-pix_fmt",
-                pix_fmt,
-                "-bsf:v",
-                "hevc_mp4toannexb",
-                *_nvenc_tune_args(),
+                "-pix_fmt", pix_fmt,
+                "-bsf:v", "hevc_mp4toannexb",
+                *_nvenc_tune_args()
             ]
 
         elif hwenc == "qsv" and ensure("hevc_qsv"):
-            enc = ["-c:v", "hevc_qsv", *dynamic_flags, "-pix_fmt", pix_fmt, "-bsf:v", "hevc_mp4toannexb"]
+            enc = ["-c:v", "hevc_qsv", *dynamic_flags,
+                   "-pix_fmt", pix_fmt, "-bsf:v", "hevc_mp4toannexb"]
 
         elif hwenc == "vaapi" and has_vaapi() and ensure("hevc_vaapi"):
             va_fmt = _vaapi_fmt_for_pix_fmt(pix_fmt, codec)
-            extra_filters += ["-vf", f"format={va_fmt},hwupload", "-vaapi_device", "/dev/dri/renderD128"]
-            enc = ["-c:v", "hevc_vaapi", "-bf", "0", *dynamic_flags, "-pix_fmt", pix_fmt, "-bsf:v", "hevc_mp4toannexb"]
+            extra_filters += [
+                "-vf", f"format={va_fmt},hwupload",
+                "-vaapi_device", "/dev/dri/renderD128"
+            ]
+            enc = [
+                "-c:v", "hevc_vaapi",
+                "-bf", "0",
+                *dynamic_flags,
+                "-pix_fmt", pix_fmt,
+                "-bsf:v", "hevc_mp4toannexb"
+            ]
 
         else:
             enc = [
-                "-c:v",
-                "libx265",
-                "-preset",
-                preset_l or "ultrafast",
-                "-tune",
-                tune_l or "zerolatency",
+                "-c:v", "libx265",
+                "-preset", preset_l or "ultrafast",
+                "-tune", tune_l or "zerolatency",
                 *(["-g", str(gop_val)] if use_gop else []),
                 *dynamic_flags,
-                "-pix_fmt",
-                pix_fmt,
-                "-bsf:v",
-                "hevc_mp4toannexb",
+                "-pix_fmt", pix_fmt,
+                "-bsf:v", "hevc_mp4toannexb"
             ]
             if tune_l in ("zerolatency", "ultra-low-latency", "ull", "low-latency", "ll"):
                 enc += ["-x265-params", "scenecut=0:rc-lookahead=0"]
 
     return extra_filters, enc
 
-
 def _pick_kms_device():
-    for cand in ("card0", "card1", "card2"):
-        p = Path(f"/dev/dri/{cand}")
-        if p.exists():
-            return str(p)
+    for cand in ("card0","card1","card2"):
+        p = f"/dev/dri/{cand}"
+        if os.path.exists(p):
+            return p
     return "/dev/dri/card0"
-
 
 def build_video_cmd(args, bitrate, monitor_info, video_port):
     try:
@@ -988,7 +860,7 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
     preset = args.preset.strip().lower() if args.preset else ""
     gop, qp, tune, pix_fmt = args.gop, args.qp, args.tune, args.pix_fmt
 
-    codec_name = args.encoder if args.encoder and args.encoder.lower() != "none" else "h.264"
+    codec_name = (args.encoder if args.encoder and args.encoder.lower() != "none" else "h.264")
     min_bits = int(w) * int(h) * max(1, fps_i) * _target_bpp(codec_name, fps_i)
     cur_bits = _parse_bitrate_bits(bitrate)
     if cur_bits < min_bits:
@@ -996,12 +868,7 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
         safe_str = _format_bits(safe_bits)
         logging.warning(
             "Bitrate too low for %dx%d@%dfps (%s < %s). Bumping to %s.",
-            w,
-            h,
-            fps_i,
-            str(bitrate),
-            _format_bits(cur_bits),
-            safe_str,
+            w, h, fps_i, str(bitrate), _format_bits(cur_bits), safe_str
         )
         bitrate = safe_str
         host_state.current_bitrate = safe_str
@@ -1022,57 +889,42 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
 
     def _vaapi_possible_for_codec():
         enc = (args.encoder or "h.264").lower()
-        return (enc == "h.264" and ffmpeg_has_encoder("h264_vaapi")) or (
-            enc == "h.265" and ffmpeg_has_encoder("hevc_vaapi")
+        return (
+            (enc == "h.264" and ffmpeg_has_encoder("h264_vaapi")) or
+            (enc == "h.265" and ffmpeg_has_encoder("hevc_vaapi"))
         )
 
     use_kms = False
-    if capture_pref == "kmsgrab" or (
-        capture_pref == "auto"
-        and kms_available
-        and (
-            (args.hwenc in ("auto", "vaapi") and vaapi_available and _vaapi_possible_for_codec())
-            or (args.hwenc == "cpu")
-        )
-    ):
+    if capture_pref == "kmsgrab":
         use_kms = True
+    elif capture_pref == "auto" and kms_available:
+        if ((args.hwenc in ("auto", "vaapi") and vaapi_available and _vaapi_possible_for_codec())
+            or (args.hwenc == "cpu")):
+            use_kms = True
 
     if use_kms:
         kms_dev = os.environ.get("LINUXPLAY_KMS_DEVICE", _pick_kms_device())
         logging.info("Linux capture: kmsgrab (%s) selected (pref=%s).", kms_dev, capture_pref)
         input_side = [
             *base_in,
-            "-f",
-            "kmsgrab",
-            "-framerate",
-            str(fps_i),
-            "-device",
-            kms_dev,
-            "-i",
-            "-",
+            "-f", "kmsgrab",
+            "-framerate", str(fps_i),
+            "-device", kms_dev,
+            "-i", "-",
         ]
 
         extra_filters, encode = _pick_encoder_args(
-            codec=args.encoder,
-            hwenc=args.hwenc,
-            preset=preset,
-            gop=gop,
-            qp=qp,
-            tune=tune,
-            bitrate=bitrate,
-            pix_fmt=pix_fmt,
+            codec=args.encoder, hwenc=args.hwenc, preset=preset,
+            gop=gop, qp=qp, tune=tune, bitrate=bitrate, pix_fmt=pix_fmt
         )
 
         if any(x in encode for x in ("h264_vaapi", "hevc_vaapi")):
-            _vaapi_fmt = {"nv12": "nv12", "yuv420p": "nv12", "p010": "p010", "yuv420p10": "p010"}.get(
-                (pix_fmt or "nv12").lower(), "nv12"
-            )
-            extra_filters = [
-                "-vf",
-                f"hwmap=derive_device=vaapi,scale_vaapi=w={w}:h={h}:format={_vaapi_fmt}",
-                "-vaapi_device",
-                "/dev/dri/renderD128",
-            ]
+            _vaapi_fmt = {
+                "nv12": "nv12", "yuv420p": "nv12",
+                "p010": "p010", "yuv420p10": "p010"
+            }.get((pix_fmt or "nv12").lower(), "nv12")
+            extra_filters = ["-vf", f"hwmap=derive_device=vaapi,scale_vaapi=w={w}:h={h}:format={_vaapi_fmt}",
+                             "-vaapi_device", "/dev/dri/renderD128"]
         elif args.hwenc == "cpu":
             extra_filters = ["-vf", f"hwdownload,format={pix_fmt or 'yuv420p'}"]
 
@@ -1081,26 +933,15 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
         input_arg = f"{disp}+{ox},{oy}"
         input_side = [
             *base_in,
-            "-f",
-            "x11grab",
-            "-draw_mouse",
-            "0",
-            "-framerate",
-            str(fps_i),
-            "-video_size",
-            f"{w}x{h}",
-            "-i",
-            input_arg,
+            "-f", "x11grab",
+            "-draw_mouse", "0",
+            "-framerate", str(fps_i),
+            "-video_size", f"{w}x{h}",
+            "-i", input_arg,
         ]
         extra_filters, encode = _pick_encoder_args(
-            codec=args.encoder,
-            hwenc=args.hwenc,
-            preset=preset,
-            gop=gop,
-            qp=qp,
-            tune=tune,
-            bitrate=bitrate,
-            pix_fmt=pix_fmt,
+            codec=args.encoder, hwenc=args.hwenc, preset=preset,
+            gop=gop, qp=qp, tune=tune, bitrate=bitrate, pix_fmt=pix_fmt
         )
 
     output_side = _output_sync_flags()
@@ -1115,10 +956,8 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
 
     out = [
         *(_mpegts_ll_mux_flags()),
-        "-flags",
-        "+low_delay",
-        "-f",
-        "mpegts",
+        "-flags", "+low_delay",
+        "-f", "mpegts",
         *_marker_opt(),
         (
             f"udp://{ip}:{video_port}"
@@ -1130,12 +969,12 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
         ),
     ]
 
-    return input_side + output_side + (extra_filters or []) + encode + out
-
+    full_cmd = input_side + output_side + (extra_filters or []) + encode + out
+    return full_cmd
 
 def build_audio_cmd():
     opus_app = os.environ.get("LP_OPUS_APP", "voip")
-    opus_fd = os.environ.get("LP_OPUS_FD", "10")
+    opus_fd  = os.environ.get("LP_OPUS_FD", "10")
 
     net_mode = getattr(host_state, "net_mode", "lan")
     aud_buf = "4194304" if net_mode == "wifi" else "512"
@@ -1144,7 +983,11 @@ def build_audio_cmd():
     mon = os.environ.get("PULSE_MONITOR", "")
     if not mon and which("pactl"):
         try:
-            out = subprocess.check_output(["pactl", "list", "short", "sources"], text=True, stderr=subprocess.DEVNULL)
+            out = subprocess.check_output(
+                ["pactl", "list", "short", "sources"],
+                text=True,
+                stderr=subprocess.DEVNULL
+            )
             best = None
             for line in out.splitlines():
                 parts = line.split("\t")
@@ -1154,7 +997,7 @@ def build_audio_cmd():
                         if state == "RUNNING":
                             best = name
                             break
-                        if state == "IDLE" and not best:
+                        elif state == "IDLE" and not best:
                             best = name
             if best:
                 mon = best
@@ -1172,12 +1015,8 @@ def build_audio_cmd():
     if which("pactl"):
         try:
             probe = subprocess.check_output(
-                [
-                    "bash",
-                    "-c",
-                    f"pactl list sources | grep -A2 '{mon}' | grep 'Channels' | head -n1 | awk '{{print $2}}'",
-                ],
-                text=True,
+                ["bash", "-c", f"pactl list sources | grep -A2 '{mon}' | grep 'Channels' | head -n1 | awk '{{print $2}}'"],
+                text=True
             ).strip()
             if probe.isdigit():
                 channels = int(probe)
@@ -1191,194 +1030,98 @@ def build_audio_cmd():
     input_side = [
         *(_ffmpeg_base_cmd()),
         *(_input_ll_flags()),
-        "-f",
-        "pulse",
-        "-i",
-        mon,
-        "-ac",
-        str(channels),
+        "-f", "pulse",
+        "-i", mon,
+        "-ac", str(channels),
     ]
 
     output_side = _output_sync_flags()
 
     encode = [
-        "-c:a",
-        "libopus",
-        "-b:a",
-        "384k" if channels > 2 else "128k",
-        "-application",
-        opus_app,
-        "-frame_duration",
-        opus_fd,
+        "-c:a", "libopus",
+        "-b:a", "384k" if channels > 2 else "128k",
+        "-application", opus_app,
+        "-frame_duration", opus_fd,
     ]
 
     out = [
         *(_mpegts_ll_mux_flags()),
         *_marker_opt(),
-        "-f",
-        "mpegts",
+        "-f", "mpegts",
         f"udp://{host_state.client_ip}:{UDP_AUDIO_PORT}"
-        f"?pkt_size=1316&buffer_size={aud_buf}&overrun_nonfatal=1&max_delay={aud_delay}",
+        f"?pkt_size=1316&buffer_size={aud_buf}&overrun_nonfatal=1&max_delay={aud_delay}"
     ]
 
     return input_side + output_side + encode + out
 
-
-def _inject_mouse_move(x, y):
+def _inject_mouse_move(x,y):
     if HAVE_PYNPUT:
-        try:
-            _mouse.position = (int(x), int(y))
-        except Exception as e:
-            logging.debug("pynput move failed: %s", e)
+        try: _mouse.position = (int(x), int(y))
+        except Exception as e: logging.debug("pynput move failed: %s", e)
     elif IS_LINUX:
-        subprocess.Popen(["xdotool", "mousemove", str(x), str(y)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
+        subprocess.Popen(["xdotool","mousemove",str(x),str(y)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def _inject_mouse_down(btn):
     if HAVE_PYNPUT:
         b = {"1": Button.left, "2": Button.middle, "3": Button.right}.get(btn, Button.left)
-        try:
-            _mouse.press(b)
-        except Exception as e:
-            logging.debug("pynput mousedown failed: %s", e)
+        try: _mouse.press(b)
+        except Exception as e: logging.debug("pynput mousedown failed: %s", e)
     elif IS_LINUX:
-        subprocess.Popen(["xdotool", "mousedown", btn], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
+        subprocess.Popen(["xdotool","mousedown",btn], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def _inject_mouse_up(btn):
     if HAVE_PYNPUT:
         b = {"1": Button.left, "2": Button.middle, "3": Button.right}.get(btn, Button.left)
-        try:
-            _mouse.release(b)
-        except Exception as e:
-            logging.debug("pynput mouseup failed: %s", e)
+        try: _mouse.release(b)
+        except Exception as e: logging.debug("pynput mouseup failed: %s", e)
     elif IS_LINUX:
-        subprocess.Popen(["xdotool", "mouseup", btn], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
+        subprocess.Popen(["xdotool","mouseup",btn], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def _inject_scroll(btn):
     if HAVE_PYNPUT:
         try:
-            if btn == "4":
-                _mouse.scroll(0, +1)
-            elif btn == "5":
-                _mouse.scroll(0, -1)
-            elif btn == "6":
-                _mouse.scroll(-1, 0)
-            elif btn == "7":
-                _mouse.scroll(+1, 0)
+            if btn == "4": _mouse.scroll(0, +1)
+            elif btn == "5": _mouse.scroll(0, -1)
+            elif btn == "6": _mouse.scroll(-1, 0)
+            elif btn == "7": _mouse.scroll(+1, 0)
         except Exception as e:
             logging.debug("pynput scroll failed: %s", e)
     elif IS_LINUX:
-        subprocess.Popen(["xdotool", "click", btn], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
+        subprocess.Popen(["xdotool","click",btn], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 _key_map = {
-    "Escape": Key.esc if HAVE_PYNPUT else None,
-    "Tab": Key.tab if HAVE_PYNPUT else None,
-    "BackSpace": Key.backspace if HAVE_PYNPUT else None,
-    "Return": Key.enter if HAVE_PYNPUT else None,
-    "Insert": Key.insert if HAVE_PYNPUT else None,
-    "Delete": Key.delete if HAVE_PYNPUT else None,
-    "Home": Key.home if HAVE_PYNPUT else None,
-    "End": Key.end if HAVE_PYNPUT else None,
-    "Left": Key.left if HAVE_PYNPUT else None,
-    "Up": Key.up if HAVE_PYNPUT else None,
-    "Right": Key.right if HAVE_PYNPUT else None,
-    "Down": Key.down if HAVE_PYNPUT else None,
-    "Page_Up": Key.page_up if HAVE_PYNPUT else None,
-    "Page_Down": Key.page_down if HAVE_PYNPUT else None,
-    "Shift_L": Key.shift if HAVE_PYNPUT else None,
-    "Control_L": Key.ctrl if HAVE_PYNPUT else None,
-    "Alt_L": Key.alt if HAVE_PYNPUT else None,
-    "Alt_R": (Key.alt_gr if HAVE_PYNPUT and hasattr(Key, "alt_gr") else (Key.alt if HAVE_PYNPUT else None)),
-    "Super_L": (Key.cmd if HAVE_PYNPUT else None),
-    "Caps_Lock": (Key.caps_lock if HAVE_PYNPUT else None),
-    "F1": Key.f1 if HAVE_PYNPUT else None,
-    "F2": Key.f2 if HAVE_PYNPUT else None,
-    "F3": Key.f3 if HAVE_PYNPUT else None,
-    "F4": Key.f4 if HAVE_PYNPUT else None,
-    "F5": Key.f5 if HAVE_PYNPUT else None,
-    "F6": Key.f6 if HAVE_PYNPUT else None,
-    "F7": Key.f7 if HAVE_PYNPUT else None,
-    "F8": Key.f8 if HAVE_PYNPUT else None,
-    "F9": Key.f9 if HAVE_PYNPUT else None,
-    "F10": Key.f10 if HAVE_PYNPUT else None,
-    "F11": Key.f11 if HAVE_PYNPUT else None,
-    "F12": Key.f12 if HAVE_PYNPUT else None,
+    "Escape": Key.esc if HAVE_PYNPUT else None, "Tab": Key.tab if HAVE_PYNPUT else None, "BackSpace": Key.backspace if HAVE_PYNPUT else None,
+    "Return": Key.enter if HAVE_PYNPUT else None, "Insert": Key.insert if HAVE_PYNPUT else None, "Delete": Key.delete if HAVE_PYNPUT else None,
+    "Home": Key.home if HAVE_PYNPUT else None, "End": Key.end if HAVE_PYNPUT else None,
+    "Left": Key.left if HAVE_PYNPUT else None, "Up": Key.up if HAVE_PYNPUT else None, "Right": Key.right if HAVE_PYNPUT else None, "Down": Key.down if HAVE_PYNPUT else None,
+    "Page_Up": Key.page_up if HAVE_PYNPUT else None, "Page_Down": Key.page_down if HAVE_PYNPUT else None,
+    "Shift_L": Key.shift if HAVE_PYNPUT else None, "Control_L": Key.ctrl if HAVE_PYNPUT else None,
+    "Alt_L": Key.alt if HAVE_PYNPUT else None, "Alt_R": (Key.alt_gr if HAVE_PYNPUT and hasattr(Key,"alt_gr") else (Key.alt if HAVE_PYNPUT else None)),
+    "Super_L": (Key.cmd if HAVE_PYNPUT else None), "Caps_Lock": (Key.caps_lock if HAVE_PYNPUT else None),
+    "F1": Key.f1 if HAVE_PYNPUT else None, "F2": Key.f2 if HAVE_PYNPUT else None, "F3": Key.f3 if HAVE_PYNPUT else None,
+    "F4": Key.f4 if HAVE_PYNPUT else None, "F5": Key.f5 if HAVE_PYNPUT else None, "F6": Key.f6 if HAVE_PYNPUT else None,
+    "F7": Key.f7 if HAVE_PYNPUT else None, "F8": Key.f8 if HAVE_PYNPUT else None, "F9": Key.f9 if HAVE_PYNPUT else None,
+    "F10": Key.f10 if HAVE_PYNPUT else None, "F11": Key.f11 if HAVE_PYNPUT else None, "F12": Key.f12 if HAVE_PYNPUT else None,
     "space": Key.space if HAVE_PYNPUT else None,
 }
 
 CHAR_TO_X11 = {
-    "-": "minus",
-    "=": "equal",
-    "[": "bracketleft",
-    "]": "bracketright",
-    "\\": "backslash",
-    ";": "semicolon",
-    "'": "apostrophe",
-    ",": "comma",
-    ".": "period",
-    "/": "slash",
-    "`": "grave",
-    "!": "exclam",
-    '"': "quotedbl",
-    "#": "numbersign",
-    "$": "dollar",
-    "%": "percent",
-    "&": "ampersand",
-    "*": "asterisk",
-    "(": "parenleft",
-    ")": "parenright",
-    "_": "underscore",
-    "+": "plus",
-    "{": "braceleft",
-    "}": "braceright",
-    "|": "bar",
-    ":": "colon",
-    "<": "less",
-    ">": "greater",
-    "?": "question",
-    "£": "sterling",
-    "¬": "notsign",
-    "¦": "brokenbar",
+    '-':'minus', '=':'equal', '[':'bracketleft', ']':'bracketright', '\\':'backslash',
+    ';':'semicolon', "'":'apostrophe', ',':'comma', '.':'period', '/':'slash', '`':'grave',
+    '!':'exclam', '"':'quotedbl', '#':'numbersign', '$':'dollar', '%':'percent',
+    '&':'ampersand', '*':'asterisk', '(':'parenleft', ')':'parenright', '_':'underscore',
+    '+':'plus', '{':'braceleft', '}':'braceright', '|':'bar', ':':'colon',
+    '<':'less', '>':'greater', '?':'question', '£':'sterling', '¬':'notsign', '¦':'brokenbar',
 }
 
 NAME_TO_CHAR = {
-    "minus": "-",
-    "equal": "=",
-    "bracketleft": "[",
-    "bracketright": "]",
-    "backslash": "\\",
-    "semicolon": ";",
-    "apostrophe": "'",
-    "comma": ",",
-    "period": ".",
-    "slash": "/",
-    "grave": "`",
-    "exclam": "!",
-    "quotedbl": '"',
-    "numbersign": "#",
-    "dollar": "$",
-    "percent": "%",
-    "ampersand": "&",
-    "asterisk": "*",
-    "parenleft": "(",
-    "parenright": ")",
-    "underscore": "_",
-    "plus": "+",
-    "braceleft": "{",
-    "braceright": "}",
-    "bar": "|",
-    "colon": ":",
-    "less": "<",
-    "greater": ">",
-    "question": "?",
-    "sterling": "£",
-    "notsign": "¬",
-    "brokenbar": "¦",
+    'minus':'-', 'equal':'=', 'bracketleft':'[', 'bracketright':']', 'backslash':'\\',
+    'semicolon':';', 'apostrophe':"'", 'comma':',', 'period':'.', 'slash':'/', 'grave':'`',
+    'exclam':'!', 'quotedbl':'"', 'numbersign':'#', 'dollar':'$', 'percent':'%',
+    'ampersand':'&', 'asterisk':'*', 'parenleft':'(', 'parenright':')', 'underscore':'_',
+    'plus':'+', 'braceleft':'{', 'braceright':'}', 'bar':'|', 'colon':':',
+    'less':'<', 'greater':'>', 'question':'?', 'sterling':'£', 'notsign':'¬', 'brokenbar':'¦',
 }
-
 
 def _inject_key(action, name):
     if HAVE_PYNPUT:
@@ -1410,8 +1153,7 @@ def _inject_key(action, name):
         except Exception as e:
             logging.debug("xdotool key %s failed for %r: %s", action, name, e)
 
-
-def tcp_handshake_server(sock, encoder_str, _args):
+def tcp_handshake_server(sock, encoder_str, args):
     logging.info("TCP handshake server on %d", TCP_HANDSHAKE_PORT)
     set_status("Waiting for client handshake…")
 
@@ -1427,19 +1169,20 @@ def tcp_handshake_server(sock, encoder_str, _args):
             parts = (raw or "").split()
             cmd = parts[0] if parts else ""
 
-            if host_state.session_active and host_state.authed_client_ip and peer_ip != host_state.authed_client_ip:
-                logging.warning(f"Rejected handshake from {peer_ip}: active session with {host_state.authed_client_ip}")
-                try:
-                    conn.sendall(b"BUSY:ACTIVESESSION")
-                    conn.shutdown(socket.SHUT_WR)
-                    time.sleep(0.05)
-                except Exception:
-                    pass
-                conn.close()
-                continue
+            if host_state.session_active and host_state.authed_client_ip:
+                if peer_ip != host_state.authed_client_ip:
+                    logging.warning(f"Rejected handshake from {peer_ip}: active session with {host_state.authed_client_ip}")
+                    try:
+                        conn.sendall(b"BUSY:ACTIVESESSION")
+                        conn.shutdown(socket.SHUT_WR)
+                        time.sleep(0.05)
+                    except Exception:
+                        pass
+                    conn.close()
+                    continue
 
             if cmd == "HELLO" and len(parts) >= 2 and parts[1].startswith("CERTFP:"):
-                fp_hex = parts[1][len("CERTFP:") :].strip().upper()
+                fp_hex = parts[1][len("CERTFP:"):].strip().upper()
 
                 if host_state.session_active:
                     try:
@@ -1460,11 +1203,9 @@ def tcp_handshake_server(sock, encoder_str, _args):
                     host_state.last_pong_ts = time.time()
                     host_state.client_ip = peer_ip
 
-                    monitors_str = (
-                        ";".join(f"{w}x{h}+{ox}+{oy}" for (w, h, ox, oy) in host_state.monitors)
-                        if host_state.monitors
-                        else DEFAULT_RES
-                    )
+                    monitors_str = ";".join(
+                        f"{w}x{h}+{ox}+{oy}" for (w, h, ox, oy) in host_state.monitors
+                    ) if host_state.monitors else DEFAULT_RES
                     resp = f"OK:{encoder_str}:{monitors_str}"
                     try:
                         conn.sendall(resp.encode("utf-8"))
@@ -1476,27 +1217,25 @@ def tcp_handshake_server(sock, encoder_str, _args):
                     set_status(f"Client (cert): {host_state.client_ip}")
                     logging.info(f"[AUTH] Client {peer_ip} authenticated via CERTFP.")
                     continue
-                try:
-                    conn.sendall(b"FAIL:UNTRUSTEDCERT")
-                    conn.shutdown(socket.SHUT_WR)
-                    time.sleep(0.05)
-                except Exception:
-                    pass
-                conn.close()
-                logging.warning(f"[AUTH] Rejected cert from {peer_ip} — not trusted.")
-                continue
+                else:
+                    try:
+                        conn.sendall(b"FAIL:UNTRUSTEDCERT")
+                        conn.shutdown(socket.SHUT_WR)
+                        time.sleep(0.05)
+                    except Exception:
+                        pass
+                    conn.close()
+                    logging.warning(f"[AUTH] Rejected cert from {peer_ip} — not trusted.")
+                    continue
 
             if cmd == "HELLO":
                 provided_pin = parts[1] if len(parts) >= 2 else ""
                 ok = False
 
                 with host_state.pin_lock:
-                    if (
-                        not host_state.session_active
-                        and (provided_pin == str(host_state.pin_code))
-                        and (time.time() < host_state.pin_expiry)
-                    ):
-                        ok = True
+                    if not host_state.session_active:
+                        if (provided_pin == str(host_state.pin_code)) and (time.time() < host_state.pin_expiry):
+                            ok = True
 
                 if ok:
                     with host_state.pin_lock:
@@ -1511,11 +1250,9 @@ def tcp_handshake_server(sock, encoder_str, _args):
                     threading.Thread(target=lambda: pin_rotate_if_needed(force=True), daemon=True).start()
 
                     host_state.client_ip = peer_ip
-                    monitors_str = (
-                        ";".join(f"{w}x{h}+{ox}+{oy}" for (w, h, ox, oy) in host_state.monitors)
-                        if host_state.monitors
-                        else DEFAULT_RES
-                    )
+                    monitors_str = ";".join(
+                        f"{w}x{h}+{ox}+{oy}" for (w, h, ox, oy) in host_state.monitors
+                    ) if host_state.monitors else DEFAULT_RES
 
                     resp = f"OK:{encoder_str}:{monitors_str}"
                     try:
@@ -1559,7 +1296,6 @@ def tcp_handshake_server(sock, encoder_str, _args):
             trigger_shutdown(f"Handshake server error: {e}")
             break
 
-
 def start_streams_for_current_client(args):
     ip = getattr(host_state, "client_ip", None)
     if not ip:
@@ -1602,7 +1338,6 @@ def start_streams_for_current_client(args):
         finally:
             host_state.starting_streams = False
 
-
 def control_listener(sock):
     logging.info("Control listener UDP %d", UDP_CONTROL_PORT)
     while not host_state.should_terminate:
@@ -1616,9 +1351,7 @@ def control_listener(sock):
 
             if host_state.authed_client_ip:
                 if peer_ip != host_state.authed_client_ip:
-                    logging.warning(
-                        f"Rejected control packet from {peer_ip} — active client: {host_state.authed_client_ip}"
-                    )
+                    logging.warning(f"Rejected control packet from {peer_ip} — active client: {host_state.authed_client_ip}")
                     continue
             else:
                 logging.debug(f"Ignoring early control packet from {peer_ip} (auth IP not yet set)")
@@ -1640,13 +1373,13 @@ def control_listener(sock):
                         host_state.net_mode = mode
                         try:
                             stop_streams_only()
-                            if host_args_manager.args:
-                                start_streams_for_current_client(host_args_manager.args)
+                            if HOST_ARGS:
+                                start_streams_for_current_client(HOST_ARGS)
                         except Exception as e:
                             logging.error(f"Restart after NET failed: {e}")
                 continue
 
-            if cmd == "GOODBYE":
+            elif cmd == "GOODBYE":
                 logging.info(f"Client at {peer_ip} disconnected cleanly.")
                 try:
                     stop_streams_only()
@@ -1665,7 +1398,7 @@ def control_listener(sock):
                     logging.error(f"Error handling GOODBYE cleanup: {e}")
                 continue
 
-            if cmd == "MOUSE_PKT" and len(tokens) == 5:
+            elif cmd == "MOUSE_PKT" and len(tokens) == 5:
                 try:
                     pkt_type = int(tokens[1])
                     bmask = int(tokens[2])
@@ -1677,19 +1410,13 @@ def control_listener(sock):
                 _inject_mouse_move(x, y)
 
                 if pkt_type == 1:
-                    if bmask & 1:
-                        _inject_mouse_down("1")
-                    if bmask & 2:
-                        _inject_mouse_down("2")
-                    if bmask & 4:
-                        _inject_mouse_down("3")
+                    if bmask & 1: _inject_mouse_down("1")
+                    if bmask & 2: _inject_mouse_down("2")
+                    if bmask & 4: _inject_mouse_down("3")
                 elif pkt_type == 3:
-                    if bmask & 1:
-                        _inject_mouse_up("1")
-                    if bmask & 2:
-                        _inject_mouse_up("2")
-                    if bmask & 4:
-                        _inject_mouse_up("3")
+                    if bmask & 1: _inject_mouse_up("1")
+                    if bmask & 2: _inject_mouse_up("2")
+                    if bmask & 4: _inject_mouse_up("3")
 
             elif cmd == "MOUSE_SCROLL" and len(tokens) == 2:
                 _inject_scroll(tokens[1])
@@ -1705,44 +1432,28 @@ def control_listener(sock):
             trigger_shutdown(f"Control listener error: {e}")
             break
 
-
 def clipboard_monitor_host():
     if not HAVE_PYPERCLIP:
         logging.info("pyperclip not available; host clipboard sync disabled.")
         return
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    client_clipboard_addr = None  # Track client's ephemeral port
-
     while not host_state.should_terminate:
         current = ""
-        with contextlib.suppress(Exception):
+        try:
             current = (pyperclip.paste() or "").strip()
+        except Exception:
+            pass
         with host_state.clipboard_lock:
-            if (
-                not host_state.ignore_clipboard_update
-                and current
-                and current != host_state.last_clipboard_content
-                and host_state.client_ip
-            ):
+            if (not host_state.ignore_clipboard_update and current and current != host_state.last_clipboard_content and host_state.client_ip):
                 host_state.last_clipboard_content = current
-                msg = f"CLIPBOARD_UPDATE HOST {current}".encode()
+                msg = f"CLIPBOARD_UPDATE HOST {current}".encode("utf-8")
                 try:
-                    # Send to client's ephemeral port if known, otherwise to well-known port
-                    if client_clipboard_addr:
-                        sock.sendto(msg, client_clipboard_addr)
-                    else:
-                        sock.sendto(msg, (host_state.client_ip, UDP_CLIPBOARD_PORT))
+                    sock.sendto(msg, (host_state.client_ip, UDP_CLIPBOARD_PORT))
                 except Exception as e:
                     trigger_shutdown(f"Clipboard send error: {e}")
                     break
-
-        # Check if we should update client address from listener
-        if hasattr(host_state, "client_clipboard_addr"):
-            client_clipboard_addr = host_state.client_clipboard_addr
-
         time.sleep(1)
     sock.close()
-
 
 def clipboard_listener_host(sock):
     if not HAVE_PYPERCLIP:
@@ -1751,21 +1462,8 @@ def clipboard_listener_host(sock):
         try:
             data, addr = sock.recvfrom(65535)
             msg = data.decode("utf-8", errors="ignore")
-
-            # Handle keepalive messages from client (used to establish connection)
-            if msg.strip() == "CLIPBOARD_KEEPALIVE":
-                if addr[0] == host_state.client_ip or not host_state.client_ip:
-                    host_state.client_clipboard_addr = addr
-                    logging.debug(f"Client clipboard address registered from keepalive: {addr}")
-                continue
-
             tokens = msg.split(maxsplit=2)
             if len(tokens) >= 3 and tokens[0] == "CLIPBOARD_UPDATE" and tokens[1] == "CLIENT":
-                # Remember client's ephemeral port for responses
-                if addr[0] == host_state.client_ip:
-                    host_state.client_clipboard_addr = addr
-                    logging.debug(f"Client clipboard address updated to {addr}")
-
                 new_content = tokens[2]
                 with host_state.clipboard_lock:
                     host_state.ignore_clipboard_update = True
@@ -1783,36 +1481,32 @@ def clipboard_listener_host(sock):
             trigger_shutdown(f"Clipboard listener error: {e}")
             break
 
-
 def recvall(sock, n):
     data = b""
     while len(data) < n:
         chunk = sock.recv(n - len(data))
-        if not chunk:
-            return None
+        if not chunk: return None
         data += chunk
     return data
-
 
 def file_upload_listener():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     host_state.file_upload_sock = s
     try:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((host_args_manager.args.bind_address, FILE_UPLOAD_PORT))
+        s.bind(("", FILE_UPLOAD_PORT))
         s.listen(5)
         logging.info("File upload listener TCP %d", FILE_UPLOAD_PORT)
     except Exception as e:
         trigger_shutdown(f"File upload listener bind/listen failed: {e}")
-        try:
-            s.close()
+        try: s.close()
         finally:
             host_state.file_upload_sock = None
         return
 
     while not host_state.should_terminate:
         try:
-            conn, _addr = s.accept()
+            conn, addr = s.accept()
             header = recvall(conn, 4)
             if not header:
                 conn.close()
@@ -1820,17 +1514,15 @@ def file_upload_listener():
             filename_length = int.from_bytes(header, "big")
             filename = recvall(conn, filename_length).decode("utf-8")
             file_size = int.from_bytes(recvall(conn, 8), "big")
-            dest_dir = Path.home() / "LinuxPlayDrop"
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            dest_path = dest_dir / filename
-            with dest_path.open("wb") as f:
+            dest_dir = os.path.join(os.path.expanduser("~"), "LinuxPlayDrop")
+            os.makedirs(dest_dir, exist_ok=True)
+            dest_path = os.path.join(dest_dir, filename)
+            with open(dest_path, "wb") as f:
                 remaining = file_size
                 while remaining > 0:
                     chunk = conn.recv(min(4096, remaining))
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    remaining -= len(chunk)
+                    if not chunk: break
+                    f.write(chunk); remaining -= len(chunk)
             conn.close()
             logging.info("Received file %s (%d bytes)", dest_path, file_size)
         except OSError:
@@ -1843,34 +1535,27 @@ def file_upload_listener():
     finally:
         host_state.file_upload_sock = None
 
-
-def heartbeat_manager(_args):
+def heartbeat_manager(args):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((_args.bind_address, UDP_HEARTBEAT_PORT))
+        s.bind(("", UDP_HEARTBEAT_PORT))
         host_state.heartbeat_sock = s
-        logging.info("Heartbeat manager running on UDP %d (responds to client's source port)", UDP_HEARTBEAT_PORT)
+        logging.info("Heartbeat manager running on UDP %d", UDP_HEARTBEAT_PORT)
     except Exception as e:
         trigger_shutdown(f"Heartbeat socket error: {e}")
         return
 
     last_ping = 0.0
     host_state.last_pong_ts = time.time()
-    client_heartbeat_addr = None  # Track client's ephemeral port
 
     while not host_state.should_terminate:
         now = time.time()
 
         if host_state.client_ip:
-            # Send initial PING to the well-known port
             if now - last_ping >= HEARTBEAT_INTERVAL:
                 try:
-                    # Send to client's ephemeral port if known, otherwise to well-known port
-                    if client_heartbeat_addr:
-                        s.sendto(b"PING", client_heartbeat_addr)
-                    else:
-                        s.sendto(b"PING", (host_state.client_ip, UDP_HEARTBEAT_PORT))
+                    s.sendto(b"PING", (host_state.client_ip, UDP_HEARTBEAT_PORT))
                     last_ping = now
                 except Exception as e:
                     logging.warning("Heartbeat send error: %s", e)
@@ -1881,11 +1566,7 @@ def heartbeat_manager(_args):
                 msg = data.decode("utf-8", errors="ignore").strip()
                 if msg.startswith("PONG") and addr[0] == host_state.client_ip:
                     host_state.last_pong_ts = now
-                    # Remember the client's ephemeral port for future PINGs
-                    if not client_heartbeat_addr or client_heartbeat_addr != addr:
-                        client_heartbeat_addr = addr
-                        logging.debug(f"Client heartbeat address updated to {addr}")
-            except TimeoutError:
+            except socket.timeout:
                 pass
             except Exception as e:
                 logging.debug("Heartbeat recv error: %s", e)
@@ -1893,7 +1574,8 @@ def heartbeat_manager(_args):
             if (now - host_state.last_pong_ts) > HEARTBEAT_TIMEOUT and (now - host_state.last_disconnect_ts) > 10:
                 if host_state.client_ip:
                     logging.warning(
-                        "Heartbeat timeout from %s — no PONG or GOODBYE, stopping streams.", host_state.client_ip
+                        "Heartbeat timeout from %s — no PONG or GOODBYE, stopping streams.",
+                        host_state.client_ip
                     )
                     try:
                         stop_streams_only()
@@ -1905,16 +1587,13 @@ def heartbeat_manager(_args):
                     set_status("Client disconnected — waiting for connection…")
                     host_state.session_active = False
                     host_state.authed_client_ip = None
-                    client_heartbeat_addr = None  # Reset on disconnect
                     pin_rotate_if_needed(force=True)
 
                     time.sleep(RECONNECT_COOLDOWN)
 
                 host_state.last_pong_ts = now
         else:
-            client_heartbeat_addr = None  # Reset when no client
             time.sleep(0.5)
-
 
 def resource_monitor():
     p = psutil.Process(os.getpid())
@@ -1923,21 +1602,20 @@ def resource_monitor():
         total = 0
         try:
             total += p.memory_info().rss
-            children = list(p.children(recursive=True))
+            for child in p.children(recursive=True):
+                try:
+                    cname = child.name().lower()
+                    if "ffmpeg" in cname:
+                        total += child.memory_info().rss
+                except Exception:
+                    pass
         except Exception:
-            return total / (1024 * 1024)
-
-        for child in children:
-            with contextlib.suppress(Exception):
-                cname = child.name().lower()
-                if "ffmpeg" in cname:
-                    total += child.memory_info().rss
+            pass
         return total / (1024 * 1024)
 
     def read_gpu_usage():
-        if not HAVE_PYNVML:
-            return None
         try:
+            import pynvml
             pynvml.nvmlInit()
             handle = pynvml.nvmlDeviceGetHandleByIndex(0)
             util = pynvml.nvmlDeviceGetUtilizationRates(handle)
@@ -1946,10 +1624,10 @@ def resource_monitor():
             pass
 
         try:
-            for card in Path("/sys/class/drm").iterdir():
-                busy_path = card / "device" / "gpu_busy_percent"
-                if busy_path.exists():
-                    with busy_path.open() as f:
+            for card in os.listdir("/sys/class/drm"):
+                busy_path = f"/sys/class/drm/{card}/device/gpu_busy_percent"
+                if os.path.exists(busy_path):
+                    with open(busy_path, "r") as f:
                         val = f.read().strip()
                         return f"GPU: {val}% (VAAPI)"
         except Exception:
@@ -1959,6 +1637,7 @@ def resource_monitor():
             cmd = ["timeout", "0.5", "intel_gpu_top", "-J"]
             out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode()
             if '"Busy"' in out:
+                import json
                 j = json.loads(out)
                 busy = j["engines"]["Render/3D/0"]["busy"]
                 return f"GPU: {busy}% (iGPU)"
@@ -1974,7 +1653,6 @@ def resource_monitor():
         logging.info(f"[MONITOR] CPU: {cpu:.1f}% | RAM: {mem:.1f} MB" + (f" | {gpu_info}" if gpu_info else ""))
         time.sleep(5)
 
-
 def stats_broadcast():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     p = psutil.Process(os.getpid())
@@ -1983,15 +1661,15 @@ def stats_broadcast():
         total = 0
         try:
             total += p.memory_info().rss
-            children = list(p.children(recursive=True))
+            for child in p.children(recursive=True):
+                try:
+                    cname = child.name().lower()
+                    if "ffmpeg" in cname:
+                        total += child.memory_info().rss
+                except Exception:
+                    pass
         except Exception:
-            return total / (1024 * 1024)
-
-        for child in children:
-            with contextlib.suppress(Exception):
-                cname = child.name().lower()
-                if "ffmpeg" in cname:
-                    total += child.memory_info().rss
+            pass
         return total / (1024 * 1024)
 
     while not host_state.should_terminate:
@@ -2001,23 +1679,21 @@ def stats_broadcast():
                 mem = get_host_memory_mb()
 
                 gpu = 0.0
-                if not HAVE_PYNVML:
-                    gpu = 0.0
-                else:
+                try:
+                    import pynvml
+                    pynvml.nvmlInit()
+                    h = pynvml.nvmlDeviceGetHandleByIndex(0)
+                    gpu = float(pynvml.nvmlDeviceGetUtilizationRates(h).gpu)
+                except Exception:
                     try:
-                        pynvml.nvmlInit()
-                        h = pynvml.nvmlDeviceGetHandleByIndex(0)
-                        gpu = float(pynvml.nvmlDeviceGetUtilizationRates(h).gpu)
+                        for card in os.listdir("/sys/class/drm"):
+                            busy_path = f"/sys/class/drm/{card}/device/gpu_busy_percent"
+                            if os.path.exists(busy_path):
+                                with open(busy_path) as f:
+                                    gpu = float(f.read().strip())
+                                break
                     except Exception:
-                        try:
-                            for card in Path("/sys/class/drm").iterdir():
-                                busy_path = card / "device" / "gpu_busy_percent"
-                                if busy_path.exists():
-                                    with busy_path.open() as f:
-                                        gpu = float(f.read().strip())
-                                    break
-                        except Exception:
-                            gpu = 0.0
+                        gpu = 0.0
 
                 fps = getattr(host_state, "current_fps", 0)
                 msg = f"STATS {cpu:.1f} {gpu:.1f} {mem:.1f} {fps:.1f}"
@@ -2025,7 +1701,6 @@ def stats_broadcast():
             except Exception:
                 pass
         time.sleep(1)
-
 
 class GamepadServer(threading.Thread):
     def __init__(self):
@@ -2042,7 +1717,7 @@ class GamepadServer(threading.Thread):
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVLOWAT, 1)
-        s.bind((host_args_manager.args.bind_address, UDP_GAMEPAD_PORT))
+        s.bind(("", UDP_GAMEPAD_PORT))
         s.setblocking(False)
         return s
 
@@ -2051,27 +1726,19 @@ class GamepadServer(threading.Thread):
             return None
         caps = {
             ecodes.EV_KEY: [
-                ecodes.BTN_SOUTH,
-                ecodes.BTN_EAST,
-                ecodes.BTN_NORTH,
-                ecodes.BTN_WEST,
-                ecodes.BTN_TL,
-                ecodes.BTN_TR,
-                ecodes.BTN_TL2,
-                ecodes.BTN_TR2,
-                ecodes.BTN_SELECT,
-                ecodes.BTN_START,
-                ecodes.BTN_THUMBL,
-                ecodes.BTN_THUMBR,
-                getattr(ecodes, "BTN_MODE", 0x13C),
+                ecodes.BTN_SOUTH, ecodes.BTN_EAST, ecodes.BTN_NORTH, ecodes.BTN_WEST,
+                ecodes.BTN_TL, ecodes.BTN_TR, ecodes.BTN_TL2, ecodes.BTN_TR2,
+                ecodes.BTN_SELECT, ecodes.BTN_START,
+                ecodes.BTN_THUMBL, ecodes.BTN_THUMBR,
+                getattr(ecodes, "BTN_MODE", 0x13c),
             ],
             ecodes.EV_ABS: [
-                (ecodes.ABS_X, AbsInfo(0, -32768, 32767, 16, 0, 0)),
-                (ecodes.ABS_Y, AbsInfo(0, -32768, 32767, 16, 0, 0)),
-                (ecodes.ABS_RX, AbsInfo(0, -32768, 32767, 16, 0, 0)),
-                (ecodes.ABS_RY, AbsInfo(0, -32768, 32767, 16, 0, 0)),
-                (ecodes.ABS_Z, AbsInfo(0, 0, 255, 0, 0, 0)),
-                (ecodes.ABS_RZ, AbsInfo(0, 0, 255, 0, 0, 0)),
+                (ecodes.ABS_X,   AbsInfo(0, -32768, 32767, 16, 0, 0)),
+                (ecodes.ABS_Y,   AbsInfo(0, -32768, 32767, 16, 0, 0)),
+                (ecodes.ABS_RX,  AbsInfo(0, -32768, 32767, 16, 0, 0)),
+                (ecodes.ABS_RY,  AbsInfo(0, -32768, 32767, 16, 0, 0)),
+                (ecodes.ABS_Z,   AbsInfo(0, 0, 255, 0, 0, 0)),
+                (ecodes.ABS_RZ,  AbsInfo(0, 0, 255, 0, 0, 0)),
                 (ecodes.ABS_HAT0X, AbsInfo(0, -1, 1, 0, 0, 0)),
                 (ecodes.ABS_HAT0Y, AbsInfo(0, -1, 1, 0, 0, 0)),
             ],
@@ -2080,8 +1747,8 @@ class GamepadServer(threading.Thread):
             caps,
             name="LinuxPlay Virtual Gamepad",
             bustype=0x03,
-            vendor=0x045E,
-            product=0x028E,
+            vendor=0x045e,
+            product=0x028e,
             version=0x0110,
         )
         ui.write(ecodes.EV_ABS, ecodes.ABS_Z, 0)
@@ -2090,8 +1757,11 @@ class GamepadServer(threading.Thread):
         return ui
 
     def run(self):
-        with contextlib.suppress(Exception):
+        try:
+            import psutil
             psutil.Process(os.getpid()).nice(-10)
+        except Exception:
+            pass
 
         try:
             self.sock = self._open_socket()
@@ -2128,24 +1798,24 @@ class GamepadServer(threading.Thread):
                     if not self.ui:
                         continue
 
-                    if t == ecodes.EV_KEY and c in (ecodes.KEY_LEFT, ecodes.KEY_RIGHT, ecodes.KEY_UP, ecodes.KEY_DOWN):
+                    if t == ecodes.EV_KEY and c in (
+                        ecodes.KEY_LEFT, ecodes.KEY_RIGHT, ecodes.KEY_UP, ecodes.KEY_DOWN
+                    ):
                         if c == ecodes.KEY_LEFT:
-                            self._dpad["left"] = v != 0
+                            self._dpad["left"] = (v != 0)
                         elif c == ecodes.KEY_RIGHT:
-                            self._dpad["right"] = v != 0
+                            self._dpad["right"] = (v != 0)
                         elif c == ecodes.KEY_UP:
-                            self._dpad["up"] = v != 0
+                            self._dpad["up"] = (v != 0)
                         elif c == ecodes.KEY_DOWN:
-                            self._dpad["down"] = v != 0
+                            self._dpad["down"] = (v != 0)
 
                         new_hatx = (
-                            -1
-                            if self._dpad["left"] and not self._dpad["right"]
+                            -1 if self._dpad["left"] and not self._dpad["right"]
                             else (1 if self._dpad["right"] and not self._dpad["left"] else 0)
                         )
                         new_haty = (
-                            -1
-                            if self._dpad["up"] and not self._dpad["down"]
+                            -1 if self._dpad["up"] and not self._dpad["down"]
                             else (1 if self._dpad["down"] and not self._dpad["up"] else 0)
                         )
 
@@ -2186,7 +1856,6 @@ class GamepadServer(threading.Thread):
         except Exception:
             pass
 
-
 def session_manager(args):
     while not host_state.should_terminate:
         if time.time() - host_state.last_disconnect_ts < RECONNECT_COOLDOWN:
@@ -2198,14 +1867,14 @@ def session_manager(args):
             start_streams_for_current_client(args)
         time.sleep(0.5)
 
-
-def _signal_handler(signum, _frame):
+def _signal_handler(signum, frame):
     logging.info("Signal %s received, shutting down…", signum)
     trigger_shutdown(f"Signal {signum}")
     stop_all()
-    with contextlib.suppress(SystemExit):
+    try:
         sys.exit(0)
-
+    except SystemExit:
+        pass
 
 def core_main(args, use_signals=True) -> int:
     if use_signals:
@@ -2218,41 +1887,37 @@ def core_main(args, use_signals=True) -> int:
     logging.debug("FFmpeg marker in use: %s", _marker_value())
 
     host_state.current_bitrate = args.bitrate
-    host_state.monitors = detect_monitors() or [(1920, 1080, 0, 0)]
+    host_state.monitors = detect_monitors() or [(1920,1080,0,0)]
 
-    host_args_manager.args = args
+    global HOST_ARGS
+    HOST_ARGS = args
 
     try:
         host_state.handshake_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         host_state.handshake_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        host_state.handshake_sock.bind((args.bind_address, TCP_HANDSHAKE_PORT))
+        host_state.handshake_sock.bind(("", TCP_HANDSHAKE_PORT))
         host_state.handshake_sock.listen(5)
     except Exception as e:
         trigger_shutdown(f"Handshake socket error: {e}")
-        stop_all()
-        return 1
+        stop_all(); return 1
 
     try:
         host_state.control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         host_state.control_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        host_state.control_sock.bind((args.bind_address, UDP_CONTROL_PORT))
+        host_state.control_sock.bind(("", UDP_CONTROL_PORT))
     except Exception as e:
         trigger_shutdown(f"Control socket error: {e}")
-        stop_all()
-        return 1
+        stop_all(); return 1
 
     try:
         host_state.clipboard_listener_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         host_state.clipboard_listener_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        host_state.clipboard_listener_sock.bind((args.bind_address, UDP_CLIPBOARD_PORT))
+        host_state.clipboard_listener_sock.bind(("", UDP_CLIPBOARD_PORT))
     except Exception as e:
         trigger_shutdown(f"Clipboard socket error: {e}")
-        stop_all()
-        return 1
+        stop_all(); return 1
 
-    threading.Thread(
-        target=tcp_handshake_server, args=(host_state.handshake_sock, args.encoder, args), daemon=True
-    ).start()
+    threading.Thread(target=tcp_handshake_server, args=(host_state.handshake_sock, args.encoder, args), daemon=True).start()
     threading.Thread(target=clipboard_monitor_host, daemon=True).start()
     threading.Thread(target=clipboard_listener_host, args=(host_state.clipboard_listener_sock,), daemon=True).start()
     threading.Thread(target=file_upload_listener, daemon=True).start()
@@ -2273,7 +1938,6 @@ def core_main(args, use_signals=True) -> int:
         except Exception as e:
             logging.error("Failed to start gamepad server: %s", e)
     logging.info("Host running. Close window or Ctrl+C to quit.")
-    exit_code = 0
     try:
         while not host_state.should_terminate:
             time.sleep(0.2)
@@ -2284,24 +1948,22 @@ def core_main(args, use_signals=True) -> int:
         stop_all()
         if reason:
             logging.critical("Stopped due to error: %s", reason)
-            exit_code = 1
+            return 1
         else:
             logging.info("Shutdown complete.")
-    return exit_code
-
+            return 0
 
 class LogEmitter(QObject):
     log = pyqtSignal(str)
     status = pyqtSignal(str)
 
-
 log_emitter = LogEmitter()
 
-
 def set_status(text: str):
-    with contextlib.suppress(Exception):
+    try:
         log_emitter.status.emit(text)
-
+    except Exception:
+        pass
 
 class QtLogHandler(logging.Handler):
     def __init__(self):
@@ -2312,28 +1974,28 @@ class QtLogHandler(logging.Handler):
             msg = self.format(record)
         except Exception:
             msg = record.getMessage()
-        with contextlib.suppress(Exception):
+        try:
             log_emitter.log.emit(msg)
-
+        except Exception:
+            pass
 
 def _apply_dark_palette(app: QApplication):
     app.setStyle("Fusion")
     palette = app.palette()
-    palette.setColor(QPalette.Window, QColor(53, 53, 53))
+    palette.setColor(QPalette.Window, QColor(53,53,53))
     palette.setColor(QPalette.WindowText, Qt.white)
-    palette.setColor(QPalette.Base, QColor(35, 35, 35))
-    palette.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
+    palette.setColor(QPalette.Base, QColor(35,35,35))
+    palette.setColor(QPalette.AlternateBase, QColor(53,53,53))
     palette.setColor(QPalette.ToolTipBase, Qt.white)
     palette.setColor(QPalette.ToolTipText, Qt.white)
     palette.setColor(QPalette.Text, Qt.white)
-    palette.setColor(QPalette.Button, QColor(53, 53, 53))
+    palette.setColor(QPalette.Button, QColor(53,53,53))
     palette.setColor(QPalette.ButtonText, Qt.white)
     palette.setColor(QPalette.BrightText, Qt.red)
-    palette.setColor(QPalette.Link, QColor(42, 130, 218))
-    palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
+    palette.setColor(QPalette.Link, QColor(42,130,218))
+    palette.setColor(QPalette.Highlight, QColor(42,130,218))
     palette.setColor(QPalette.HighlightedText, Qt.black)
     app.setPalette(palette)
-
 
 class HostWindow(QWidget):
     def __init__(self, args):
@@ -2350,8 +2012,7 @@ class HostWindow(QWidget):
 
         self.logView = QTextEdit()
         self.logView.setReadOnly(True)
-        font = QFont("monospace")
-        font.setStyleHint(QFont.TypeWriter)
+        font = QFont("monospace"); font.setStyleHint(QFont.TypeWriter)
         self.logView.setFont(font)
 
         buttons = QHBoxLayout()
@@ -2424,26 +2085,15 @@ class HostWindow(QWidget):
             trigger_shutdown("Window closed")
         event.accept()
 
-
 def parse_args():
     p = argparse.ArgumentParser(description="LinuxPlay Host (Linux only)")
     p.add_argument("--gui", action="store_true", help="Show host GUI window.")
-    p.add_argument(
-        "--bind-address",
-        default="0.0.0.0",
-        help="IP address to bind server sockets to. Use 0.0.0.0 for all interfaces (default), "
-        "127.0.0.1 for localhost only, or a specific interface IP for better security.",
-    )
-    p.add_argument("--encoder", choices=["none", "h.264", "h.265"], default="none")
-    p.add_argument(
-        "--hwenc",
-        choices=["auto", "cpu", "nvenc", "qsv", "vaapi"],
-        default="auto",
-        help="Manual encoder backend selection (auto=heuristic).",
-    )
+    p.add_argument("--encoder", choices=["none","h.264","h.265"], default="none")
+    p.add_argument("--hwenc", choices=["auto","cpu","nvenc","qsv","vaapi"], default="auto",
+                   help="Manual encoder backend selection (auto=heuristic).")
     p.add_argument("--framerate", default=DEFAULT_FPS)
     p.add_argument("--bitrate", default=LEGACY_BITRATE)
-    p.add_argument("--audio", choices=["enable", "disable"], default="disable")
+    p.add_argument("--audio", choices=["enable","disable"], default="disable")
     p.add_argument("--adaptive", action="store_true")
     p.add_argument("--display", default=":0")
     p.add_argument("--preset", default="")
@@ -2452,17 +2102,15 @@ def parse_args():
     p.add_argument("--tune", default="")
     p.add_argument("--pix_fmt", default="yuv420p")
     p.add_argument("--debug", action="store_true")
-    return p.parse_args()
-
+    args = p.parse_args()
+    return args
 
 def main():
     args = parse_args()
 
-    logging.basicConfig(
-        level=(logging.DEBUG if args.debug else logging.INFO),
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    logging.basicConfig(level=(logging.DEBUG if args.debug else logging.INFO),
+                        format="%(asctime)s [%(levelname)s] %(message)s",
+                        datefmt="%H:%M:%S")
 
     if not IS_LINUX:
         logging.critical("Hosting is Linux-only. Run this on a Linux machine.")
@@ -2478,7 +2126,6 @@ def main():
     else:
         rc = core_main(args, use_signals=True)
         sys.exit(rc)
-
 
 if __name__ == "__main__":
     main()
