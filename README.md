@@ -18,8 +18,6 @@ For now, I’m taking a short break to rest and recharge, but LinuxPlay isn’t 
 
 Thank you all for believing in something made by one person, from scratch, with genuine passion.
 
-- Techlm77
-
 # LinuxPlay
 
 > The open source, ultra low latency remote desktop and game streaming stack for Linux. Built with FFmpeg, UDP and Qt.
