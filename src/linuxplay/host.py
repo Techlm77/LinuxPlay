@@ -23,14 +23,12 @@ from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QKeySequence, QPalette
 from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QTextEdit, QVBoxLayout, QWidget
 
-
 try:
     import pynvml
 
     HAVE_PYNVML = True
 except ImportError:
     HAVE_PYNVML = False
-
 
 UDP_VIDEO_PORT = 5000
 UDP_CONTROL_PORT = 7000
@@ -72,7 +70,6 @@ CA_CERT = "host_ca.pem"
 CA_KEY = "host_ca.key"
 TRUSTED_DB = "trusted_clients.json"
 
-
 def _ensure_ca():
     if not HAVE_CRYPTO:
         logging.warning("[AUTH] cryptography not available; certificate auth disabled.")
@@ -107,7 +104,6 @@ def _ensure_ca():
         logging.error("[AUTH] Failed to create CA: %s", e)
         return False
 
-
 def _load_trust_db():
     db = {"trusted_clients": []}
     try:
@@ -118,7 +114,6 @@ def _load_trust_db():
         pass
     return db
 
-
 def _save_trust_db(db):
     try:
         with Path(TRUSTED_DB).open("w", encoding="utf-8") as f:
@@ -128,19 +123,16 @@ def _save_trust_db(db):
         logging.error("[AUTH] Failed to write trust database")
         return False
 
-
 def _trust_record_for(fp_hex, db):
     for rec in db.get("trusted_clients", []):
         if rec.get("fingerprint") == fp_hex:
             return rec
     return None
 
-
 def _verify_fingerprint_trusted(fp_hex):
     db = _load_trust_db()
     rec = _trust_record_for(fp_hex, db)
     return (rec is not None) and (rec.get("status") == "trusted")
-
 
 def _issue_client_cert(client_name="linuxplay-client", export_hint_ip=""):
     if not _ensure_ca():
@@ -206,20 +198,16 @@ def _issue_client_cert(client_name="linuxplay-client", export_hint_ip=""):
         logging.error("[AUTH] Issue client cert failed: %s", e)
         return None
 
-
 def _marker_value() -> str:
     marker = os.environ.get("LINUXPLAY_MARKER", "LinuxPlayHost")
     sid = os.environ.get("LINUXPLAY_SID", "")
     return f"{marker}:{sid}" if sid else marker
 
-
 def _ffmpeg_base_cmd() -> list:
     return ["ffmpeg", "-hide_banner", "-loglevel", "error"]
 
-
 def _marker_opt() -> list:
     return ["-metadata", f"comment={_marker_value()}"]
-
 
 try:
     from pynput.keyboard import Controller as KeyCtl
@@ -246,7 +234,6 @@ try:
     HAVE_UINPUT = True
 except Exception:
     HAVE_UINPUT = False
-
 
 class HostState:
     def __init__(self):
@@ -281,15 +268,10 @@ class HostState:
 
 host_state = HostState()
 
-
 class HostArgsManager:
-    """Manages the host arguments to avoid global state."""
-
     args = None
 
-
 host_args_manager = HostArgsManager()
-
 
 def _map_nvenc_tune(tune: str) -> str:
     t = (tune or "").strip().lower()
@@ -325,7 +307,6 @@ def _map_nvenc_tune(tune: str) -> str:
 
     logging.warning("Unrecognized NVENC tune '%s' — passing through as-is.", t)
     return t
-
 
 def _vaapi_fmt_for_pix_fmt(pix_fmt: str, codec: str) -> str:
     pf = (pix_fmt or "").strip().lower()
@@ -367,7 +348,6 @@ def _vaapi_fmt_for_pix_fmt(pix_fmt: str, codec: str) -> str:
     logging.warning("Unrecognized pix_fmt '%s' — falling back to 'nv12'.", pf)
     return "nv12"
 
-
 def trigger_shutdown(reason: str):
     with host_state.shutdown_lock:
         if host_state.should_terminate:
@@ -389,7 +369,6 @@ def trigger_shutdown(reason: str):
                     s.close()
 
         set_status(f"Stopping… ({reason})")
-
 
 def stop_all():
     host_state.should_terminate = True
@@ -425,7 +404,6 @@ def stop_all():
 
     host_state.starting_streams = False
 
-
 def stop_streams_only():
     with host_state.video_thread_lock:
         if host_state.video_threads:
@@ -448,18 +426,14 @@ def stop_streams_only():
         host_state.last_disconnect_ts = time.time()
         logging.info("All streams stopped and cooldown set.")
 
-
 def cleanup():
     stop_all()
 
-
 atexit.register(cleanup)
-
 
 def _gen_pin(length=PIN_LENGTH):
     n = secrets.randbelow(10**length)
     return f"{n:0{length}d}"
-
 
 def pin_rotate_if_needed(force=False):
     now = time.time()
@@ -473,17 +447,14 @@ def pin_rotate_if_needed(force=False):
             with contextlib.suppress(Exception):
                 set_status(f"Waiting for PIN: {host_state.pin_code}")
 
-
 def pin_manager_thread():
     while not host_state.should_terminate:
         if not host_state.session_active:
             pin_rotate_if_needed()
         time.sleep(1)
 
-
 def has_nvidia():
     return which("nvidia-smi") is not None
-
 
 def is_intel_cpu():
     try:
@@ -494,10 +465,8 @@ def is_intel_cpu():
     except Exception:
         return False
 
-
 def has_vaapi():
     return IS_LINUX and Path("/dev/dri/renderD128").exists()
-
 
 def ffmpeg_has_encoder(name: str) -> bool:
     try:
@@ -507,7 +476,6 @@ def ffmpeg_has_encoder(name: str) -> bool:
         return name.lower() in out
     except Exception:
         return False
-
 
 def ffmpeg_has_demuxer(name: str) -> bool:
     try:
@@ -524,7 +492,6 @@ def ffmpeg_has_demuxer(name: str) -> bool:
     except Exception:
         return False
 
-
 def ffmpeg_has_device(name: str) -> bool:
     try:
         out = subprocess.check_output(
@@ -539,7 +506,6 @@ def ffmpeg_has_device(name: str) -> bool:
         return False
     except Exception:
         return False
-
 
 class StreamThread(threading.Thread):
     def __init__(self, cmd, name):
@@ -595,7 +561,6 @@ class StreamThread(threading.Thread):
         except Exception:
             pass
 
-
 def _detect_monitors_linux():
     try:
         out = subprocess.check_output(["xrandr", "--listmonitors"], universal_newlines=True)
@@ -618,10 +583,8 @@ def _detect_monitors_linux():
                     continue
     return mons
 
-
 def detect_monitors():
     return _detect_monitors_linux()
-
 
 def _input_ll_flags():
     return [
@@ -639,10 +602,8 @@ def _input_ll_flags():
         "0",
     ]
 
-
 def _output_sync_flags():
     return ["-fps_mode", "passthrough"]
-
 
 def _mpegts_ll_mux_flags():
     return [
@@ -658,14 +619,12 @@ def _mpegts_ll_mux_flags():
         "resend_headers",
     ]
 
-
 def _best_ts_pkt_size(mtu_guess: int, ipv6: bool) -> int:
     if mtu_guess <= 0:
         mtu_guess = 1500
     overhead = 48 if ipv6 else 28
     max_payload = max(512, mtu_guess - overhead)
     return max(188, (max_payload // 188) * 188)
-
 
 def _parse_bitrate_bits(bstr: str) -> int:
     if not bstr:
@@ -682,7 +641,6 @@ def _parse_bitrate_bits(bstr: str) -> int:
     except Exception:
         return 0
 
-
 def _format_bits(bits: int) -> str:
     if bits >= 1_000_000:
         return f"{max(1, int(bits / 1_000_000))}M"
@@ -690,14 +648,12 @@ def _format_bits(bits: int) -> str:
         return f"{max(1, int(bits / 1000))}k"
     return str(max(1, bits))
 
-
 def _target_bpp(codec: str, fps: int) -> float:
     c = (codec or "h.264").lower()
     base = 0.045 if c in ("h.265", "hevc") else 0.07
     if fps >= 90:
         base += 0.02
     return base
-
 
 def _safe_nvenc_preset(preset: str) -> str:
     preset = (preset or "").strip().lower()
@@ -754,14 +710,12 @@ def _safe_nvenc_preset(preset: str) -> str:
     mapped = alias_map.get(preset, preset)
     return mapped if mapped in allowed else "p4"
 
-
 def _norm_qp(qp):
     try:
         q = int(qp)
         return str(max(0, min(51, q)))
     except Exception:
         return ""
-
 
 def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, tune: str, bitrate: str, pix_fmt: str):
     codec = (codec or "h.264").lower()
@@ -969,14 +923,12 @@ def _pick_encoder_args(codec: str, hwenc: str, preset: str, gop: str, qp: str, t
 
     return extra_filters, enc
 
-
 def _pick_kms_device():
     for cand in ("card0", "card1", "card2"):
         p = Path(f"/dev/dri/{cand}")
         if p.exists():
             return str(p)
     return "/dev/dri/card0"
-
 
 def build_video_cmd(args, bitrate, monitor_info, video_port):
     try:
@@ -1132,7 +1084,6 @@ def build_video_cmd(args, bitrate, monitor_info, video_port):
 
     return input_side + output_side + (extra_filters or []) + encode + out
 
-
 def build_audio_cmd():
     opus_app = os.environ.get("LP_OPUS_APP", "voip")
     opus_fd = os.environ.get("LP_OPUS_FD", "10")
@@ -1223,7 +1174,6 @@ def build_audio_cmd():
 
     return input_side + output_side + encode + out
 
-
 def _inject_mouse_move(x, y):
     if HAVE_PYNPUT:
         try:
@@ -1232,7 +1182,6 @@ def _inject_mouse_move(x, y):
             logging.debug("pynput move failed: %s", e)
     elif IS_LINUX:
         subprocess.Popen(["xdotool", "mousemove", str(x), str(y)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
 
 def _inject_mouse_down(btn):
     if HAVE_PYNPUT:
@@ -1243,7 +1192,6 @@ def _inject_mouse_down(btn):
             logging.debug("pynput mousedown failed: %s", e)
     elif IS_LINUX:
         subprocess.Popen(["xdotool", "mousedown", btn], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
 
 def _inject_mouse_up(btn):
     if HAVE_PYNPUT:
@@ -1271,7 +1219,6 @@ def _inject_scroll(btn):
             logging.debug("pynput scroll failed: %s", e)
     elif IS_LINUX:
         subprocess.Popen(["xdotool", "click", btn], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
 
 _key_map = {
     "Escape": Key.esc if HAVE_PYNPUT else None,
@@ -1379,7 +1326,6 @@ NAME_TO_CHAR = {
     "brokenbar": "¦",
 }
 
-
 def _inject_key(action, name):
     if HAVE_PYNPUT:
         k = _key_map.get(name)
@@ -1409,7 +1355,6 @@ def _inject_key(action, name):
             subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception as e:
             logging.debug("xdotool key %s failed for %r: %s", action, name, e)
-
 
 def tcp_handshake_server(sock, encoder_str, _args):
     logging.info("TCP handshake server on %d", TCP_HANDSHAKE_PORT)
@@ -1559,7 +1504,6 @@ def tcp_handshake_server(sock, encoder_str, _args):
             trigger_shutdown(f"Handshake server error: {e}")
             break
 
-
 def start_streams_for_current_client(args):
     ip = getattr(host_state, "client_ip", None)
     if not ip:
@@ -1601,7 +1545,6 @@ def start_streams_for_current_client(args):
             logging.error(f"start_streams_for_current_client: exception while starting — {e}")
         finally:
             host_state.starting_streams = False
-
 
 def control_listener(sock):
     logging.info("Control listener UDP %d", UDP_CONTROL_PORT)
@@ -1705,13 +1648,12 @@ def control_listener(sock):
             trigger_shutdown(f"Control listener error: {e}")
             break
 
-
 def clipboard_monitor_host():
     if not HAVE_PYPERCLIP:
         logging.info("pyperclip not available; host clipboard sync disabled.")
         return
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    client_clipboard_addr = None  # Track client's ephemeral port
+    client_clipboard_addr = None
 
     while not host_state.should_terminate:
         current = ""
@@ -1727,7 +1669,6 @@ def clipboard_monitor_host():
                 host_state.last_clipboard_content = current
                 msg = f"CLIPBOARD_UPDATE HOST {current}".encode()
                 try:
-                    # Send to client's ephemeral port if known, otherwise to well-known port
                     if client_clipboard_addr:
                         sock.sendto(msg, client_clipboard_addr)
                     else:
@@ -1736,13 +1677,11 @@ def clipboard_monitor_host():
                     trigger_shutdown(f"Clipboard send error: {e}")
                     break
 
-        # Check if we should update client address from listener
         if hasattr(host_state, "client_clipboard_addr"):
             client_clipboard_addr = host_state.client_clipboard_addr
 
         time.sleep(1)
     sock.close()
-
 
 def clipboard_listener_host(sock):
     if not HAVE_PYPERCLIP:
@@ -1752,7 +1691,6 @@ def clipboard_listener_host(sock):
             data, addr = sock.recvfrom(65535)
             msg = data.decode("utf-8", errors="ignore")
 
-            # Handle keepalive messages from client (used to establish connection)
             if msg.strip() == "CLIPBOARD_KEEPALIVE":
                 if addr[0] == host_state.client_ip or not host_state.client_ip:
                     host_state.client_clipboard_addr = addr
@@ -1761,7 +1699,6 @@ def clipboard_listener_host(sock):
 
             tokens = msg.split(maxsplit=2)
             if len(tokens) >= 3 and tokens[0] == "CLIPBOARD_UPDATE" and tokens[1] == "CLIENT":
-                # Remember client's ephemeral port for responses
                 if addr[0] == host_state.client_ip:
                     host_state.client_clipboard_addr = addr
                     logging.debug(f"Client clipboard address updated to {addr}")
@@ -1783,7 +1720,6 @@ def clipboard_listener_host(sock):
             trigger_shutdown(f"Clipboard listener error: {e}")
             break
 
-
 def recvall(sock, n):
     data = b""
     while len(data) < n:
@@ -1792,7 +1728,6 @@ def recvall(sock, n):
             return None
         data += chunk
     return data
-
 
 def file_upload_listener():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1843,7 +1778,6 @@ def file_upload_listener():
     finally:
         host_state.file_upload_sock = None
 
-
 def heartbeat_manager(_args):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -1857,16 +1791,13 @@ def heartbeat_manager(_args):
 
     last_ping = 0.0
     host_state.last_pong_ts = time.time()
-    client_heartbeat_addr = None  # Track client's ephemeral port
+    client_heartbeat_addr = None
 
     while not host_state.should_terminate:
         now = time.time()
-
         if host_state.client_ip:
-            # Send initial PING to the well-known port
             if now - last_ping >= HEARTBEAT_INTERVAL:
                 try:
-                    # Send to client's ephemeral port if known, otherwise to well-known port
                     if client_heartbeat_addr:
                         s.sendto(b"PING", client_heartbeat_addr)
                     else:
@@ -1881,7 +1812,6 @@ def heartbeat_manager(_args):
                 msg = data.decode("utf-8", errors="ignore").strip()
                 if msg.startswith("PONG") and addr[0] == host_state.client_ip:
                     host_state.last_pong_ts = now
-                    # Remember the client's ephemeral port for future PINGs
                     if not client_heartbeat_addr or client_heartbeat_addr != addr:
                         client_heartbeat_addr = addr
                         logging.debug(f"Client heartbeat address updated to {addr}")
@@ -1892,29 +1822,23 @@ def heartbeat_manager(_args):
 
             if (now - host_state.last_pong_ts) > HEARTBEAT_TIMEOUT and (now - host_state.last_disconnect_ts) > 10:
                 if host_state.client_ip:
-                    logging.warning(
-                        "Heartbeat timeout from %s — no PONG or GOODBYE, stopping streams.", host_state.client_ip
-                    )
+                    logging.warning("Heartbeat timeout from %s — no PONG or GOODBYE, stopping streams.", host_state.client_ip)
                     try:
                         stop_streams_only()
                     except Exception as e:
                         logging.error("Error stopping streams after timeout: %s", e)
-
                     host_state.client_ip = None
                     host_state.starting_streams = False
                     set_status("Client disconnected — waiting for connection…")
                     host_state.session_active = False
                     host_state.authed_client_ip = None
-                    client_heartbeat_addr = None  # Reset on disconnect
+                    client_heartbeat_addr = None
                     pin_rotate_if_needed(force=True)
-
                     time.sleep(RECONNECT_COOLDOWN)
-
                 host_state.last_pong_ts = now
         else:
-            client_heartbeat_addr = None  # Reset when no client
+            client_heartbeat_addr = None
             time.sleep(0.5)
-
 
 def resource_monitor():
     p = psutil.Process(os.getpid())
@@ -1974,7 +1898,6 @@ def resource_monitor():
         logging.info(f"[MONITOR] CPU: {cpu:.1f}% | RAM: {mem:.1f} MB" + (f" | {gpu_info}" if gpu_info else ""))
         time.sleep(5)
 
-
 def stats_broadcast():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     p = psutil.Process(os.getpid())
@@ -2025,7 +1948,6 @@ def stats_broadcast():
             except Exception:
                 pass
         time.sleep(1)
-
 
 class GamepadServer(threading.Thread):
     def __init__(self):
@@ -2186,7 +2108,6 @@ class GamepadServer(threading.Thread):
         except Exception:
             pass
 
-
 def session_manager(args):
     while not host_state.should_terminate:
         if time.time() - host_state.last_disconnect_ts < RECONNECT_COOLDOWN:
@@ -2198,14 +2119,12 @@ def session_manager(args):
             start_streams_for_current_client(args)
         time.sleep(0.5)
 
-
 def _signal_handler(signum, _frame):
     logging.info("Signal %s received, shutting down…", signum)
     trigger_shutdown(f"Signal {signum}")
     stop_all()
     with contextlib.suppress(SystemExit):
         sys.exit(0)
-
 
 def core_main(args, use_signals=True) -> int:
     if use_signals:
@@ -2289,19 +2208,15 @@ def core_main(args, use_signals=True) -> int:
             logging.info("Shutdown complete.")
     return exit_code
 
-
 class LogEmitter(QObject):
     log = pyqtSignal(str)
     status = pyqtSignal(str)
 
-
 log_emitter = LogEmitter()
-
 
 def set_status(text: str):
     with contextlib.suppress(Exception):
         log_emitter.status.emit(text)
-
 
 class QtLogHandler(logging.Handler):
     def __init__(self):
@@ -2314,7 +2229,6 @@ class QtLogHandler(logging.Handler):
             msg = record.getMessage()
         with contextlib.suppress(Exception):
             log_emitter.log.emit(msg)
-
 
 def _apply_dark_palette(app: QApplication):
     app.setStyle("Fusion")
@@ -2333,7 +2247,6 @@ def _apply_dark_palette(app: QApplication):
     palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
     palette.setColor(QPalette.HighlightedText, Qt.black)
     app.setPalette(palette)
-
 
 class HostWindow(QWidget):
     def __init__(self, args):
@@ -2424,23 +2337,12 @@ class HostWindow(QWidget):
             trigger_shutdown("Window closed")
         event.accept()
 
-
 def parse_args():
     p = argparse.ArgumentParser(description="LinuxPlay Host (Linux only)")
     p.add_argument("--gui", action="store_true", help="Show host GUI window.")
-    p.add_argument(
-        "--bind-address",
-        default="0.0.0.0",
-        help="IP address to bind server sockets to. Use 0.0.0.0 for all interfaces (default), "
-        "127.0.0.1 for localhost only, or a specific interface IP for better security.",
-    )
+    p.add_argument("--bind-address", default="0.0.0.0", help="IP address to bind server sockets to. Use 0.0.0.0 for all interfaces (default), " "127.0.0.1 for localhost only, or a specific interface IP for better security.")
     p.add_argument("--encoder", choices=["none", "h.264", "h.265"], default="none")
-    p.add_argument(
-        "--hwenc",
-        choices=["auto", "cpu", "nvenc", "qsv", "vaapi"],
-        default="auto",
-        help="Manual encoder backend selection (auto=heuristic).",
-    )
+    p.add_argument("--hwenc", choices=["auto", "cpu", "nvenc", "qsv", "vaapi"], default="auto", help="Manual encoder backend selection (auto=heuristic).")
     p.add_argument("--framerate", default=DEFAULT_FPS)
     p.add_argument("--bitrate", default=LEGACY_BITRATE)
     p.add_argument("--audio", choices=["enable", "disable"], default="disable")
@@ -2453,7 +2355,6 @@ def parse_args():
     p.add_argument("--pix_fmt", default="yuv420p")
     p.add_argument("--debug", action="store_true")
     return p.parse_args()
-
 
 def main():
     args = parse_args()
@@ -2478,7 +2379,6 @@ def main():
     else:
         rc = core_main(args, use_signals=True)
         sys.exit(rc)
-
 
 if __name__ == "__main__":
     main()
