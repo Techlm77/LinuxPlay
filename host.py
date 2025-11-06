@@ -223,7 +223,7 @@ except Exception:
 
 class HostState:
     def __init__(self):
-        self.video_threads = []
+        self.video_threads = {}
         self.session_active = False
         self.authed_client_ip = None
         self.pin_code = None
@@ -348,7 +348,7 @@ def stop_all():
     host_state.should_terminate = True
 
     with host_state.video_thread_lock:
-        for thread in host_state.video_threads:
+        for thread in list(host_state.video_threads.values()):
             thread.stop()
             thread.join(timeout=2)
         host_state.video_threads.clear()
@@ -386,7 +386,7 @@ def stop_streams_only():
     with host_state.video_thread_lock:
         if host_state.video_threads:
             logging.info("Stopping active video streams...")
-            for t in host_state.video_threads:
+            for t in list(host_state.video_threads.values()):
                 try:
                     t.stop()
                     t.join(timeout=2)
@@ -1318,15 +1318,15 @@ def start_streams_for_current_client(args):
 
         host_state.starting_streams = True
         try:
-            host_state.video_threads = []
+            host_state.video_threads = {}
             for i, mon in enumerate(host_state.monitors):
                 cmd = build_video_cmd(args, host_state.current_bitrate, mon, UDP_VIDEO_PORT + i)
                 if not cmd:
-                    logging.warning(f"Video {i} skipped — invalid or incomplete ffmpeg command.")
+                    logging.error(f"Failed to build video cmd for monitor {i}; skipping.")
                     continue
                 t = StreamThread(cmd, f"Video {i}")
                 t.start()
-                host_state.video_threads.append(t)
+                host_state.video_threads[i] = t
 
             if args.audio == "enable" and not host_state.audio_thread:
                 ac = build_audio_cmd()
@@ -1397,6 +1397,22 @@ def control_listener(sock):
                 except Exception as e:
                     logging.error(f"Error handling GOODBYE cleanup: {e}")
                 continue
+            elif cmd.startswith("WINDOW_CLOSE"):
+                try:
+                    parts = cmd.split()
+                    idx = int(parts[1]) if len(parts) >= 2 else -1
+                except Exception:
+                    idx = -1
+                if isinstance(host_state.video_threads, dict) and idx in host_state.video_threads:
+                    try:
+                        t = host_state.video_threads.pop(idx)
+                        t.stop()
+                        t.join(timeout=2)
+                        logging.info(f"Stopped video stream for monitor {idx} on client request.")
+                    except Exception as e:
+                        logging.debug(f"Error stopping video stream {idx}: {e}")
+                else:
+                    logging.debug(f"Ignored WINDOW_CLOSE for unknown monitor {idx}.")
 
             elif cmd == "MOUSE_PKT" and len(tokens) == 5:
                 try:
