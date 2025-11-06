@@ -10,7 +10,7 @@ LinuxPlay started as a fun experiment, but over time it’s grown into something
 I know not everything is perfect yet, and that’s okay. That’s what open source is about: progress, not perfection. If you’ve got ideas, improvements, or features you’d love to see, please share them in the [GitHub Discussions](https://github.com/Techlm77/LinuxPlay/discussions).  
 Constructive input and collaboration are what help LinuxPlay evolve in the right direction.
 
-- Community Shoutout  
+## Community Shoutout  
 If you make a YouTube video showing your LinuxPlay setup, performance tests, feature ideas, or just want to share your experience, use the hashtag **#linuxPlay**!  
 I’d *love* to see what people are doing with it, learn from your feedback, and feature community showcases in future updates. Seeing how others use LinuxPlay keeps the motivation alive more than anything else.
 
