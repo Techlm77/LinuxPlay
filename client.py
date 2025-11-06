@@ -41,6 +41,28 @@ IS_LINUX   = py_platform.system() == "Linux"
 
 CLIPBOARD_INBOX = Queue()
 audio_proc = None
+
+class _SessionManager:
+    def __init__(self):
+        self.count = 0
+        self.next_id = 0
+        self._lock = threading.Lock()
+
+    def register(self):
+        with self._lock:
+            wid = self.next_id
+            self.next_id += 1
+            self.count += 1
+            return wid
+
+    def unregister(self):
+        with self._lock:
+            if self.count > 0:
+                self.count -= 1
+            return self.count
+
+SESSION = _SessionManager()
+
 CLIENT_STATE = {
     "connected": False,
     "last_heartbeat": 0.0,
@@ -314,17 +336,38 @@ def clipboard_listener(app_clipboard):
 def audio_listener(host_ip):
     def loop():
         global audio_proc
+
+        max_channels = 2
+        try:
+            info = subprocess.check_output(
+                ["pactl", "list", "sinks"], text=True, stderr=subprocess.DEVNULL
+            )
+            if "channels: 8" in info or "channel_map: front-left,front-right,rear-left,rear-right,front-center,lfe,side-left,side-right" in info:
+                max_channels = 8
+            elif "channels: 6" in info or "channel_map: front-left,front-right,rear-left,rear-right,front-center,lfe" in info:
+                max_channels = 6
+        except Exception:
+            pass
+
+        if max_channels > 2:
+            afilter = f"aresample=matrix_encoding=none,aformat=channel_layouts={'5.1' if max_channels==6 else '7.1'}"
+            logging.info(f"Detected {max_channels}-channel output device — enabling surround audio.")
+        else:
+            afilter = "aresample=matrix_encoding=none,pan=stereo|FL<0.5*FL+0.5*FC|FR<0.5*FR+0.5*FC"
+            logging.info("Stereo-only output detected — downmixing surround audio.")
+
         cmd = [
             "ffplay",
             "-hide_banner", "-loglevel", "info",
             "-nodisp", "-autoexit",
             "-fflags", "nobuffer",
             "-flags", "low_delay",
-            "-af", "aresample=matrix_encoding=none",
+            "-af", afilter,
             "-f", "mpegts",
-            f"udp://{host_ip}:{UDP_AUDIO_PORT}?overrun_nonfatal=1&buffer_size=32768"
+            f"udp://{host_ip}:{UDP_AUDIO_PORT}?overrun_nonfatal=1&buffer_size=32768",
         ]
-        logging.info("Audio listener: %s", " ".join(cmd))
+
+        logging.info("Audio listener command: %s", " ".join(cmd))
         try:
             audio_proc = subprocess.Popen(
                 cmd,
@@ -333,11 +376,12 @@ def audio_listener(host_ip):
                 universal_newlines=True
             )
             for line in audio_proc.stdout:
-                if "Stream #" in line and "Audio" in line:
+                if "Audio" in line:
                     logging.info(line.strip())
             audio_proc.wait()
         except Exception as e:
             logging.error("Audio listener failed: %s", e)
+
     t = threading.Thread(target=loop, daemon=True)
     t.start()
     return t
@@ -1155,6 +1199,8 @@ class MainWindow(QMainWindow):
                  offset_x, offset_y, net_mode='lan', parent=None, ultra=False,
                  gamepad="disable", gamepad_dev=None):
         super().__init__(parent)
+        
+        self.window_id = SESSION.register()
         self.setWindowTitle("LinuxPlay")
         self.texture_width, self.texture_height = rwidth, rheight
         self.offset_x, self.offset_y = offset_x, offset_y
@@ -1397,14 +1443,20 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._running = False
-        CLIENT_STATE["connected"] = False
         logging.info("Closing client window…")
-
         try:
-            self.control_sock.sendto(b"GOODBYE", self.control_addr)
-            logging.info("Sent GOODBYE to host")
+            msg = f"WINDOW_CLOSE {self.window_id}".encode("utf-8")
+            self.control_sock.sendto(msg, self.control_addr)
         except Exception as e:
-            logging.debug(f"GOODBYE send failed: {e}")
+            logging.debug(f"WINDOW_CLOSE send failed: {e}")
+        remaining = SESSION.unregister()
+        if remaining == 0:
+            CLIENT_STATE["connected"] = False
+            try:
+                self.control_sock.sendto(b"GOODBYE", self.control_addr)
+                logging.info("Sent GOODBYE to host (last window closed)")
+            except Exception as e:
+                logging.debug(f"GOODBYE send failed: {e}")
 
         for timer_name in ("clip_timer", "status_timer", "stats_timer"):
             timer = getattr(self, timer_name, None)
