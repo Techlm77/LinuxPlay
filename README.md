@@ -1,4 +1,4 @@
-> ### A Message from the Developer
+### A Message from the Developer
 
 Hey everyone,
 I just wanted to take a moment to thank everyone who’s supported, tested or shared feedback on LinuxPlay.
