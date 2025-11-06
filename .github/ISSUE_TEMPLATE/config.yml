@@ -1,8 +1,0 @@
-blank_issues_enabled: false
-contact_links:
-  - name: Question or Discussion
-    url: https://github.com/Techlm77/LinuxPlay/discussions
-    about: Ask questions or start discussions about LinuxPlay
-  - name: Security Issue
-    url: https://github.com/Techlm77/LinuxPlay/security/advisories/new
-    about: Report a security vulnerability privately
