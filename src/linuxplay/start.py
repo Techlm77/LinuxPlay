@@ -10,8 +10,8 @@ import subprocess
 import sys
 import threading
 import uuid
-
 from pathlib import Path
+
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import (
@@ -31,6 +31,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+
 HERE = Path(__file__).resolve().parent
 try:
     FFBIN = HERE / "ffmpeg" / "bin"
@@ -45,6 +46,7 @@ WG_INFO_PATH = Path("/tmp/linuxplay_wg_info.json")
 CFG_PATH = Path.home() / ".linuxplay_start_cfg.json"
 LINUXPLAY_MARKER = "LinuxPlayHost"
 
+
 def _client_cert_present(base_dir):
     try:
         base_path = Path(base_dir)
@@ -53,6 +55,7 @@ def _client_cert_present(base_dir):
         return cert_p.exists() and key_p.exists()
     except Exception:
         return False
+
 
 def ffmpeg_ok():
     try:
@@ -63,8 +66,10 @@ def ffmpeg_ok():
     except Exception:
         return False
 
+
 _FFENC_CACHE = {}
 _FFDEV_CACHE = {}
+
 
 def ffmpeg_has_encoder(name):
     name = name.lower()
@@ -79,6 +84,7 @@ def ffmpeg_has_encoder(name):
     except Exception:
         _FFENC_CACHE[name] = False
         return False
+
 
 def ffmpeg_has_device(name):
     name = name.lower()
@@ -102,6 +108,7 @@ def ffmpeg_has_device(name):
         _FFDEV_CACHE[name] = False
         return False
 
+
 def check_encoder_support(codec):
     key = codec.lower().replace(".", "")
     if key == "h264":
@@ -111,6 +118,7 @@ def check_encoder_support(codec):
     else:
         return False
     return any(ffmpeg_has_encoder(n) for n in names)
+
 
 def check_decoder_support(codec):
     try:
@@ -126,6 +134,7 @@ def check_decoder_support(codec):
         return " hevc " in output or "\nhevc\n" in output
     return False
 
+
 def load_cfg():
     try:
         with CFG_PATH.open() as f:
@@ -133,12 +142,14 @@ def load_cfg():
     except Exception:
         return {}
 
+
 def save_cfg(data):
     try:
         with CFG_PATH.open("w") as f:
             json.dump(data, f, indent=2)
     except Exception:
         pass
+
 
 ENCODER_NAME_MAP = {
     ("h.264", "nvenc"): "h264_nvenc",
@@ -162,6 +173,7 @@ BACKEND_READABLE = {
     "vaapi": "Linux VAAPI",
 }
 
+
 def backends_for_codec(codec):
     base = ["auto", "cpu", "nvenc", "qsv", "amf", "vaapi"]
     if IS_WINDOWS:
@@ -180,11 +192,13 @@ def backends_for_codec(codec):
     items = [f"{b} - {BACKEND_READABLE[b]}" for b in pruned]
     return pruned, items
 
+
 def _proc_is_running(p):
     try:
         return (p is not None) and (p.poll() is None)
     except Exception:
         return False
+
 
 def _ffmpeg_running_for_us(marker=LINUXPLAY_MARKER):
     if IS_WINDOWS:
@@ -214,12 +228,14 @@ def _ffmpeg_running_for_us(marker=LINUXPLAY_MARKER):
         pass
     return False
 
+
 def _warn_ffmpeg(parent):
     QMessageBox.critical(
         parent,
         "FFmpeg not found",
         "FFmpeg was not found on PATH.\n\nWindows: keep ffmpeg\\bin next to the app or install FFmpeg.\nLinux: install ffmpeg via your package manager.",
     )
+
 
 class HostTab(QWidget):
     def __init__(self, parent=None):
@@ -262,6 +278,7 @@ class HostTab(QWidget):
                 "500k",
                 "750k",
                 "1M",
+                "1.5M",
                 "2M",
                 "3M",
                 "4M",
@@ -755,6 +772,7 @@ class HostTab(QWidget):
                     self.linuxCaptureCombo.setCurrentIndex(i)
                     break
 
+
 class ClientTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -975,6 +993,7 @@ class ClientTab(QWidget):
             logging.error(f"Failed to start client: {e}")
             QMessageBox.critical(self, "Start Client Failed", str(e))
 
+
 class HelpTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1021,6 +1040,7 @@ class HelpTab(QWidget):
         layout.addWidget(help_view)
         self.setLayout(layout)
 
+
 class StartWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -1039,6 +1059,7 @@ class StartWindow(QWidget):
 
     def closeEvent(self, event):
         event.accept()
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -1068,6 +1089,7 @@ def main():
     w.resize(860, 620)
     w.show()
     sys.exit(app.exec_())
+
 
 if __name__ == "__main__":
     main()
