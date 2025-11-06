@@ -168,7 +168,7 @@ python3 client.py --host_ip 192.168.1.20 --decoder h.264 --hwaccel auto --audio 
 
 ## Security
 
-- Use WireGuard for WAN use. Point the client to the tunnel IP.
+- Use WireGuard for both LAN and WAN use. Point the client to the tunnel IP.
 - One active client at a time. Additional clients receive BUSY until the session ends.
 - Certificate based login after first PIN:
   - On first trusted connection the host creates a mini CA and issues a per device certificate.
