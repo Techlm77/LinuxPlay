@@ -1,1 +1,0 @@
-"""LinuxPlay test suite."""
