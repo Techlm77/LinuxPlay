@@ -1,330 +1,179 @@
-import socket
-import threading
-import pytest
+from linuxplay.host import (
+    _best_ts_pkt_size,
+    _format_bits,
+    _gen_pin,
+    _map_nvenc_tune,
+    _marker_value,
+    _norm_qp,
+    _parse_bitrate_bits,
+    _safe_nvenc_preset,
+    _target_bpp,
+    _vaapi_fmt_for_pix_fmt,
+)
 
-class TestEphemeralPortCommunication:
-    def test_client_can_send_without_bind(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            sock.sendto(b"TEST", ("192.0.2.1", 7004))
-            local_addr = sock.getsockname()
-            assert local_addr[0] != ""
-            assert local_addr[1] > 1024
-        finally:
-            sock.close()
+class TestBitrateUtils:
+    def test_parse_bitrate_with_k_suffix(self):
+        assert _parse_bitrate_bits("100k") == 100_000
+        assert _parse_bitrate_bits("500K") == 500_000
+        assert _parse_bitrate_bits("1.5k") == 1_500
 
-    def test_ephemeral_port_is_unique_per_socket(self):
-        sock1 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            sock1.sendto(b"TEST1", ("192.0.2.1", 7004))
-            sock2.sendto(b"TEST2", ("192.0.2.1", 7004))
-            port1 = sock1.getsockname()[1]
-            port2 = sock2.getsockname()[1]
-            assert port1 != port2
-            assert port1 > 1024
-            assert port2 > 1024
-        finally:
-            sock1.close()
-            sock2.close()
+    def test_parse_bitrate_with_m_suffix(self):
+        assert _parse_bitrate_bits("1M") == 1_000_000
+        assert _parse_bitrate_bits("10m") == 10_000_000
+        assert _parse_bitrate_bits("2.5M") == 2_500_000
 
-    def test_client_can_receive_on_ephemeral_port(self):
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        server_sock.bind(("127.0.0.1", 0))
-        server_addr = server_sock.getsockname()
-        client_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        client_sock.settimeout(2)
-        received_response = []
+    def test_parse_bitrate_with_g_suffix(self):
+        assert _parse_bitrate_bits("1G") == 1_000_000_000
+        assert _parse_bitrate_bits("0.5g") == 500_000_000
 
-        def server_responder():
-            _data, addr = server_sock.recvfrom(1024)
-            server_sock.sendto(b"RESPONSE", addr)
+    def test_parse_bitrate_plain_number(self):
+        assert _parse_bitrate_bits("1000") == 1000
+        assert _parse_bitrate_bits("500000") == 500_000
 
-        try:
-            server_thread = threading.Thread(target=server_responder, daemon=True)
-            server_thread.start()
-            client_sock.sendto(b"REQUEST", server_addr)
-            data, addr = client_sock.recvfrom(1024)
-            received_response.append(data)
-            assert received_response[0] == b"RESPONSE"
-            assert addr == server_addr
-            server_thread.join(timeout=1)
-        finally:
-            client_sock.close()
-            server_sock.close()
+    def test_parse_bitrate_invalid(self):
+        assert _parse_bitrate_bits("") == 0
+        assert _parse_bitrate_bits("invalid") == 0
+        assert _parse_bitrate_bits(None) == 0
 
-class TestHostAddressTracking:
-    def test_host_learns_client_port_from_message(self):
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        server_sock.bind(("127.0.0.1", 0))
-        server_addr = server_sock.getsockname()
-        client_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        learned_client_addr = [None]
+    def test_format_bits_megabits(self):
+        assert _format_bits(1_000_000) == "1M"
+        assert _format_bits(5_000_000) == "5M"
+        assert _format_bits(10_500_000) == "10M"
 
-        def server_listener():
-            _data, addr = server_sock.recvfrom(1024)
-            learned_client_addr[0] = addr
+    def test_format_bits_kilobits(self):
+        assert _format_bits(1000) == "1k"
+        assert _format_bits(500_000) == "500k"
 
-        try:
-            server_thread = threading.Thread(target=server_listener, daemon=True)
-            server_thread.start()
-            client_sock.sendto(b"HELLO", server_addr)
-            server_thread.join(timeout=1)
-            assert learned_client_addr[0] is not None
-            assert learned_client_addr[0][0] == "127.0.0.1"
-            assert learned_client_addr[0][1] > 1024
-        finally:
-            client_sock.close()
-            server_sock.close()
+    def test_format_bits_minimum(self):
+        assert _format_bits(0) == "1"
+        assert _format_bits(500) == "500"
 
-    def test_host_can_reply_to_learned_address(self):
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        server_sock.bind(("127.0.0.1", 0))
-        server_addr = server_sock.getsockname()
-        client_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        client_sock.settimeout(2)
+class TestPINGeneration:
+    def test_gen_pin_default_length(self):
+        pin = _gen_pin(6)
+        assert len(pin) == 6
+        assert pin.isdigit()
 
-        def echo_server():
-            data, client_addr = server_sock.recvfrom(1024)
-            server_sock.sendto(b"ECHO: " + data, client_addr)
+    def test_gen_pin_custom_length(self):
+        pin = _gen_pin(4)
+        assert len(pin) == 4
+        assert pin.isdigit()
 
-        try:
-            server_thread = threading.Thread(target=echo_server, daemon=True)
-            server_thread.start()
-            client_sock.sendto(b"TEST", server_addr)
-            data, addr = client_sock.recvfrom(1024)
-            assert data == b"ECHO: TEST"
-            assert addr == server_addr
-            server_thread.join(timeout=1)
-        finally:
-            client_sock.close()
-            server_sock.close()
+    def test_gen_pin_uniqueness(self):
+        pins = [_gen_pin(6) for _ in range(10)]
+        assert len(set(pins)) >= 8
 
-class TestHeartbeatWithEphemeralPorts:
-    def test_heartbeat_pong_establishes_connection(self):
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        server_sock.bind(("127.0.0.1", 0))
-        server_addr = server_sock.getsockname()
-        server_sock.settimeout(2)
-        client_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        client_sock.settimeout(2)
-        learned_addr = [None]
+class TestNVENCUtils:
+    def test_safe_nvenc_preset_valid(self):
+        assert _safe_nvenc_preset("p4") == "p4"
+        assert _safe_nvenc_preset("p1") == "p1"
+        assert _safe_nvenc_preset("llhp") == "llhp"
 
-        def server_handler():
-            data, addr = server_sock.recvfrom(256)
-            if data == b"PONG":
-                learned_addr[0] = addr
-                server_sock.sendto(b"PING", addr)
+    def test_safe_nvenc_preset_aliases(self):
+        assert _safe_nvenc_preset("ultrafast") == "p1"
+        assert _safe_nvenc_preset("veryfast") == "p3"
+        assert _safe_nvenc_preset("medium") == "p5"
+        assert _safe_nvenc_preset("slow") == "p6"
 
-        try:
-            server_thread = threading.Thread(target=server_handler, daemon=True)
-            server_thread.start()
-            client_sock.sendto(b"PONG", server_addr)
-            data, _addr = client_sock.recvfrom(256)
-            assert data == b"PING"
-            assert learned_addr[0] is not None
-            assert learned_addr[0][1] > 1024
-            server_thread.join(timeout=1)
-        finally:
-            client_sock.close()
-            server_sock.close()
+    def test_safe_nvenc_preset_latency_aliases(self):
+        assert _safe_nvenc_preset("ll") == "ll"
+        assert _safe_nvenc_preset("low-latency") == "ll"
+        assert _safe_nvenc_preset("ull") == "llhp"
+        assert _safe_nvenc_preset("zerolatency") == "llhp"
 
-    def test_heartbeat_bidirectional_on_ephemeral_port(self):
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        server_sock.bind(("127.0.0.1", 0))
-        server_addr = server_sock.getsockname()
-        server_sock.settimeout(2)
-        client_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        client_sock.settimeout(2)
-        messages = []
+    def test_safe_nvenc_preset_invalid_fallback(self):
+        assert _safe_nvenc_preset("invalid") == "p4"
+        assert _safe_nvenc_preset("") == "p4"
 
-        def server_handler():
-            data, client_addr = server_sock.recvfrom(256)
-            messages.append(("server_recv", data))
-            server_sock.sendto(b"PING", client_addr)
-            data, _ = server_sock.recvfrom(256)
-            messages.append(("server_recv", data))
+    def test_map_nvenc_tune_valid(self):
+        assert _map_nvenc_tune("ull") == "ull"
+        assert _map_nvenc_tune("ll") == "ll"
+        assert _map_nvenc_tune("hq") == "hq"
 
-        try:
-            server_thread = threading.Thread(target=server_handler, daemon=True)
-            server_thread.start()
-            client_sock.sendto(b"PONG", server_addr)
-            messages.append(("client_send", b"PONG"))
-            data, _ = client_sock.recvfrom(256)
-            messages.append(("client_recv", data))
-            client_sock.sendto(b"PONG", server_addr)
-            messages.append(("client_send", b"PONG"))
-            server_thread.join(timeout=1)
-            assert ("client_send", b"PONG") in messages
-            assert ("server_recv", b"PONG") in messages
-            assert ("client_recv", b"PING") in messages
-        finally:
-            client_sock.close()
-            server_sock.close()
+    def test_map_nvenc_tune_aliases(self):
+        assert _map_nvenc_tune("ultra-low-latency") == "ull"
+        assert _map_nvenc_tune("zerolatency") == "ull"
+        assert _map_nvenc_tune("low-latency") == "ll"
+        assert _map_nvenc_tune("high-quality") == "hq"
 
-class TestClipboardWithEphemeralPorts:
-    def test_clipboard_keepalive_registers_client(self):
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        server_sock.bind(("127.0.0.1", 0))
-        server_addr = server_sock.getsockname()
-        server_sock.settimeout(2)
-        client_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        client_sock.settimeout(2)
-        registered_addr = [None]
+class TestQPNormalization:
+    def test_norm_qp_valid_range(self):
+        assert _norm_qp("23") == "23"
+        assert _norm_qp("0") == "0"
+        assert _norm_qp("51") == "51"
 
-        def server_handler():
-            data, addr = server_sock.recvfrom(1024)
-            if data == b"CLIPBOARD_KEEPALIVE":
-                registered_addr[0] = addr
-                server_sock.sendto(b"CLIPBOARD_UPDATE HOST test", addr)
+    def test_norm_qp_clamp_low(self):
+        assert _norm_qp("-5") == "0"
+        assert _norm_qp("-100") == "0"
 
-        try:
-            server_thread = threading.Thread(target=server_handler, daemon=True)
-            server_thread.start()
-            client_sock.sendto(b"CLIPBOARD_KEEPALIVE", server_addr)
-            data, _ = client_sock.recvfrom(1024)
-            assert data == b"CLIPBOARD_UPDATE HOST test"
-            assert registered_addr[0] is not None
-            assert registered_addr[0][1] > 1024
-            server_thread.join(timeout=1)
-        finally:
-            client_sock.close()
-            server_sock.close()
+    def test_norm_qp_clamp_high(self):
+        assert _norm_qp("60") == "51"
+        assert _norm_qp("100") == "51"
 
-    def test_clipboard_update_bidirectional(self):
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        server_sock.bind(("127.0.0.1", 0))
-        server_addr = server_sock.getsockname()
-        server_sock.settimeout(2)
-        client_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        client_sock.settimeout(2)
-        messages = []
+    def test_norm_qp_invalid(self):
+        assert _norm_qp("invalid") == ""
+        assert _norm_qp("") == ""
+        assert _norm_qp(None) == ""
 
-        def server_handler():
-            data, client_addr = server_sock.recvfrom(1024)
-            messages.append(("server", data))
-            server_sock.sendto(b"CLIPBOARD_UPDATE HOST from_host", client_addr)
+class TestMPEGTSPacketSize:
+    def test_best_ts_pkt_size_ipv4_default_mtu(self):
+        result = _best_ts_pkt_size(1500, False)
+        assert result == 1316
+        assert result % 188 == 0
 
-        try:
-            server_thread = threading.Thread(target=server_handler, daemon=True)
-            server_thread.start()
-            client_sock.sendto(b"CLIPBOARD_UPDATE CLIENT from_client", server_addr)
-            data, _ = client_sock.recvfrom(1024)
-            messages.append(("client", data))
-            server_thread.join(timeout=1)
-            assert ("server", b"CLIPBOARD_UPDATE CLIENT from_client") in messages
-            assert ("client", b"CLIPBOARD_UPDATE HOST from_host") in messages
-        finally:
-            client_sock.close()
-            server_sock.close()
+    def test_best_ts_pkt_size_ipv6_default_mtu(self):
+        result = _best_ts_pkt_size(1500, True)
+        assert result == 1316
+        assert result % 188 == 0
 
-class TestNATTraversal:
-    def test_single_socket_bidirectional_communication(self):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind(("127.0.0.1", 0))
-        sock.settimeout(2)
-        local_addr = sock.getsockname()
-        echo_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        echo_sock.bind(("127.0.0.1", 0))
-        echo_addr = echo_sock.getsockname()
+    def test_best_ts_pkt_size_jumbo_frame(self):
+        result = _best_ts_pkt_size(9000, False)
+        assert result == 8836
+        assert result % 188 == 0
 
-        def echo_server():
-            data, addr = echo_sock.recvfrom(1024)
-            echo_sock.sendto(b"ECHO:" + data, addr)
+    def test_best_ts_pkt_size_minimum(self):
+        result = _best_ts_pkt_size(500, False)
+        assert result >= 188
+        assert result % 188 == 0
 
-        try:
-            echo_thread = threading.Thread(target=echo_server, daemon=True)
-            echo_thread.start()
-            sock.sendto(b"TEST", echo_addr)
-            data, _ = sock.recvfrom(1024)
-            assert data == b"ECHO:TEST"
-            assert sock.getsockname() == local_addr
-            echo_thread.join(timeout=1)
-        finally:
-            sock.close()
-            echo_sock.close()
+class TestVAAPIFormat:
+    def test_vaapi_fmt_valid_formats(self):
+        assert _vaapi_fmt_for_pix_fmt("nv12", "h264") == "nv12"
+        assert _vaapi_fmt_for_pix_fmt("yuv420p", "h264") == "yuv420p"
+        assert _vaapi_fmt_for_pix_fmt("p010", "hevc") == "p010"
 
-    def test_no_bind_means_no_firewall_rule_needed(self):
-        client_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        server_sock.bind(("127.0.0.1", 0))
-        server_addr = server_sock.getsockname()
-        server_sock.settimeout(2)
-        client_sock.settimeout(2)
+    def test_vaapi_fmt_aliases(self):
+        assert _vaapi_fmt_for_pix_fmt("yuv420", "h264") == "yuv420p"
+        assert _vaapi_fmt_for_pix_fmt("420p", "h264") == "yuv420p"
 
-        def server_echo():
-            _data, addr = server_sock.recvfrom(1024)
-            server_sock.sendto(b"REPLY", addr)
+    def test_vaapi_fmt_invalid_fallback(self):
+        assert _vaapi_fmt_for_pix_fmt("invalid", "h264") == "nv12"
+        assert _vaapi_fmt_for_pix_fmt("", "h264") == "nv12"
 
-        try:
-            server_thread = threading.Thread(target=server_echo, daemon=True)
-            server_thread.start()
-            client_sock.sendto(b"REQUEST", server_addr)
-            data, _ = client_sock.recvfrom(1024)
-            assert data == b"REPLY"
-            assert client_sock.getsockname()[1] > 1024
-            server_thread.join(timeout=1)
-        finally:
-            client_sock.close()
-            server_sock.close()
+class TestTargetBPP:
+    def test_target_bpp_h264_standard(self):
+        bpp_30fps = _target_bpp("h.264", 30)
+        bpp_60fps = _target_bpp("h.264", 60)
+        assert bpp_30fps == 0.07
+        assert bpp_60fps == 0.07
 
-class TestAddressTracking:
-    def test_address_updates_on_new_message(self):
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        server_sock.bind(("127.0.0.1", 0))
-        server_addr = server_sock.getsockname()
-        tracked_addresses = []
+    def test_target_bpp_h265_standard(self):
+        bpp_h264 = _target_bpp("h.264", 60)
+        bpp_h265 = _target_bpp("h.265", 60)
+        assert bpp_h265 < bpp_h264
 
-        def server_tracker():
-            for _ in range(2):
-                _data, addr = server_sock.recvfrom(1024)
-                tracked_addresses.append(addr)
+    def test_target_bpp_high_framerate(self):
+        bpp_90fps = _target_bpp("h.264", 90)
+        bpp_120fps = _target_bpp("h.264", 120)
+        assert bpp_90fps >= 0.07
+        assert bpp_120fps >= 0.07
 
-        try:
-            server_thread = threading.Thread(target=server_tracker, daemon=True)
-            server_thread.start()
-            client1 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            client1.sendto(b"MSG1", server_addr)
-            client1.close()
-            client2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            client2.sendto(b"MSG2", server_addr)
-            client2.close()
-            server_thread.join(timeout=1)
-            assert len(tracked_addresses) == 2
-            assert tracked_addresses[0][1] != tracked_addresses[1][1]
-        finally:
-            server_sock.close()
+class TestMarkerValue:
+    def test_marker_value_default(self):
+        marker = _marker_value()
+        assert "LinuxPlayHost" in marker
 
-    def test_host_remembers_last_client_port(self):
-        server_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        server_sock.bind(("127.0.0.1", 0))
-        server_addr = server_sock.getsockname()
-        server_sock.settimeout(2)
-        current_client_addr = [None]
-
-        def server_handler():
-            _, addr = server_sock.recvfrom(1024)
-            current_client_addr[0] = addr
-            _, addr = server_sock.recvfrom(1024)
-            current_client_addr[0] = addr
-            if current_client_addr[0]:
-                server_sock.sendto(b"REPLY", current_client_addr[0])
-
-        try:
-            server_thread = threading.Thread(target=server_handler, daemon=True)
-            server_thread.start()
-            client1 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            client1.sendto(b"OLD", server_addr)
-            client2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            client2.settimeout(2)
-            client2.sendto(b"NEW", server_addr)
-            data, _ = client2.recvfrom(1024)
-            assert data == b"REPLY"
-            server_thread.join(timeout=1)
-            client1.close()
-            client2.close()
-        finally:
-            server_sock.close()
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    def test_marker_value_with_sid(self, monkeypatch):
+        monkeypatch.setenv("LINUXPLAY_SID", "test-session-123")
+        marker = _marker_value()
+        assert marker == "LinuxPlayHost:test-session-123"
