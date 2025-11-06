@@ -179,16 +179,6 @@ python3 client.py --host_ip 192.168.1.20 --decoder h.264 --hwaccel auto --audio 
 
 ---
 
-## Changelog (recent)
-
-- Added certificate based authentication with automatic PIN to certificate upgrade flow.
-- Added session lock. New handshakes are rejected with BUSY while a client is active.
-- Client GUI now auto detects certificate bundle and disables the PIN field live.
-- Improved heartbeat handling and reconnect behavior.
-- Expanded controller support and stability.
-
----
-
 ## Support LinuxPlay
 
 LinuxPlay is a fully open-source project built from scratch and currently maintained by a single developer in spare time.
