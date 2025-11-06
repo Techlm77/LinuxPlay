@@ -29,6 +29,7 @@ from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QSurfaceFormat
 from PyQt5.QtWidgets import QApplication, QInputDialog, QLineEdit, QMainWindow, QMessageBox, QOpenGLWidget
 
+
 try:
     from evdev import InputDevice, ecodes, list_devices
 
@@ -291,16 +292,21 @@ def heartbeat_responder(host_ip):
             while CLIENT_STATE["connected"]:
                 try:
                     data, addr = sock.recvfrom(256)
-                    if data == b"PING" and addr[0] == host_ip:
-                        sock.sendto(b"PONG", host_addr)
-                        CLIENT_STATE["last_heartbeat"] = time.time()
                 except TimeoutError:
-                    if time.time() - CLIENT_STATE["last_heartbeat"] > 10:
+                    if time.time() - CLIENT_STATE.get("last_heartbeat", 0) > 10:
                         CLIENT_STATE["connected"] = False
                         CLIENT_STATE["reconnecting"] = True
+                    continue
                 except Exception:
                     time.sleep(0.2)
                     continue
+
+                if data == b"PING" and addr[0] == host_ip:
+                    try:
+                        sock.sendto(b"PONG", host_addr)
+                        CLIENT_STATE["last_heartbeat"] = time.time()
+                    except Exception as e:
+                        logging.debug(f"PONG send error: {e}")
 
     t = threading.Thread(target=loop, daemon=True)
     t.start()
