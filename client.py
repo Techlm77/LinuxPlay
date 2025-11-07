@@ -5,7 +5,6 @@ import mmap
 import ctypes
 import struct
 import socket
-import shutil
 import psutil
 import time
 import json
@@ -20,8 +19,8 @@ import argparse
 
 from queue import Queue
 from PyQt5.QtWidgets import QApplication, QMainWindow, QMessageBox, QOpenGLWidget, QInputDialog
-from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QPoint
-from PyQt5.QtGui import QSurfaceFormat, QPainter, QFont, QColor
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer
+from PyQt5.QtGui import QSurfaceFormat
 
 from OpenGL.GL import *
 
