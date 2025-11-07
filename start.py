@@ -9,7 +9,12 @@ import platform
 import threading
 import uuid
 import shutil
-from PyQt5.QtWidgets import QApplication, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QComboBox, QCheckBox, QPushButton, QGroupBox, QLineEdit, QTextEdit, QLabel, QMessageBox
+
+from PyQt5.QtWidgets import (
+    QApplication, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
+    QFormLayout, QComboBox, QCheckBox, QPushButton, QGroupBox,
+    QLineEdit, QTextEdit, QLabel, QMessageBox, QListWidget, QScrollArea
+)
 from PyQt5.QtGui import QPalette, QColor
 from PyQt5.QtCore import Qt, QTimer
 
@@ -1010,21 +1015,97 @@ class HelpTab(QWidget):
         layout.addWidget(help_view)
         self.setLayout(layout)
 
+class SponsorsTab(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        sponsors = [
+            {"name": "gw3583", "label": "$50.00", "type": "one-time"},
+            {"name": "None yet", "label": "$0", "type": "monthly"},
+        ]
+
+        monthly_sponsors = [s for s in sponsors if s["type"] == "monthly"]
+        onetime_sponsors = [s for s in sponsors if s["type"] == "one-time"]
+
+        total_onetime = sum(float(s["label"].replace("$", "")) for s in onetime_sponsors if "$" in s["label"])
+        total_monthly = sum(float(s["label"].replace("$", "")) for s in monthly_sponsors if "$" in s["label"])
+
+        layout = QVBoxLayout(spacing=8)
+
+        title = QLabel("<h2>LinuxPlay Sponsors Wall</h2>")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        tagline = QLabel("Recognising everyone who helps push a Linux-first streaming stack forward.")
+        tagline.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(tagline)
+
+        summary = QLabel(
+            f"Monthly sponsors: {len(monthly_sponsors)} (${total_monthly:.2f}) | "
+            f"One-time sponsors: {len(onetime_sponsors)} (${total_onetime:.2f})"
+        )
+        summary.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(summary)
+
+        columns = QHBoxLayout(spacing=20)
+
+        def make_list(title_text, sponsors_list):
+            col = QVBoxLayout()
+            label = QLabel(f"<b>{title_text}</b>")
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            col.addWidget(label)
+
+            list_widget = QListWidget()
+            list_widget.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+            list_widget.setAlternatingRowColors(True)
+
+            if sponsors_list:
+                max_name_len = max(len(s["name"]) for s in sponsors_list)
+                for s in sponsors_list:
+                    line = f"{s['name'].ljust(max_name_len)}  |  {s['label']}"
+                    list_widget.addItem(line)
+            else:
+                list_widget.addItem("- None yet -")
+
+            col.addWidget(list_widget)
+            return col
+
+        columns.addLayout(make_list("Monthly Sponsors", monthly_sponsors))
+        columns.addLayout(make_list("One-time Sponsors", onetime_sponsors))
+        layout.addLayout(columns)
+
+        thanks = QLabel(
+            "<i>If your name is listed here, you're part of LinuxPlay.<br>"
+            "Thank you for backing this project.</i>"
+        )
+        thanks.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(thanks)
+        layout.addStretch()
+
+        self.setLayout(layout)
+
 class StartWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("LinuxPlay")
+
         self.tabs = QTabWidget()
         self.clientTab = ClientTab()
         self.helpTab = HelpTab()
+        self.sponsorsTab = SponsorsTab()
+
         if IS_LINUX:
             self.hostTab = HostTab()
             self.tabs.addTab(self.hostTab, "Host")
+
         self.tabs.addTab(self.clientTab, "Client")
         self.tabs.addTab(self.helpTab, "Help")
+        self.tabs.addTab(self.sponsorsTab, "Sponsors")
+
         main_layout = QVBoxLayout()
         main_layout.addWidget(self.tabs)
         self.setLayout(main_layout)
+
     def closeEvent(self, event):
         event.accept()
 
