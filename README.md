@@ -161,7 +161,7 @@ chmod +x run.sh
 ./run.sh start
 
 # Or directly:
-./run.sh host  --gui --encoder h.264 --hwenc auto --bitrate 8M --audio enable
+./run.sh host --gui --encoder h.264 --hwenc auto --bitrate 8M --audio enable
 ./run.sh client --host_ip 192.168.1.20 --decoder h.264 --hwaccel auto
 ```
 
