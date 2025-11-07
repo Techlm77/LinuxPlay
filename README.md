@@ -149,32 +149,55 @@ TCP upload (7003)      --------------------->  File upload handler
 
 ## Installation
 
-### Ubuntu 24.04 packages
+### Option 1: Using run.sh (recommended)
+
+```bash
+chmod +x run.sh
+
+# Check & install required tools and Python deps (on supported distros)
+./run.sh check
+
+# Launch the GUI
+./run.sh start
+
+# Or directly:
+./run.sh host  --gui --encoder h.264 --hwenc auto --bitrate 8M --audio enable
+./run.sh client --host_ip 192.168.1.20 --decoder h.264 --hwaccel auto
+```
+
+- Uses a local `.venv` inside the repo.
+- Installs only missing dependencies inside that venv.
+- Never installs Python packages globally.
+
+---
+
+### Option 2: Manual setup (Ubuntu 24.04 example)
+
+#### System packages
 
 ```bash
 sudo apt update
 sudo apt install -y ffmpeg xdotool xclip pulseaudio-utils libcap2-bin wireguard-tools qrencode python3 python3-venv python3-pip libgl1 python3-evdev
 ```
 
-If `pip install av` fails, install FFmpeg development headers:
+If `pip install av` or `pip install cryptography` fails, install FFmpeg/Python dev headers:
 
 ```bash
 sudo apt install -y pkg-config python3-dev libavdevice-dev libavfilter-dev libavformat-dev libavcodec-dev libswscale-dev libswresample-dev libavutil-dev
 ```
 
-### Create and activate a virtual environment
+#### Create and activate a virtual environment
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate   # Linux or macOS
-# .venv\Scripts\activate    # Windows PowerShell
+source .venv/bin/activate
 ```
 
-### Python packages
+#### Python packages (inside `.venv`)
 
 ```bash
 python3 -m pip install -U pip wheel setuptools
-python3 -m pip install PyQt5 PyOpenGL PyOpenGL_accelerate av numpy pynput pyperclip psutil evdev
+python3 -m pip install PyQt5 PyOpenGL PyOpenGL_accelerate av numpy pynput pyperclip psutil evdev cryptography
 ```
 
 `evdev` is required on Linux clients for controller capture.
