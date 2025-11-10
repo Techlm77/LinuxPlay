@@ -1021,6 +1021,7 @@ class SponsorsTab(QWidget):
 
         sponsors = [
             {"name": "gw3583", "label": "$50.00", "type": "one-time"},
+            {"name": "Anonymous", "label": "$25.00", "type": "one-time"},
             {"name": "None yet", "label": "$0", "type": "monthly"},
         ]
 
