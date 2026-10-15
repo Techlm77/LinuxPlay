@@ -269,7 +269,7 @@ check_system_deps() {
   if [ "$(detect_pm)" = "apt" ]; then
     check_apt_dev_libs
   fi
-
+ 
   msg "All core system tools detected."
   return 0
 }
@@ -343,9 +343,18 @@ EOF
     echo
     msg "Installing missing Python packages into .venv:"
     echo "  $to_install"
-    python -m pip install -U pip wheel setuptools
-    python -m pip install $to_install || {
-      err "pip install failed for: $to_install"
+    
+      if [ ! -x ".venv/bin/uv" ]; then
+      section "Installing uv into .venv"
+      if need_cmd curl; then
+        curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR="$PWD/.venv/bin" UV_NO_MODIFY_PATH=1 sh
+      else
+        bail "curl is required to install uv."
+      fi
+    fi
+
+    uv pip install $to_install || {
+      err "uv pip install failed for: $to_install"
       warn "If 'av' failed to build, ensure FFmpeg dev libraries are installed (see README)."
       exit 1
     }
