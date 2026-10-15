@@ -230,6 +230,18 @@ check_apt_dev_libs() {
     sudo apt-get install -y --no-install-recommends "${missing_apt[@]}"
   fi
 }
+check_dnf_build_deps() {
+  local missing=() p
+  for p in kernel-headers python3-devel gcc; do
+    rpm -q "$p" >/dev/null 2>&1 || missing+=("$p")
+  done
+
+  if [ "${#missing[@]}" -gt 0 ]; then
+    section "Installing build dependencies (dnf)"
+    printf 'Packages: %s\n' "${missing[*]}"
+    sudo dnf install -y "${missing[@]}"
+  fi
+}
 
 check_system_deps() {
   section "System dependency check"
@@ -269,7 +281,10 @@ check_system_deps() {
   if [ "$(detect_pm)" = "apt" ]; then
     check_apt_dev_libs
   fi
- 
+  if [ "$(detect_pm)" = "dnf" ]; then
+    check_dnf_build_deps
+  fi
+
   msg "All core system tools detected."
   return 0
 }
