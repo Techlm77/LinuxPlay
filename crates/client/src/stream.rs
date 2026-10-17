@@ -17,7 +17,7 @@ use linuxplay_net::{Channel, SessionEvent, SessionHandle, rtc};
 use linuxplay_proto::control::ControlMsg;
 use linuxplay_proto::input::{InputEvent, MouseButton, POINTER_MAX};
 use linuxplay_proto::signal::VideoCodec;
-use linuxplay_proto::{decode, encode};
+use linuxplay_proto::{MAX_CONTROL_MESSAGE, decode, encode};
 use tracing::{debug, warn};
 
 use crate::connect::Offer;
@@ -25,6 +25,8 @@ use crate::media::{AudioOut, VideoOut};
 
 /// X11/XKB keycodes (which GDK reports on both X11 and Wayland) are evdev + 8.
 const EVDEV_OFFSET: u32 = 8;
+/// Session events waiting for the GTK thread.
+const EVENT_QUEUE: usize = 64;
 
 #[derive(Default)]
 struct Counters {
@@ -55,6 +57,8 @@ pub struct Stream {
     host_stats: RefCell<Option<HostStats>>,
     rtt_ms: Cell<Option<f64>>,
     remote_size: Cell<(u32, u32)>,
+    /// The host lets this session use keyboard and mouse.
+    control: bool,
     input_ready: Cell<bool>,
     connected: Cell<bool>,
     closed: Cell<bool>,
@@ -73,7 +77,9 @@ pub fn open(
     let audio = AudioOut::new().inspect_err(|e| warn!("no audio playback: {e:#}")).ok();
     let counters = Arc::new(Counters::default());
 
-    let (tx, rx) = async_channel::unbounded::<SessionEvent>();
+    // Bounded: a host flooding the control channel can't grow this. The one
+    // event that must arrive, Closed, displaces the oldest if it's full.
+    let (tx, rx) = async_channel::bounded::<SessionEvent>(EVENT_QUEUE);
     let handler = {
         let feed = video.feed();
         let audio_feed = audio.as_ref().map(|a| a.feed());
@@ -91,7 +97,9 @@ pub fn open(
                     a.push(&data);
                 }
             }
-            other => drop(tx.send_blocking(other)),
+            closed @ SessionEvent::Closed(_) => drop(tx.force_send(closed)),
+            SessionEvent::Data(_, bytes) if bytes.len() > MAX_CONTROL_MESSAGE => {}
+            other => drop(tx.try_send(other)),
         })
     };
     let (session, answer) = rtc::accept_offer(offer.local_ip, &offer.sdp, handler)?;
@@ -236,7 +244,16 @@ fn build(
             })
             .ok()
     };
-    title.set_subtitle(&format!("{} · {}×{} · {} fps · {} · {}", offer.monitor.name, offer.width, offer.height, offer.fps, offer.codec.name(), video.decoder));
+    let mode = if offer.control { "" } else { " · view only" };
+    title.set_subtitle(&format!(
+        "{} · {}×{} · {} fps · {} · {}{mode}",
+        offer.monitor.name,
+        offer.width,
+        offer.height,
+        offer.fps,
+        offer.codec.name(),
+        video.decoder
+    ));
 
     let stream = Rc::new(Stream {
         window,
@@ -255,6 +272,7 @@ fn build(
         host_stats: RefCell::new(None),
         rtt_ms: Cell::new(None),
         remote_size: Cell::new((offer.width, offer.height)),
+        control: offer.control,
         input_ready: Cell::new(false),
         connected: Cell::new(false),
         closed: Cell::new(false),
@@ -394,7 +412,8 @@ impl Stream {
     }
 
     fn send_input(&self, ev: InputEvent) {
-        if self.input_ready.get() {
+        // The host ignores input from a view-only session anyway; don't send it.
+        if self.control && self.input_ready.get() {
             self.session.send(Channel::Input, encode(&ev));
         }
     }

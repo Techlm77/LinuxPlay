@@ -48,6 +48,19 @@ fn set(el: &gst::Element, name: &str, value: &str) {
     }
 }
 
+/// Keep at most `max_bytes` waiting in an appsrc, dropping the oldest, so a
+/// host sending faster than we decode can't grow memory without bound.
+fn bound(src: &gst_app::AppSrc, max_bytes: u64) {
+    src.set_max_bytes(max_bytes);
+    // leaky-type needs GStreamer 1.20; without it, block=false would let the
+    // queue grow past max-bytes.
+    if src.find_property("leaky-type").is_some() {
+        src.set_property_from_str("leaky-type", "downstream");
+    } else {
+        warn!("this GStreamer can't bound the network queue (needs 1.20)");
+    }
+}
+
 /// Encoded video in, frames on a `gdk::Paintable` out.
 pub struct VideoOut {
     pipeline: gst::Pipeline,
@@ -85,7 +98,7 @@ impl VideoOut {
             .by_name("src")
             .and_then(|s| s.downcast::<gst_app::AppSrc>().ok())
             .context("no appsrc")?;
-        src.set_max_bytes(0);
+        bound(&src, 8 << 20);
         let sink = pipeline.by_name("sink").context("no sink")?;
         let paintable = sink.property::<gdk::Paintable>("paintable");
         pipeline.set_state(gst::State::Playing).context("starting the video pipeline")?;
@@ -148,6 +161,7 @@ impl AudioOut {
             .by_name("src")
             .and_then(|s| s.downcast::<gst_app::AppSrc>().ok())
             .context("no appsrc")?;
+        bound(&src, 256 << 10);
         pipeline.set_state(gst::State::Playing).context("starting audio playback")?;
         Ok(Self { pipeline, src })
     }

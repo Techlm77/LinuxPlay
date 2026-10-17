@@ -5,8 +5,9 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
+use linuxplay_net::auth::{self, Hello};
 use linuxplay_net::tls::Identity;
-use linuxplay_net::{pair, ws};
+use linuxplay_net::ws;
 use linuxplay_proto::signal::{ClientMsg, HostMsg, MonitorInfo, VideoCodec};
 use linuxplay_proto::{DEFAULT_PORT, PROTOCOL_VERSION};
 use tokio::sync::oneshot;
@@ -14,8 +15,8 @@ use tracing::debug;
 
 pub struct Request {
     pub address: String,
-    /// Hex fingerprint pinned for this address, if paired before.
-    pub pinned: Option<String>,
+    /// The fingerprint pinned for this address, if paired before.
+    pub pinned: Option<[u8; 32]>,
     pub client_name: String,
     pub codecs: Vec<VideoCodec>,
     /// The subset of `codecs` decoded in hardware.
@@ -34,6 +35,8 @@ pub struct Offer {
     pub fps: u32,
     pub sdp: String,
     pub local_ip: IpAddr,
+    /// The host allows keyboard and mouse; without it the stream is view only.
+    pub control: bool,
     /// The display this stream shows.
     pub monitor: MonitorInfo,
     /// Every display the host offered, for opening others.
@@ -54,7 +57,8 @@ pub enum ToUi {
         monitors: Vec<MonitorInfo>,
         reply: oneshot::Sender<Option<u32>>,
     },
-    /// The host is authenticated: remember (or refresh) it.
+    /// The host proved its identity (by pairing, or by matching the pin):
+    /// remember (or refresh) it.
     Verified {
         address: String,
         host_name: String,
@@ -81,52 +85,42 @@ async fn session(req: &Request, identity: &Identity, ui: &async_channel::Sender<
     ui.send(ToUi::Status(format!("Connecting to {host}…"))).await?;
     let mut conn = ws::connect(&host, port, identity).await?;
 
-    let pinned = match &req.pinned {
-        Some(p) if *p == hex::encode(conn.host_fp) => true,
-        Some(_) => bail!(
-            "This host's identity has changed since you paired with it. If it was reinstalled, \
-             forget it and pair again; otherwise someone may be intercepting the connection."
-        ),
-        None => false,
+    // Authenticate: a pinned host must show the pinned certificate; a new
+    // one must complete PIN pairing before its Welcome is believed.
+    let hello = Hello {
+        version: PROTOCOL_VERSION,
+        name: req.client_name.clone(),
+        codecs: req.codecs.clone(),
+        hw_codecs: req.hw_codecs.clone(),
+        max_fps: req.max_fps,
+        audio: true,
     };
-    conn.signal
-        .send(&ClientMsg::Hello {
-            version: PROTOCOL_VERSION,
-            name: req.client_name.clone(),
-            codecs: req.codecs.clone(),
-            hw_codecs: req.hw_codecs.clone(),
-            max_fps: req.max_fps,
-            audio: true,
-            pair: !pinned,
-        })
+    let ask_pin = |host_name: String, password: bool| async move {
+        let (tx, rx) = oneshot::channel();
+        ui.send(ToUi::NeedPin { host_name, password, reply: tx }).await.ok()?;
+        rx.await.ok().flatten()
+    };
+    let authed = auth::authenticate(
+        &mut conn.signal,
+        &conn.host_fp,
+        &identity.fingerprint,
+        req.pinned.as_ref(),
+        hello,
+        ask_pin,
+    )
+    .await?;
+    let display_name = authed.host_name;
+    // Only now, with the identity proven, is the host remembered.
+    ui.send(ToUi::Verified { address: req.address.clone(), host_name: display_name.clone(), fingerprint: conn.host_fp })
         .await?;
 
-    // Authenticate (pairing if needed) until the host welcomes us.
-    let display_name = loop {
+    // The person at the host decides whether (and how) to share.
+    let control = loop {
         match conn.signal.expect::<HostMsg>().await? {
-            HostMsg::PairingRequired { host_name, password } => {
-                let (tx, rx) = oneshot::channel();
-                ui.send(ToUi::NeedPin { host_name, password, reply: tx }).await?;
-                let pin = rx.await.ok().flatten().ok_or_else(|| anyhow!("pairing cancelled"))?;
-                let (state, start) = pair::client_start(&pin);
-                conn.signal.send(&ClientMsg::PairStart { spake: start }).await?;
-                let (spake, mac) = match conn.signal.expect::<HostMsg>().await? {
-                    HostMsg::PairReply { spake, mac } => (spake, mac),
-                    HostMsg::Error { message } => bail!(message),
-                    m => bail!("unexpected message during pairing: {m:?}"),
-                };
-                let mac = state.finish(&spake, &mac, &conn.host_fp, &identity.fingerprint)?;
-                conn.signal.send(&ClientMsg::PairFinish { mac }).await?;
+            HostMsg::AwaitingApproval => {
+                ui.send(ToUi::Status(format!("Waiting for someone at {display_name} to accept…"))).await?;
             }
-            HostMsg::Welcome { host_name } => {
-                ui.send(ToUi::Verified {
-                    address: req.address.clone(),
-                    host_name: host_name.clone(),
-                    fingerprint: conn.host_fp,
-                })
-                .await?;
-                break host_name;
-            }
+            HostMsg::Approved { control, .. } => break control,
             HostMsg::Error { message } => bail!(message),
             m => bail!("unexpected message: {m:?}"),
         }
@@ -163,7 +157,7 @@ async fn session(req: &Request, identity: &Identity, ui: &async_channel::Sender<
                 y: 0,
                 primary: false,
             });
-            Offer { host_name: display_name, codec, width, height, fps, sdp, local_ip: conn.local_ip, monitor, monitors }
+            Offer { host_name: display_name, codec, width, height, fps, sdp, local_ip: conn.local_ip, control, monitor, monitors }
         }
         HostMsg::Error { message } => bail!(message),
         m => bail!("unexpected message: {m:?}"),

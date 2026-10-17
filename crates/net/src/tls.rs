@@ -18,6 +18,8 @@ use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 use sha2::{Digest, Sha256};
 
+use crate::fsutil;
+
 /// SHA-256 of a DER certificate.
 pub type Fingerprint = [u8; 32];
 
@@ -43,23 +45,32 @@ pub struct Identity {
 }
 
 impl Identity {
+    /// A fresh certificate and key, in memory only.
+    pub fn generate(common_name: &str) -> Result<Self> {
+        let key = rcgen::KeyPair::generate()?;
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new())?;
+        params.distinguished_name.push(rcgen::DnType::CommonName, common_name);
+        // Far-future expiry: trust comes from the pinned fingerprint, not dates.
+        params.not_after = rcgen::date_time_ymd(2125, 1, 1);
+        let cert = params.self_signed(&key)?;
+        let cert = CertificateDer::from(cert.der().to_vec());
+        let fingerprint = fingerprint(&cert);
+        Ok(Self { cert, key: PrivatePkcs8KeyDer::from(key.serialize_der()), fingerprint })
+    }
+
     /// Load `cert.der`/`key.der` from `dir`, creating them on first use.
     pub fn load_or_create(dir: &Path, common_name: &str) -> Result<Self> {
         let cert_path = dir.join("cert.der");
         let key_path = dir.join("key.der");
+        fsutil::private_dir(dir)?;
         if !cert_path.exists() || !key_path.exists() {
-            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-            let key = rcgen::KeyPair::generate()?;
-            let mut params = rcgen::CertificateParams::new(Vec::<String>::new())?;
-            params.distinguished_name.push(rcgen::DnType::CommonName, common_name);
-            // Far-future expiry: trust comes from the pinned fingerprint, not dates.
-            params.not_after = rcgen::date_time_ymd(2125, 1, 1);
-            let cert = params.self_signed(&key)?;
-            write_private(&key_path, &key.serialize_der())?;
-            fs::write(&cert_path, cert.der()).with_context(|| format!("writing {}", cert_path.display()))?;
+            let id = Self::generate(common_name)?;
+            fsutil::write_private(&key_path, id.key.secret_pkcs8_der())?;
+            fs::write(&cert_path, &id.cert).with_context(|| format!("writing {}", cert_path.display()))?;
         }
         let cert = CertificateDer::from(fs::read(&cert_path)?);
-        let key = PrivatePkcs8KeyDer::from(fs::read(&key_path)?);
+        let key = fsutil::read_private(&key_path)?.with_context(|| format!("{} vanished", key_path.display()))?;
+        let key = PrivatePkcs8KeyDer::from(key);
         let fingerprint = fingerprint(&cert);
         Ok(Self { cert, key, fingerprint })
     }
@@ -88,20 +99,6 @@ impl Identity {
         cfg.alpn_protocols = vec![b"linuxplay/1".to_vec()];
         Ok(cfg)
     }
-}
-
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .with_context(|| format!("writing {}", path.display()))?;
-    f.write_all(bytes)?;
-    Ok(())
 }
 
 fn provider() -> Arc<CryptoProvider> {

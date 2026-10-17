@@ -7,7 +7,9 @@ Low‑latency remote desktop for Linux, built from scratch in Rust.
   Nvidia) with a software fallback; Opus audio.
 - **UI:** GTK4 / libadwaita client.
 - **Security:** self‑signed identities pinned by fingerprint; first pairing
-  authenticated by a PIN (SPAKE2 + key confirmation binding both certificates).
+  authenticated by a PIN (SPAKE2 + key confirmation binding both certificates);
+  every connection approved at the host, with a view‑only option; listens only
+  on the network you choose. See [Security](#security).
 - **Adaptive:** picks the codec, bitrate and framerate from the link (LAN vs
   internet) and both ends' hardware, then follows the measured bandwidth live.
 - **Multi‑monitor:** each display is offered separately and can be streamed at
@@ -89,16 +91,112 @@ and installs just **LinuxPlay Host**. Install system‑wide with
 
 1. On the computer to share, launch **LinuxPlay Host** (or run `linuxplay-host`).
 2. On the other computer, launch **LinuxPlay**, type the host's address, Connect.
-3. The first time, enter the **PIN** the host shows (or a password set with
-   `linuxplay-host --password …`). After that it reconnects automatically.
+3. The first time, enter the **PIN** the host shows. After that the client
+   recognises the host by its certificate.
+4. Each time someone connects, the host asks **View only**, **Allow control** or
+   **Deny** — in a notification, in the tray menu, or from a terminal. No answer
+   within a minute means no. While one window of a device is approved, its other
+   display windows join without asking again.
 
 Check what a machine can encode with `linuxplay-host encoders`, and its identity
 and paired clients with `linuxplay-host info`.
 
 - **Multiple displays:** the client asks which display to open; the window's
   *displays* button opens the host's others, each in its own window.
+  `--displays 0,1` limits which displays the host offers at all.
 - **Hotkeys** in a stream window: **Ctrl+Alt+Shift+F** fullscreen, **+S** stats
   overlay, **+Q** disconnect.
+
+### Managing a running host
+
+| | |
+|---|---|
+| `linuxplay-host sessions` | pairing PINs, connections waiting for approval, who is connected |
+| `linuxplay-host approve ID [--view-only]` / `deny ID` | answer a waiting connection |
+| `linuxplay-host disconnect ID` / `disconnect all` | end a session / stop sharing |
+| `linuxplay-host revoke FINGERPRINT` / `revoke --all` | forget a device; its live sessions end at once |
+
+These talk to the running host over a private socket, so they work over SSH
+too, and they report what the host actually did. The tray menu offers the same.
+
+### Unattended access
+
+For a computer nobody sits at, `linuxplay-host --unattended` lets **paired**
+devices connect without the approval prompt (each connection still shows a
+notification), and lets the Wayland screen‑share grant be remembered. Since no
+one is there to read a PIN, you can set a pairing password instead:
+
+```sh
+linuxplay-host set-password     # asks twice, without echo; stored 0600
+linuxplay-host --unattended
+```
+
+The password is only used with `--unattended`, must be at least 12 characters,
+and is never taken from the command line or the environment.
+
+## Network exposure
+
+The host listens only where you say:
+
+| `--listen` | listens on |
+|---|---|
+| `lan` (default) | private addresses of this machine's network interfaces (not VPNs, containers or public addresses) |
+| `tailscale` | this machine's Tailscale addresses only; refuses to start if Tailscale is down |
+| `loopback` | this machine only |
+| `all` | every interface — not recommended |
+
+`--bind ADDRESS` (repeatable) picks exact addresses instead. Signalling uses TCP
+**47800** (`--port`); media uses one UDP port per display from **47801–47816**
+(`--media-ports`), so a firewall can allow exactly those.
+
+### Tailscale
+
+Tailscale gives you a private network between your machines without opening
+ports. It carries the traffic; it doesn't replace LinuxPlay's own pairing and
+approval — being on the tailnet doesn't make a device trusted.
+
+1. Install Tailscale on both machines and log in to the same tailnet.
+2. On the host: `linuxplay-host --listen tailscale`.
+3. On the client, pick the host under **On your tailnet**, or type its Tailscale
+   address or MagicDNS name. Pair with the PIN as usual.
+
+To let only your own devices reach it, tag the host (e.g. `tag:linuxplay-host`)
+and allow just LinuxPlay's ports in your tailnet policy:
+
+```json
+{
+  "grants": [
+    { "src": ["you@example.com"], "dst": ["tag:linuxplay-host"], "ip": ["tcp:47800", "udp:47801-47816"] }
+  ]
+}
+```
+
+Grants add access, so remove any broader allow‑all rule if you want this to be
+the only way in. Don't use Tailscale Funnel for this (it publishes a service to
+the internet). `tailscale ping HOST` shows whether the path is direct or relayed;
+direct is what you want for low latency.
+
+## Security
+
+- **Identity:** each side has a self‑signed certificate; the client pins the
+  host's. A host the client hasn't pinned must complete PIN pairing — the
+  client refuses one that claims to know it without pairing. A changed host
+  certificate is refused, never silently re‑pinned.
+- **Consent:** nothing is shared until the person at the host approves the
+  connection (unless the host runs `--unattended`). A view‑only session's input
+  is dropped by the host, not just hidden by the client. On Wayland the
+  compositor's share prompt appears again for each new visit.
+- **Revocation:** `revoke`, *Disconnect* and *Stop sharing* end live sessions
+  immediately; the host also notices edits to its trust file within seconds.
+- **Limits:** every handshake stage has a deadline; unauthenticated
+  connections, pairing attempts and wrong PINs are limited per source address
+  (with back‑off), plus a global rate; network, media and input queues are
+  bounded, and input is validated and rate‑limited.
+- **Secrets:** the PIN is shown only on the host's screen (a transient
+  notification, the tray, `linuxplay-host sessions`, or its terminal) — never in
+  the log. Keys, trust lists and the portal grant are `0600` files in `0700`
+  directories. If the client's list of paired hosts is damaged, it won't
+  connect until you repair it or choose to start over.
 
 ## Compatibility
 

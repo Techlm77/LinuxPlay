@@ -22,6 +22,7 @@ gstreamer-app.workspace = true
 gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
 hex.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true

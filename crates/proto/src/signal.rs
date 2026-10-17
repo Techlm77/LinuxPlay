@@ -13,9 +13,14 @@
 //!
 //! The MACs cover both certificate fingerprints, so a man in the middle, who
 //! must present different certificates to each side, cannot complete pairing
-//! without knowing the PIN. After `Welcome` the host sends `Offer` and the
-//! client replies with `Answer`; the WebRTC DTLS fingerprints in those SDPs are
-//! therefore authenticated too.
+//! without knowing the PIN. A client must refuse a `Welcome` from a host it
+//! has not pinned unless it has just completed that exchange.
+//!
+//! After `Welcome` the host decides whether to share at all: it sends
+//! `AwaitingApproval` while the person at the host chooses, then `Approved`
+//! with what this session may do (or `Error` if declined). Only then come
+//! `Monitors`, `SelectMonitor`, `Offer` and `Answer`; the WebRTC DTLS
+//! fingerprints in those SDPs are therefore authenticated too.
 
 use serde::{Deserialize, Serialize};
 
@@ -88,8 +93,13 @@ pub enum HostMsg {
     PairingRequired { host_name: String, password: bool },
     /// SPAKE2 side B message (base64) and the host's key-confirmation MAC (hex).
     PairReply { spake: String, mac: String },
-    /// Authenticated; the displays this host can share follow.
+    /// Authenticated; approval (or refusal) follows.
     Welcome { host_name: String },
+    /// The person at the host is being asked whether to share.
+    AwaitingApproval,
+    /// Sharing is allowed; the displays follow. Without `control` the host
+    /// ignores all input from this session.
+    Approved { control: bool, audio: bool },
     /// The displays available to stream; the client replies with
     /// [`ClientMsg::SelectMonitor`].
     Monitors { monitors: Vec<MonitorInfo> },

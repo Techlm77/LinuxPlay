@@ -14,7 +14,7 @@ use tracing::warn;
 use crate::connect::{self, ToUi};
 use crate::known_hosts::KnownHosts;
 use crate::stream::{self, Stream};
-use crate::{media, runtime};
+use crate::{media, runtime, tailnet};
 
 /// One connection to a host (one display in one window).
 struct Conn {
@@ -31,7 +31,13 @@ pub struct Launcher {
     status: gtk::Label,
     recent: adw::PreferencesGroup,
     recent_rows: RefCell<Vec<adw::ActionRow>>,
-    known: RefCell<KnownHosts>,
+    tailnet: adw::PreferencesGroup,
+    tailnet_rows: RefCell<Vec<adw::ActionRow>>,
+    /// `None` while the store is damaged: no connections until the user
+    /// decides what to do (fail closed).
+    known: RefCell<Option<KnownHosts>>,
+    known_error: RefCell<Option<String>>,
+    known_path: std::path::PathBuf,
     identity: Arc<Identity>,
     /// Every live connection, keyed by a counter.
     conns: RefCell<HashMap<u64, Conn>>,
@@ -70,6 +76,18 @@ impl Launcher {
             .build();
 
         let recent = adw::PreferencesGroup::builder().title("Paired hosts").build();
+        let tailnet = adw::PreferencesGroup::builder()
+            .title("On your tailnet")
+            .description("Devices Tailscale can reach. Connecting still asks for the host's PIN the first time.")
+            .visible(false)
+            .build();
+        let refresh = gtk::Button::builder()
+            .icon_name("view-refresh-symbolic")
+            .tooltip_text("Look for tailnet devices again")
+            .valign(gtk::Align::Center)
+            .css_classes(["flat"])
+            .build();
+        tailnet.set_header_suffix(Some(&refresh));
 
         let fingerprint = tls::fingerprint_display(&identity.fingerprint);
         let short: String = fingerprint.chars().take(19).collect();
@@ -90,6 +108,7 @@ impl Launcher {
         content.append(&connect_group);
         content.append(&status);
         content.append(&recent);
+        content.append(&tailnet);
         content.append(&me);
 
         let clamp = adw::Clamp::builder().maximum_size(560).child(&content).build();
@@ -110,7 +129,11 @@ impl Launcher {
             .content(&toolbar)
             .build();
 
-        let known = KnownHosts::load(tls::config_dir("client").join("known_hosts.toml"));
+        let known_path = tls::config_dir("client").join("known_hosts.toml");
+        let (known, known_error) = match KnownHosts::load(known_path.clone()) {
+            Ok(k) => (Some(k), None),
+            Err(e) => (None, Some(format!("{e:#}"))),
+        };
         let this = Rc::new(Self {
             app: app.clone(),
             window,
@@ -119,7 +142,11 @@ impl Launcher {
             status,
             recent,
             recent_rows: RefCell::default(),
+            tailnet,
+            tailnet_rows: RefCell::default(),
             known: RefCell::new(known),
+            known_error: RefCell::new(known_error),
+            known_path,
             identity: Arc::new(identity),
             conns: RefCell::default(),
             connecting: Cell::new(None),
@@ -142,12 +169,102 @@ impl Launcher {
                 }
             }
         });
+        let weak = Rc::downgrade(&this);
+        refresh.connect_clicked(move |_| {
+            if let Some(l) = weak.upgrade() {
+                l.refresh_tailnet();
+            }
+        });
         this.refresh_recent();
+        this.refresh_tailnet();
         this
     }
 
-    pub fn present(&self) {
+    pub fn present(self: &Rc<Self>) {
         self.window.present();
+        if self.known.borrow().is_none() {
+            self.damaged_store();
+        }
+    }
+
+    /// The paired-hosts file is damaged. Nothing connects until the user
+    /// chooses: they may want to restore it from a backup first.
+    fn damaged_store(self: &Rc<Self>) {
+        let err = self.known_error.borrow().clone().unwrap_or_default();
+        let dialog = adw::AlertDialog::new(
+            Some("Paired hosts can't be read"),
+            Some(&format!(
+                "{err}\n\nUntil this is resolved LinuxPlay won't connect, because it can't check that a \
+                 host is the one you paired with. You can repair or restore the file and restart, or \
+                 start over: the damaged file is kept aside, and every host must be paired again."
+            )),
+        );
+        dialog.add_responses(&[("wait", "Not now"), ("reset", "Start over")]);
+        dialog.set_response_appearance("reset", adw::ResponseAppearance::Destructive);
+        dialog.set_close_response("wait");
+        let weak = Rc::downgrade(self);
+        dialog.connect_response(None, move |_, response| {
+            let Some(l) = weak.upgrade() else { return };
+            if response != "reset" {
+                return;
+            }
+            match KnownHosts::reset(&l.known_path) {
+                Ok((k, aside)) => {
+                    *l.known.borrow_mut() = Some(k);
+                    *l.known_error.borrow_mut() = None;
+                    l.refresh_recent();
+                    l.error("Starting over", &format!("The old file was kept as {}.", aside.display()));
+                }
+                Err(e) => l.error("Couldn't start over", &format!("{e:#}")),
+            }
+        });
+        dialog.present(Some(&self.window));
+    }
+
+    /// List the other devices on the user's tailnet, if Tailscale is running.
+    fn refresh_tailnet(self: &Rc<Self>) {
+        let task = runtime().spawn_blocking(tailnet::peers);
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let peers = match task.await {
+                Ok(Ok(p)) => p,
+                Ok(Err(e)) => {
+                    tracing::debug!("tailnet: {e:#}");
+                    Vec::new()
+                }
+                Err(_) => Vec::new(),
+            };
+            if let Some(l) = weak.upgrade() {
+                l.show_tailnet(peers);
+            }
+        });
+    }
+
+    fn show_tailnet(self: &Rc<Self>, peers: Vec<tailnet::Peer>) {
+        for row in self.tailnet_rows.borrow_mut().drain(..) {
+            self.tailnet.remove(&row);
+        }
+        self.tailnet.set_visible(!peers.is_empty());
+        for p in peers {
+            let address = p.ip.to_string();
+            let state = if p.online { "online" } else { "offline" };
+            let row = adw::ActionRow::builder()
+                .title(glib::markup_escape_text(&p.name))
+                .subtitle(glib::markup_escape_text(&format!("{address} · {state} · {}", p.os)))
+                .activatable(p.online)
+                .sensitive(p.online)
+                .build();
+            row.add_prefix(&gtk::Image::from_icon_name("network-vpn-symbolic"));
+            let weak = Rc::downgrade(self);
+            row.connect_activated(move |_| {
+                if let Some(l) = weak.upgrade() {
+                    l.entry.set_text(&address);
+                    l.connect(&address);
+                }
+            });
+            self.tailnet.add(&row);
+            self.tailnet_rows.borrow_mut().push(row);
+        }
     }
 
     /// Test hook: fill the address and click Connect exactly as a user would,
@@ -161,7 +278,7 @@ impl Launcher {
         for row in self.recent_rows.borrow_mut().drain(..) {
             self.recent.remove(&row);
         }
-        let hosts = self.known.borrow().recent();
+        let hosts = self.known.borrow().as_ref().map(|k| k.recent()).unwrap_or_default();
         self.recent.set_visible(!hosts.is_empty());
         for host in hosts {
             let row = adw::ActionRow::builder()
@@ -190,7 +307,7 @@ impl Launcher {
             let address = host.address.clone();
             forget.connect_clicked(move |_| {
                 if let Some(l) = weak.upgrade() {
-                    if let Err(e) = l.known.borrow_mut().forget(&address) {
+                    if let Some(Err(e)) = l.known.borrow_mut().as_mut().map(|k| k.forget(&address)) {
                         warn!("forgetting {address}: {e:#}");
                     }
                     l.refresh_recent();
@@ -265,7 +382,22 @@ impl Launcher {
             self.error("Can't decode video", "No H.264, H.265 or AV1 decoder is installed.");
             return None;
         }
-        let pinned = self.known.borrow().get(&address).map(|h| h.fingerprint.clone());
+        // Fail closed: with the paired-hosts file unreadable, every host
+        // would look new, so don't connect at all.
+        let pinned = match self.known.borrow().as_ref() {
+            None => None,
+            Some(k) => match k.get(&address).map(|h| h.pin()).transpose() {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    self.error("Can't check this host", &format!("{e:#}"));
+                    return None;
+                }
+            },
+        };
+        let Some(pinned) = pinned else {
+            self.damaged_store();
+            return None;
+        };
         let req = connect::Request {
             address: address.clone(),
             pinned,
@@ -302,7 +434,7 @@ impl Launcher {
             ToUi::NeedPin { host_name, password, reply } => self.ask_pin(&host_name, password, reply),
             ToUi::NeedMonitor { host_name, monitors, reply } => self.ask_monitor(&host_name, monitors, reply),
             ToUi::Verified { address, host_name, fingerprint } => {
-                if let Err(e) = self.known.borrow_mut().remember(&address, &host_name, &fingerprint) {
+                if let Some(Err(e)) = self.known.borrow_mut().as_mut().map(|k| k.remember(&address, &host_name, &fingerprint)) {
                     warn!("saving {address}: {e:#}");
                 }
                 self.refresh_recent();
@@ -394,9 +526,9 @@ impl Launcher {
             return;
         }
         let body = if password {
-            "Enter the password set on the host."
+            "Enter the pairing password set on the host."
         } else {
-            "Enter the PIN shown on the host. It is also in the host's log."
+            "Enter the PIN shown on the host's screen."
         };
         let dialog = adw::AlertDialog::new(Some(&format!("Pair with {host_name}")), Some(body));
         let entry = gtk::PasswordEntry::builder().activates_default(true).show_peek_icon(true).build();

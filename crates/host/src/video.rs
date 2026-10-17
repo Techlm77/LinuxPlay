@@ -191,6 +191,8 @@ pub struct Stats {
 
 /// Lowest bitrate the adaptation will go to, kbit/s.
 const MIN_KBPS: u32 = 1_000;
+/// After the session drops a frame, ask for a keyframe at most this often.
+const KEYFRAME_RECOVERY_INTERVAL: Duration = Duration::from_millis(100);
 
 impl VideoPipeline {
     /// Build and start the pipeline. `source` is a gst-launch fragment that
@@ -235,6 +237,7 @@ impl VideoPipeline {
         {
             let session = session.clone();
             let counters = counters.clone();
+            let mut last_recovery: Option<Instant> = None;
             sink.set_callbacks(
                 gst_app::AppSinkCallbacks::builder()
                     .new_sample(move |sink| {
@@ -245,7 +248,14 @@ impl VideoPipeline {
                         counters.frames.fetch_add(1, Ordering::Relaxed);
                         counters.bytes.fetch_add(map.len() as u64, Ordering::Relaxed);
                         if let Some(h) = session.get() {
-                            h.write_video(map.as_slice().to_vec(), Duration::from_nanos(pts.nseconds()));
+                            let sent = h.write_video(map.as_slice().to_vec(), Duration::from_nanos(pts.nseconds()));
+                            // The session is behind and dropped this frame; the
+                            // frames after it can't be decoded until a keyframe.
+                            if !sent && last_recovery.is_none_or(|t| t.elapsed() >= KEYFRAME_RECOVERY_INTERVAL) {
+                                last_recovery = Some(Instant::now());
+                                let event = gst_video::UpstreamForceKeyUnitEvent::builder().all_headers(true).build();
+                                sink.send_event(event);
+                            }
                         }
                         Ok(gst::FlowSuccess::Ok)
                     })

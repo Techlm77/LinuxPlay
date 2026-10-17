@@ -25,7 +25,8 @@ gstreamer-video = "0.25"
 base64 = "0.22"
 hex = "0.4"
 hmac = "0.12"
-postcard = { version = "1", features = ["use-std"] }
+libc = "0.2"
+postcard = { version = "1", default-features = false, features = ["use-std"] }
 rand = "0.9"
 rcgen = "0.14"
 rustls = "0.23"

@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 /// Largest value of a normalised pointer coordinate.
 pub const POINTER_MAX: u16 = u16::MAX;
 
+/// Highest Linux evdev key code (`KEY_MAX`); anything above is not a key.
+pub const KEY_MAX: u16 = 0x2ff;
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MouseButton {
     Left,

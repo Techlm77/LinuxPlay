@@ -15,6 +15,8 @@ use super::{Injector, scale};
 /// X11 keycodes are evdev codes offset by 8.
 const EVDEV_OFFSET: u16 = 8;
 const NOTCH: i32 = 120;
+/// Most wheel clicks one scroll event may turn into.
+const MAX_NOTCHES: i32 = super::MAX_SCROLL / NOTCH;
 
 pub struct X11Injector {
     conn: RustConnection,
@@ -50,22 +52,26 @@ impl X11Injector {
     }
 }
 
-/// Take whole notches out of an accumulator, returning how many (signed).
+/// Take whole notches out of an accumulator, returning how many (signed),
+/// at most [`MAX_NOTCHES`] either way. Saturates instead of overflowing.
 fn notches(acc: &mut i32, delta: i32) -> i32 {
-    *acc += delta;
-    let n = *acc / NOTCH;
+    *acc = acc.saturating_add(delta);
+    let n = (*acc / NOTCH).clamp(-MAX_NOTCHES, MAX_NOTCHES);
     *acc -= n * NOTCH;
+    // Whatever is left beyond the cap is discarded, not carried forward.
+    *acc = (*acc).clamp(-(NOTCH - 1), NOTCH - 1);
     n
 }
 
 impl Injector for X11Injector {
     fn pointer_abs(&mut self, x: u16, y: u16) {
-        let px = self.x + scale(x, self.width) as i32;
-        let py = self.y + scale(y, self.height) as i32;
-        self.fake(MOTION_NOTIFY_EVENT, 0, px as i16, py as i16);
+        let px = self.x.saturating_add(scale(x, self.width) as i32);
+        let py = self.y.saturating_add(scale(y, self.height) as i32);
+        self.fake(MOTION_NOTIFY_EVENT, 0, clamp_i16(px), clamp_i16(py));
     }
 
     fn pointer_rel(&mut self, dx: f32, dy: f32) {
+        // `as` saturates and maps NaN to 0; the gate already rejects NaN.
         self.fake(MOTION_NOTIFY_EVENT, 1, dx.round() as i16, dy.round() as i16);
     }
 
@@ -77,17 +83,19 @@ impl Injector for X11Injector {
     fn scroll(&mut self, dx: i32, dy: i32) {
         // Buttons 4/5 scroll up/down, 6/7 left/right.
         let v = notches(&mut self.scroll.1, dy);
-        for _ in 0..v.abs() {
+        for _ in 0..v.unsigned_abs() {
             self.click(if v > 0 { 5 } else { 4 });
         }
         let h = notches(&mut self.scroll.0, dx);
-        for _ in 0..h.abs() {
+        for _ in 0..h.unsigned_abs() {
             self.click(if h > 0 { 7 } else { 6 });
         }
     }
 
     fn key(&mut self, code: u16, pressed: bool) {
-        let Ok(keycode) = u8::try_from(code + EVDEV_OFFSET) else { return };
+        let Some(keycode) = code.checked_add(EVDEV_OFFSET).and_then(|k| u8::try_from(k).ok()) else {
+            return;
+        };
         let kind = if pressed { KEY_PRESS_EVENT } else { KEY_RELEASE_EVENT };
         self.fake(kind, keycode, 0, 0);
     }
@@ -99,9 +107,24 @@ impl Injector for X11Injector {
     }
 }
 
+fn clamp_i16(v: i32) -> i16 {
+    v.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
 #[cfg(test)]
 mod tests {
-    use super::notches;
+    use super::{MAX_NOTCHES, notches};
+
+    #[test]
+    fn hostile_scroll_is_bounded() {
+        let mut acc = 0;
+        assert_eq!(notches(&mut acc, i32::MAX), MAX_NOTCHES);
+        assert_eq!(notches(&mut acc, i32::MAX), MAX_NOTCHES);
+        assert_eq!(notches(&mut acc, i32::MIN), -MAX_NOTCHES);
+        assert!(acc.abs() < 120);
+        let mut acc = i32::MAX;
+        assert!(notches(&mut acc, i32::MAX) <= MAX_NOTCHES);
+    }
 
     #[test]
     fn scroll_accumulates_partial_notches() {

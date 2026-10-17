@@ -1,12 +1,16 @@
 //! Wayland capture and input through the desktop portals.
 //!
-//! One RemoteDesktop session (created once per host run) carries the screen
-//! cast and input injection. The user approves which monitors to share in the
-//! compositor's dialog; each shared monitor becomes a PipeWire stream the
-//! client can pick. Opening a stream hands back a `pipewiresrc` fragment and an
-//! input channel bound to that monitor.
+//! One RemoteDesktop session carries the screen cast and input injection.
+//! The user approves which monitors to share in the compositor's dialog; each
+//! shared monitor becomes a PipeWire stream the client can pick. Opening a
+//! stream hands back a `pipewiresrc` fragment and an input channel bound to
+//! that monitor.
+//!
+//! The session is only created once a client has been approved, and in
+//! attended mode it is closed again when the last client leaves, and the
+//! grant is never saved: the next client brings up the compositor's dialog
+//! again. Only `--unattended` asks the compositor to remember the grant.
 
-use std::fs;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,12 +21,13 @@ use ashpd::desktop::Session;
 use ashpd::desktop::remote_desktop::{Axis, DeviceType, KeyState, RemoteDesktop, SelectDevicesOptions, StartOptions};
 use ashpd::desktop::screencast::{CursorMode, OpenPipeWireRemoteOptions, Screencast, SelectSourcesOptions, SourceType};
 use ashpd::enumflags2::BitFlags;
+use linuxplay_net::fsutil;
 use linuxplay_proto::input::{InputEvent, MouseButton, POINTER_MAX};
 use linuxplay_proto::signal::MonitorInfo;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::input::InputTx;
+use crate::input::{self, InputTx};
 
 /// A monitor shared through the portal.
 struct PortalMonitor {
@@ -43,7 +48,8 @@ pub struct PortalStream {
     pub source: String,
     pub width: u32,
     pub height: u32,
-    pub input: InputTx,
+    /// `None` for a view-only session: no input task runs at all.
+    pub input: Option<InputTx>,
     /// Keeps the PipeWire fd open and the input task running; dropping it
     /// stops the stream (the session itself stays on the [`PortalHost`]).
     pub _keep: StreamKeep,
@@ -59,15 +65,32 @@ fn token_path() -> PathBuf {
     linuxplay_net::tls::config_dir("host").join("portal-restore-token")
 }
 
+/// Forget the saved grant, so the next session asks the user again.
+pub fn remove_token() -> Result<()> {
+    fsutil::remove(&token_path())
+}
+
 impl PortalHost {
-    /// Set up the portal and ask the user which monitors to share. Shows the
-    /// compositor dialog unless a saved restore token lets it start silently.
-    pub async fn create() -> Result<Arc<Self>> {
+    /// Set up the portal and ask the user which monitors to share. With
+    /// `persist` (unattended mode) a saved restore token may let it start
+    /// silently and the grant is saved for next time; without it the
+    /// compositor dialog always appears and nothing is saved.
+    pub async fn create(persist: bool) -> Result<Arc<Self>> {
         let remote = RemoteDesktop::new().await.context("connecting to the RemoteDesktop portal")?;
         let screencast = Screencast::new().await.context("connecting to the ScreenCast portal")?;
         let session = remote.create_session(Default::default()).await.context("creating a portal session")?;
 
-        let saved = fs::read_to_string(token_path()).ok().filter(|s| !s.trim().is_empty());
+        if !persist {
+            let r = request(&remote, &screencast, &session, None, false).await?;
+            return Self::from_response(remote, screencast, session, r);
+        }
+        let saved = match fsutil::read_private_text(&token_path()) {
+            Ok(t) => t.filter(|s| !s.trim().is_empty()),
+            Err(e) => {
+                warn!("ignoring the saved portal grant: {e:#}");
+                None
+            }
+        };
         let response = match request(&remote, &screencast, &session, saved.as_deref(), true).await {
             Ok(r) => r,
             Err(e) => {
@@ -126,9 +149,19 @@ impl PortalHost {
         self.monitors.iter().map(|m| m.info.clone()).collect()
     }
 
+    /// End the portal session: the compositor stops the share and its
+    /// indicator goes away.
+    pub async fn close(&self) {
+        if let Err(e) = self.session.close().await {
+            debug!("closing the portal session: {e}");
+        }
+        info!("screen share ended");
+    }
+
     /// Start streaming one monitor: a fresh PipeWire fd, a `pipewiresrc`
-    /// fragment capped at `fps`, and an input task bound to that monitor's node.
-    pub async fn open_stream(&self, index: u32, fps: u32) -> Result<PortalStream> {
+    /// fragment capped at `fps`, and (with `control`) an input task bound to
+    /// that monitor's node.
+    pub async fn open_stream(&self, index: u32, fps: u32, control: bool) -> Result<PortalStream> {
         let mon = self
             .monitors
             .iter()
@@ -150,26 +183,25 @@ impl PortalHost {
         );
         let (width, height) = (mon.info.width, mon.info.height);
 
-        let (tx, rx) = mpsc::unbounded_channel::<InputEvent>();
-        tokio::spawn(inject(self.remote.clone(), self.session.clone(), mon.node, (width, height), rx));
+        let input = control.then(|| {
+            let (tx, rx) = input::channel();
+            tokio::spawn(inject(self.remote.clone(), self.session.clone(), mon.node, (width, height), rx));
+            tx
+        });
 
         Ok(PortalStream {
             source,
             width,
             height,
-            input: tx,
+            input,
             _keep: StreamKeep { _fd: fd, _remote: self.remote.clone(), _session: self.session.clone() },
         })
     }
 }
 
 fn save_token(token: &str) {
-    let path = token_path();
-    if let Some(dir) = path.parent() {
-        let _ = fs::create_dir_all(dir);
-    }
-    if let Err(e) = fs::write(&path, token) {
-        warn!("couldn't save the portal restore token: {e}");
+    if let Err(e) = fsutil::write_private(&token_path(), token.as_bytes()) {
+        warn!("couldn't save the portal restore token: {e:#}");
     }
 }
 
@@ -226,7 +258,7 @@ async fn inject(
     session: Arc<Session<RemoteDesktop>>,
     node: u32,
     size: (u32, u32),
-    mut rx: mpsc::UnboundedReceiver<InputEvent>,
+    mut rx: mpsc::Receiver<InputEvent>,
 ) {
     use std::collections::HashSet;
     let (w, h) = (size.0 as f64, size.1 as f64);
@@ -234,18 +266,66 @@ async fn inject(
     let mut buttons: HashSet<MouseButton> = HashSet::new();
     let mut scroll = (0i32, 0i32);
 
-    while let Some(ev) = rx.recv().await {
+    let mut next = None;
+    while let Some(first) = match next.take() {
+        Some(ev) => Some(ev),
+        None => rx.recv().await,
+    } {
+        // Each portal call is a D-Bus round trip, so merge motion that piled
+        // up meanwhile instead of replaying it.
+        let ev = merge_motion(first, &mut rx, &mut next);
         if let Err(e) = apply(&remote, &session, node, (w, h), &mut keys, &mut buttons, &mut scroll, ev).await {
             debug!("portal input: {e}");
         }
     }
 
     for code in keys.drain().collect::<Vec<_>>() {
-        let _ = remote.notify_keyboard_keycode(&session, code as i32, KeyState::Released, Default::default()).await;
+        release_key(&remote, &session, code).await;
     }
     for b in buttons.drain().collect::<Vec<_>>() {
-        let _ = remote.notify_pointer_button(&session, b.evdev() as i32, KeyState::Released, Default::default()).await;
+        release_button(&remote, &session, b).await;
     }
+}
+
+/// Fold queued motion of the same kind into `ev`; the first event of another
+/// kind is left in `next`.
+fn merge_motion(mut ev: InputEvent, rx: &mut mpsc::Receiver<InputEvent>, next: &mut Option<InputEvent>) -> InputEvent {
+    loop {
+        if !matches!(ev, InputEvent::PointerAbs { .. } | InputEvent::PointerRel { .. }) {
+            return ev;
+        }
+        let Ok(more) = rx.try_recv() else { return ev };
+        ev = match (ev, more) {
+            (InputEvent::PointerAbs { .. }, m @ InputEvent::PointerAbs { .. }) => m,
+            (InputEvent::PointerRel { dx, dy }, InputEvent::PointerRel { dx: x, dy: y }) => {
+                InputEvent::PointerRel { dx: dx + x, dy: dy + y }
+            }
+            (ev, other) => {
+                *next = Some(other);
+                return ev;
+            }
+        };
+    }
+}
+
+/// Release a key, retrying once: a key left down on the host is worse than
+/// a duplicate release.
+async fn release_key(remote: &RemoteDesktop, session: &Session<RemoteDesktop>, code: u16) {
+    for _ in 0..2 {
+        if remote.notify_keyboard_keycode(session, code as i32, KeyState::Released, Default::default()).await.is_ok() {
+            return;
+        }
+    }
+    warn!("couldn't release key {code} on the host");
+}
+
+async fn release_button(remote: &RemoteDesktop, session: &Session<RemoteDesktop>, b: MouseButton) {
+    for _ in 0..2 {
+        if remote.notify_pointer_button(session, b.evdev() as i32, KeyState::Released, Default::default()).await.is_ok() {
+            return;
+        }
+    }
+    warn!("couldn't release mouse button {b:?} on the host");
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -287,18 +367,20 @@ async fn apply(
         }
         InputEvent::Key { code, pressed } => {
             if pressed {
+                let r = remote.notify_keyboard_keycode(session, code as i32, KeyState::Pressed, Default::default()).await;
+                // Only track a key as held once the press actually went through.
+                r?;
                 keys.insert(code);
-                remote.notify_keyboard_keycode(session, code as i32, KeyState::Pressed, Default::default()).await?;
             } else if keys.remove(&code) {
-                remote.notify_keyboard_keycode(session, code as i32, KeyState::Released, Default::default()).await?;
+                release_key(remote, session, code).await;
             }
         }
         InputEvent::ReleaseAll => {
             for code in keys.drain().collect::<Vec<_>>() {
-                remote.notify_keyboard_keycode(session, code as i32, KeyState::Released, Default::default()).await?;
+                release_key(remote, session, code).await;
             }
             for b in buttons.drain().collect::<Vec<_>>() {
-                remote.notify_pointer_button(session, b.evdev() as i32, KeyState::Released, Default::default()).await?;
+                release_button(remote, session, b).await;
             }
         }
     }
@@ -309,10 +391,31 @@ fn state(pressed: bool) -> KeyState {
     if pressed { KeyState::Pressed } else { KeyState::Released }
 }
 
-/// 1/120th-notch units in; whole steps out, keeping the remainder.
+/// Most discrete steps one scroll event may become.
+const MAX_STEPS: i32 = crate::input::MAX_SCROLL / 120;
+
+/// 1/120th-notch units in; whole steps out (at most [`MAX_STEPS`] either
+/// way), keeping a remainder under one notch. Saturates, never overflows.
 fn take_steps(acc: &mut i32, delta: i32) -> i32 {
-    *acc += delta;
-    let steps = *acc / 120;
-    *acc -= steps * 120;
+    *acc = acc.saturating_add(delta);
+    let steps = (*acc / 120).clamp(-MAX_STEPS, MAX_STEPS);
+    *acc = (*acc - steps * 120).clamp(-119, 119);
     steps
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hostile_scroll_steps_are_bounded() {
+        let mut acc = 0;
+        assert_eq!(take_steps(&mut acc, i32::MAX), MAX_STEPS);
+        assert_eq!(take_steps(&mut acc, i32::MIN), -MAX_STEPS);
+        assert!(acc.abs() < 120);
+        let mut acc = 0;
+        assert_eq!(take_steps(&mut acc, 60), 0);
+        assert_eq!(take_steps(&mut acc, 60), 1);
+        assert_eq!(acc, 0);
+    }
 }

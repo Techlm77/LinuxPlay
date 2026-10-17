@@ -3,6 +3,7 @@ mod known_hosts;
 mod launcher;
 mod media;
 mod stream;
+mod tailnet;
 
 use std::cell::RefCell;
 use std::rc::Rc;

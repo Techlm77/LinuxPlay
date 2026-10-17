@@ -8,9 +8,10 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, UdpSocket};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use linuxplay_proto::signal::VideoCodec;
 use linuxplay_proto::{CONTROL_CHANNEL, INPUT_CHANNEL};
 use str0m::bwe::{Bitrate, BweKind};
@@ -19,8 +20,17 @@ use str0m::channel::{ChannelConfig, ChannelId, Reliability};
 use str0m::media::{Direction, Frequency, KeyframeRequestKind, MediaKind, MediaTime, Mid, Pt};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tracing::{debug, info, warn};
+
+/// Commands waiting for the session thread. Small: a session that can't keep
+/// up should drop work, not buffer it.
+const CMD_QUEUE: usize = 64;
+/// At most this many encoded video frames wait to be sent (about 130 ms at
+/// 60 fps); newer frames are dropped instead of queueing old desktop video.
+const MAX_QUEUED_VIDEO_FRAMES: usize = 8;
+/// And at most this many bytes of them.
+const MAX_QUEUED_VIDEO_BYTES: usize = 8 << 20;
 
 /// How long a gap in the video may wait for a retransmission before the
 /// frame is given up on. A LAN round trip is a millisecond or two; anything
@@ -79,44 +89,98 @@ enum Cmd {
     Send(Channel, Vec<u8>),
     RequestKeyframe,
     DesiredBitrate(u64),
-    Close,
+}
+
+/// State shared between the handles and the session thread.
+#[derive(Default)]
+struct Shared {
+    /// Stored permit: a close is never lost, even when the queue is full.
+    close: Notify,
+    closed: AtomicBool,
+    queued_video_frames: AtomicUsize,
+    queued_video_bytes: AtomicUsize,
+    dropped_video: AtomicU64,
+    dropped_other: AtomicU64,
+}
+
+/// Work the session dropped because it couldn't keep up.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Drops {
+    pub video_frames: u64,
+    pub other: u64,
 }
 
 /// Cheap handle to a running session; dropping every handle closes it.
 #[derive(Clone)]
 pub struct SessionHandle {
-    tx: mpsc::UnboundedSender<Cmd>,
+    tx: mpsc::Sender<Cmd>,
+    shared: Arc<Shared>,
 }
 
 impl SessionHandle {
-    /// Queue an encoded video frame. `pts` counts from the start of the stream.
-    pub fn write_video(&self, data: Vec<u8>, pts: Duration) {
-        let _ = self.tx.send(Cmd::Video { data, pts });
+    fn new() -> (Self, mpsc::Receiver<Cmd>) {
+        let (tx, rx) = mpsc::channel(CMD_QUEUE);
+        (Self { tx, shared: Arc::default() }, rx)
+    }
+
+    /// Queue an encoded video frame. `pts` counts from the start of the
+    /// stream. Returns false if the frame was dropped because the session is
+    /// behind; the caller should then send a keyframe soon, as the frames
+    /// after a gap can't be decoded.
+    pub fn write_video(&self, data: Vec<u8>, pts: Duration) -> bool {
+        let s = &self.shared;
+        let len = data.len();
+        let frames = s.queued_video_frames.fetch_add(1, Ordering::AcqRel);
+        let bytes = s.queued_video_bytes.fetch_add(len, Ordering::AcqRel);
+        let fits = frames < MAX_QUEUED_VIDEO_FRAMES && bytes + len <= MAX_QUEUED_VIDEO_BYTES;
+        if fits && self.tx.try_send(Cmd::Video { data, pts }).is_ok() {
+            return true;
+        }
+        s.queued_video_frames.fetch_sub(1, Ordering::AcqRel);
+        s.queued_video_bytes.fetch_sub(len, Ordering::AcqRel);
+        s.dropped_video.fetch_add(1, Ordering::Relaxed);
+        false
     }
 
     pub fn write_audio(&self, data: Vec<u8>, pts: Duration) {
-        let _ = self.tx.send(Cmd::Audio { data, pts });
+        self.try_send(Cmd::Audio { data, pts });
     }
 
     pub fn send(&self, channel: Channel, data: Vec<u8>) {
-        let _ = self.tx.send(Cmd::Send(channel, data));
+        self.try_send(Cmd::Send(channel, data));
     }
 
     pub fn request_keyframe(&self) {
-        let _ = self.tx.send(Cmd::RequestKeyframe);
+        self.try_send(Cmd::RequestKeyframe);
     }
 
     /// Tell the bandwidth estimator how much we would like to send.
     pub fn set_desired_bitrate(&self, bps: u64) {
-        let _ = self.tx.send(Cmd::DesiredBitrate(bps));
+        self.try_send(Cmd::DesiredBitrate(bps));
+    }
+
+    fn try_send(&self, cmd: Cmd) {
+        if self.tx.try_send(cmd).is_err() {
+            self.shared.dropped_other.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub fn close(&self) {
-        let _ = self.tx.send(Cmd::Close);
+        if !self.shared.closed.swap(true, Ordering::AcqRel) {
+            self.shared.close.notify_one();
+        }
     }
 
     pub fn is_closed(&self) -> bool {
-        self.tx.is_closed()
+        self.shared.closed.load(Ordering::Acquire) || self.tx.is_closed()
+    }
+
+    /// Everything dropped since the last call.
+    pub fn take_drops(&self) -> Drops {
+        Drops {
+            video_frames: self.shared.dropped_video.swap(0, Ordering::Relaxed),
+            other: self.shared.dropped_other.swap(0, Ordering::Relaxed),
+        }
     }
 }
 
@@ -129,6 +193,8 @@ pub struct OfferOptions {
     pub audio: bool,
     /// Starting point for the bandwidth estimator, bits per second.
     pub start_bitrate: u64,
+    /// UDP ports the media socket may use (inclusive); `None` lets the OS pick.
+    pub ports: Option<(u16, u16)>,
 }
 
 fn base_config() -> RtcConfig {
@@ -146,8 +212,24 @@ fn enable_codec(cfg: RtcConfig, codec: VideoCodec) -> RtcConfig {
     }
 }
 
-fn bind(local_ip: IpAddr, rtc: &mut Rtc) -> Result<UdpSocket> {
-    let socket = UdpSocket::bind((local_ip, 0)).context("binding the media UDP socket")?;
+/// Bind the media socket on `local_ip`, on the first free port of `ports`
+/// (or any port).
+fn bind_socket(local_ip: IpAddr, ports: Option<(u16, u16)>) -> Result<UdpSocket> {
+    let Some((first, last)) = ports else {
+        return UdpSocket::bind((local_ip, 0)).context("binding the media UDP socket");
+    };
+    for port in first..=last {
+        match UdpSocket::bind((local_ip, port)) {
+            Ok(s) => return Ok(s),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(e) => return Err(e).with_context(|| format!("binding media port {local_ip}:{port}")),
+        }
+    }
+    bail!("all media ports {first}-{last} on {local_ip} are in use")
+}
+
+fn bind(local_ip: IpAddr, ports: Option<(u16, u16)>, rtc: &mut Rtc) -> Result<UdpSocket> {
+    let socket = bind_socket(local_ip, ports)?;
     let addr = socket.local_addr()?;
     let candidate = Candidate::host(addr, "udp").map_err(|e| anyhow!("host candidate {addr}: {e}"))?;
     rtc.add_local_candidate(candidate);
@@ -173,7 +255,7 @@ pub fn create_offer(local_ip: IpAddr, opts: &OfferOptions) -> Result<(PendingSes
         cfg = cfg.enable_opus(true, false);
     }
     let mut rtc = cfg.build(Instant::now());
-    let socket = bind(local_ip, &mut rtc)?;
+    let socket = bind(local_ip, opts.ports, &mut rtc)?;
 
     let mut api = rtc.sdp_api();
     let stream = Some("linuxplay".to_string());
@@ -217,7 +299,7 @@ pub fn accept_offer(local_ip: IpAddr, offer_sdp: &str, on_event: EventHandler) -
         cfg = enable_codec(cfg, codec);
     }
     let mut rtc = cfg.build(Instant::now());
-    let socket = bind(local_ip, &mut rtc)?;
+    let socket = bind(local_ip, None, &mut rtc)?;
 
     let offer = SdpOffer::from_sdp_string(offer_sdp).context("parsing the SDP offer")?;
     let answer = rtc.sdp_api().accept_offer(offer).context("accepting the SDP offer")?;
@@ -226,7 +308,8 @@ pub fn accept_offer(local_ip: IpAddr, offer_sdp: &str, on_event: EventHandler) -
 }
 
 fn spawn(rtc: Rtc, socket: UdpSocket, mut state: LoopState) -> Result<SessionHandle> {
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (handle, rx) = SessionHandle::new();
+    let shared = handle.shared.clone();
     socket.set_nonblocking(true)?;
     std::thread::Builder::new()
         .name("linuxplay-rtc".into())
@@ -235,16 +318,22 @@ fn spawn(rtc: Rtc, socket: UdpSocket, mut state: LoopState) -> Result<SessionHan
                 .enable_all()
                 .build()
                 .expect("tokio runtime");
-            let result = rt.block_on(run(rtc, socket, rx, &mut state));
+            let result = rt.block_on(run(rtc, socket, rx, &shared, &mut state));
             if let Err(e) = &result {
                 warn!("session ended: {e:#}");
             }
             (state.on_event)(SessionEvent::Closed(result.err().map(|e| format!("{e:#}"))));
         })?;
-    Ok(SessionHandle { tx })
+    Ok(handle)
 }
 
-async fn run(mut rtc: Rtc, socket: UdpSocket, mut rx: mpsc::UnboundedReceiver<Cmd>, st: &mut LoopState) -> Result<()> {
+async fn run(
+    mut rtc: Rtc,
+    socket: UdpSocket,
+    mut rx: mpsc::Receiver<Cmd>,
+    shared: &Shared,
+    st: &mut LoopState,
+) -> Result<()> {
     let socket = tokio::net::UdpSocket::from_std(socket)?;
     let local = socket.local_addr()?;
     let mut buf = vec![0u8; 2048];
@@ -274,12 +363,23 @@ async fn run(mut rtc: Rtc, socket: UdpSocket, mut rx: mpsc::UnboundedReceiver<Cm
         }
 
         tokio::select! {
+            biased;
+            _ = shared.close.notified() => {
+                rtc.disconnect();
+                return Ok(());
+            }
             cmd = rx.recv() => match cmd {
-                None | Some(Cmd::Close) => {
+                None => {
                     rtc.disconnect();
                     return Ok(());
                 }
-                Some(cmd) => st.apply(&mut rtc, cmd)?,
+                Some(cmd) => {
+                    if let Cmd::Video { data, .. } = &cmd {
+                        shared.queued_video_frames.fetch_sub(1, Ordering::AcqRel);
+                        shared.queued_video_bytes.fetch_sub(data.len(), Ordering::AcqRel);
+                    }
+                    st.apply(&mut rtc, cmd)?
+                }
             },
             r = socket.recv_from(&mut buf) => {
                 let (n, source) = r?;
@@ -361,7 +461,9 @@ impl LoopState {
                 }
             }
             Event::ChannelData(d) => {
-                if let Some(&ch) = self.channels.get(&d.id) {
+                if d.data.len() > linuxplay_proto::MAX_CONTROL_MESSAGE {
+                    debug!("dropping a {} byte data channel message", d.data.len());
+                } else if let Some(&ch) = self.channels.get(&d.id) {
                     (self.on_event)(SessionEvent::Data(ch, d.data));
                 }
             }
@@ -397,7 +499,6 @@ impl LoopState {
             }
             Cmd::RequestKeyframe => self.request_keyframe(rtc),
             Cmd::DesiredBitrate(bps) => rtc.bwe().set_desired_bitrate(Bitrate::bps(bps)),
-            Cmd::Close => unreachable!("handled by the loop"),
         }
         Ok(())
     }
@@ -437,4 +538,63 @@ fn write_media(
     let ticks = (pts.as_nanos() * clock.get() as u128 / 1_000_000_000) as u64;
     writer.write(pt, Instant::now(), MediaTime::new(ticks, clock), data)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A session thread that has stalled must not let queued video grow:
+    /// frames beyond the cap are dropped and counted, and a close still gets
+    /// through a full queue.
+    #[test]
+    fn stalled_session_bounds_the_queue() {
+        let (handle, mut rx) = SessionHandle::new();
+        let mut accepted = 0;
+        for i in 0..10_000u32 {
+            if handle.write_video(vec![0u8; 100_000], Duration::from_millis(i as u64)) {
+                accepted += 1;
+            }
+            handle.send(Channel::Control, vec![1; 10]);
+            handle.write_audio(vec![2; 100], Duration::ZERO);
+        }
+        assert_eq!(accepted, MAX_QUEUED_VIDEO_FRAMES);
+        let drops = handle.take_drops();
+        assert_eq!(drops.video_frames, 10_000 - MAX_QUEUED_VIDEO_FRAMES as u64);
+        assert!(drops.other > 0);
+
+        let mut queued = 0;
+        while rx.try_recv().is_ok() {
+            queued += 1;
+        }
+        assert_eq!(queued, CMD_QUEUE);
+
+        handle.close();
+        assert!(handle.is_closed());
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(1), handle.shared.close.notified())
+                .await
+                .expect("close is never lost");
+        });
+    }
+
+    #[test]
+    fn media_ports_come_from_the_range() {
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        // Find two free adjacent ports, then hold the first.
+        let probe = UdpSocket::bind((ip, 0)).unwrap();
+        let base = probe.local_addr().unwrap().port().clamp(1024, 65000);
+        drop(probe);
+        let range = (base, base + 3);
+        let a = bind_socket(ip, Some(range)).unwrap();
+        let b = bind_socket(ip, Some(range)).unwrap();
+        let pa = a.local_addr().unwrap().port();
+        let pb = b.local_addr().unwrap().port();
+        assert!((range.0..=range.1).contains(&pa) && (range.0..=range.1).contains(&pb));
+        assert_ne!(pa, pb);
+        let _c = bind_socket(ip, Some(range));
+        let _d = bind_socket(ip, Some(range));
+        assert!(bind_socket(ip, Some(range)).is_err(), "a full range must fail, not fall back to any port");
+    }
 }

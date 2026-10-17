@@ -50,3 +50,31 @@ jobs:
             cargo build --release --locked
             cargo test --release --locked
           '
+
+  # Static checks: fail on clippy's correctness and suspicious lints (style
+  # lints only warn, so a new clippy release can't break the build).
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clippy
+        run: |
+          docker run --rm -v "$PWD":/src:ro archlinux:latest bash -euc '
+            pacman -Syu --noconfirm --needed base-devel cmake curl gstreamer gst-plugins-base gtk4 libadwaita
+            curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy
+            . "$HOME/.cargo/env"
+            cd /src
+            export CARGO_TARGET_DIR=/tmp/target
+            cargo clippy --workspace --all-targets --locked -- -D clippy::correctness -D clippy::suspicious
+          '
+
+  # Known vulnerabilities in dependencies (RustSec advisory database).
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

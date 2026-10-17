@@ -57,6 +57,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Signal<S> {
         self.recv().await?.ok_or_else(|| anyhow!("connection closed"))
     }
 
+    /// [`expect`](Self::expect) with a deadline, so a stalled peer can't hold
+    /// a handshake stage open. `stage` names what was awaited, for the error.
+    pub async fn expect_within<T: DeserializeOwned>(&mut self, limit: Duration, stage: &str) -> Result<T> {
+        tokio::time::timeout(limit, self.expect())
+            .await
+            .map_err(|_| anyhow!("timed out waiting for {stage}"))?
+    }
+
     pub async fn close(&mut self) {
         let _ = self.ws.close(None).await;
     }
@@ -72,8 +80,10 @@ pub struct Accepted {
 }
 
 pub async fn accept(tcp: TcpStream, acceptor: &TlsAcceptor) -> Result<Accepted> {
-    let local_ip = tcp.local_addr()?.ip();
+    // IPv4-mapped IPv6 addresses are reported as plain IPv4.
+    let local_ip = tcp.local_addr()?.ip().to_canonical();
     let peer = tcp.peer_addr()?;
+    let peer = SocketAddr::new(peer.ip().to_canonical(), peer.port());
     tcp.set_nodelay(true)?;
     let fut = async {
         let tls = acceptor.accept(tcp).await.context("TLS handshake")?;
@@ -127,7 +137,7 @@ pub async fn connect(host: &str, port: u16, identity: &Identity) -> Result<Conne
             .await
             .with_context(|| format!("connecting to {host}:{port}"))?;
         tcp.set_nodelay(true)?;
-        let local_ip = tcp.local_addr()?.ip();
+        let local_ip = tcp.local_addr()?.ip().to_canonical();
         let connector = TlsConnector::from(Arc::new(identity.client_config()?));
         // The name is not checked; the fingerprint is.
         let name = rustls::pki_types::ServerName::try_from("linuxplay.host")?.to_owned();
