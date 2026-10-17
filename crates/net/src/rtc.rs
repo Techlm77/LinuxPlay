@@ -27,8 +27,9 @@ use tracing::{debug, info, warn};
 /// later than this is better fixed with a keyframe than waited for.
 const VIDEO_REORDER_TIMEOUT: Duration = Duration::from_millis(120);
 
-/// Don't ask the host for keyframes more often than this.
-const KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_millis(500);
+/// Don't ask the host for keyframes more often than this. Short, so a frame
+/// corrupted by a lost packet is repaired quickly instead of smearing.
+const KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Channel {

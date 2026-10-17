@@ -109,10 +109,14 @@ fn configure(el: &gst::Element, enc: &Encoder, fps: u32) {
     match enc.backend {
         Backend::Va => {
             set(el, "rate-control", "vbr");
-            set(el, "target-percentage", "90");
-            set(el, "target-usage", "6");
+            set(el, "target-percentage", "95");
+            // 1 (best quality) .. 7 (fastest). The fastest preset blocks up
+            // badly on video; 4 is a good quality/latency balance for a GPU.
+            set(el, "target-usage", "4");
+            // Spread bits to the busy blocks so motion doesn't smear.
+            set(el, "mbbrc", "1");
             set(el, "b-frames", "0");
-            set(el, "ref-frames", "1");
+            set(el, "ref-frames", "2");
             set(el, "key-int-max", &gop);
         }
         Backend::Nvenc => {
