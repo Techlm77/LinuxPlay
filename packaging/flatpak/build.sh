@@ -10,6 +10,10 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 manifest="$here/io.github.techlm77.LinuxPlay.yml"
 
+# Make sure Flathub is available for user installs.
+flatpak remote-add --user --if-not-exists flathub \
+    https://dl.flathub.org/repo/flathub.flatpakrepo
+
 # GNOME 51 is based on Freedesktop 26.08; the Rust SDK extension must match.
 echo "Ensuring the runtime, SDK and build tools are installed…"
 flatpak install -y --user flathub \

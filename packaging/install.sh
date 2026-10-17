@@ -3,6 +3,7 @@
 #
 #   ./packaging/install.sh            # install for the current user (~/.local)
 #   sudo PREFIX=/usr/local ./packaging/install.sh   # install system-wide
+#   ./packaging/install.sh uninstall  # remove a previous install
 #
 # No arguments are needed for the common case.
 set -euo pipefail
@@ -13,6 +14,18 @@ cd "$here"
 prefix="${PREFIX:-$HOME/.local}"
 pkg="packaging"
 appid="io.github.techlm77.LinuxPlay"
+
+if [[ "${1:-}" == "uninstall" ]]; then
+    echo "Removing LinuxPlay from $prefix …"
+    rm -f "$prefix/bin/linuxplay" "$prefix/bin/linuxplay-host" \
+          "$prefix/share/applications/$appid.desktop" \
+          "$prefix/share/applications/$appid.Host.desktop" \
+          "$prefix/share/icons/hicolor/scalable/apps/$appid.svg"
+    update-desktop-database "$prefix/share/applications" 2>/dev/null || true
+    gtk-update-icon-cache -f -t "$prefix/share/icons/hicolor" 2>/dev/null || true
+    echo "Done."
+    exit 0
+fi
 
 echo "Building (release)…"
 cargo build --release
