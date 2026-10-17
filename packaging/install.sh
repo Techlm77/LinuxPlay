@@ -24,6 +24,12 @@ install -Dm644 "$pkg/$appid.desktop"          "$prefix/share/applications/$appid
 install -Dm644 "$pkg/$appid.Host.desktop"     "$prefix/share/applications/$appid.Host.desktop"
 install -Dm644 "$pkg/$appid.svg"              "$prefix/share/icons/hicolor/scalable/apps/$appid.svg"
 
+# Point Exec at the absolute binary path: a graphical session's PATH often
+# does not include ~/.local/bin, so a bare "Exec=linuxplay" would not launch.
+sed -i "s|^Exec=linuxplay|Exec=$prefix/bin/linuxplay|" \
+    "$prefix/share/applications/$appid.desktop" \
+    "$prefix/share/applications/$appid.Host.desktop"
+
 # Refresh the desktop and icon caches so the menu entries show up at once.
 update-desktop-database "$prefix/share/applications" 2>/dev/null || true
 gtk-update-icon-cache -f -t "$prefix/share/icons/hicolor" 2>/dev/null || true
