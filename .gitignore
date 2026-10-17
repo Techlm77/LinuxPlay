@@ -1,7 +1,3 @@
 /target
 *.log
 
-# flatpak build output
-packaging/flatpak/build/
-packaging/flatpak/.flatpak-builder/
-packaging/flatpak/repo/

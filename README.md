@@ -31,15 +31,10 @@ and two **application‑menu entries** so you never need the terminal:
 
 Install system‑wide with `sudo PREFIX=/usr/local ./packaging/install.sh`.
 
-### Flatpak
-
-```
-./packaging/flatpak/build.sh
-```
-
-Builds and installs a sandboxed Flatpak (GNOME runtime, no root needed — it
-uses `flatpak-builder` from Flathub). The same two menu entries appear, and it
-runs as `flatpak run io.github.techlm77.LinuxPlay`.
+The host builds with just GStreamer; the client (GUI) also needs GTK4 and
+libadwaita. On a machine you only want to *share* (a host), the installer skips
+the client automatically if those aren't present and installs just **LinuxPlay
+Host**.
 
 ## Build and run manually
 
