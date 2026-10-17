@@ -1,0 +1,27 @@
+[package]
+name = "linuxplay-net"
+description = "WebRTC sessions, TLS identities and pairing for LinuxPlay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+linuxplay-proto.workspace = true
+
+anyhow.workspace = true
+base64.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+hmac.workspace = true
+rand.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+spake2.workspace = true
+str0m.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true

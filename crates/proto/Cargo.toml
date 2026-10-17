@@ -1,0 +1,11 @@
+[package]
+name = "linuxplay-proto"
+description = "Wire protocol shared by the LinuxPlay host and client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+postcard.workspace = true
+serde.workspace = true
+serde_json.workspace = true

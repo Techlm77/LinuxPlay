@@ -1,0 +1,47 @@
+[workspace]
+resolver = "3"
+members = ["crates/proto", "crates/net", "crates/host", "crates/client"]
+
+[workspace.package]
+version = "2.0.0-dev"
+edition = "2024"
+license = "GPL-3.0-or-later"
+authors = ["Techlm77"]
+repository = "https://github.com/Techlm77/LinuxPlay"
+rust-version = "1.85"
+
+[workspace.dependencies]
+linuxplay-proto = { path = "crates/proto" }
+linuxplay-net = { path = "crates/net" }
+
+anyhow = "1"
+async-channel = "2"
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "6"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+gstreamer = { version = "0.25", features = ["v1_20"] }
+gstreamer-app = "0.25"
+gstreamer-video = "0.25"
+base64 = "0.22"
+hex = "0.4"
+hmac = "0.12"
+postcard = { version = "1", features = ["use-std"] }
+rand = "0.9"
+rcgen = "0.14"
+rustls = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+spake2 = "0.4"
+sha2 = "0.10"
+str0m = { version = "0.24", default-features = false, features = ["aws-lc-rs"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros", "io-util", "signal", "fs"] }
+tokio-rustls = "0.26"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+debug = "line-tables-only"
