@@ -1,89 +1,180 @@
 //! Wayland capture and input through the desktop portals.
 //!
-//! One RemoteDesktop session carries both the screen cast (a PipeWire node we
-//! feed to `pipewiresrc`) and input injection. The first time the host runs it
-//! shows the compositor's share dialog; the returned restore token is saved so
-//! later sessions start silently.
+//! One RemoteDesktop session (created once per host run) carries the screen
+//! cast and input injection. The user approves which monitors to share in the
+//! compositor's dialog; each shared monitor becomes a PipeWire stream the
+//! client can pick. Opening a stream hands back a `pipewiresrc` fragment and an
+//! input channel bound to that monitor.
 
 use std::fs;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use ashpd::desktop::PersistMode;
+use ashpd::desktop::Session;
 use ashpd::desktop::remote_desktop::{Axis, DeviceType, KeyState, RemoteDesktop, SelectDevicesOptions, StartOptions};
 use ashpd::desktop::screencast::{CursorMode, OpenPipeWireRemoteOptions, Screencast, SelectSourcesOptions, SourceType};
-use ashpd::desktop::Session;
 use ashpd::enumflags2::BitFlags;
 use linuxplay_proto::input::{InputEvent, MouseButton, POINTER_MAX};
+use linuxplay_proto::signal::MonitorInfo;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::input::InputTx;
 
-/// An open portal capture: the pipewire source fragment, the stream size, a
-/// channel for input, and the resources that must outlive the stream.
-pub struct PortalCapture {
+/// A monitor shared through the portal.
+struct PortalMonitor {
+    info: MonitorInfo,
+    node: u32,
+}
+
+/// The host-wide portal session, created once and shared by every stream.
+pub struct PortalHost {
+    remote: Arc<RemoteDesktop>,
+    screencast: Arc<Screencast>,
+    session: Arc<Session<RemoteDesktop>>,
+    monitors: Vec<PortalMonitor>,
+}
+
+/// One running screen-cast stream for a single monitor.
+pub struct PortalStream {
     pub source: String,
     pub width: u32,
     pub height: u32,
     pub input: InputTx,
-    /// Keeps the portal session, the pipewire fd and the input task alive;
-    /// dropping it closes the session and ends the input task.
-    pub _keep: Keep,
+    /// Keeps the PipeWire fd open and the input task running; dropping it
+    /// stops the stream (the session itself stays on the [`PortalHost`]).
+    pub _keep: StreamKeep,
 }
 
-pub struct Keep {
-    _session: Arc<Session<RemoteDesktop>>,
-    _remote: Arc<RemoteDesktop>,
+pub struct StreamKeep {
     _fd: OwnedFd,
+    _remote: Arc<RemoteDesktop>,
+    _session: Arc<Session<RemoteDesktop>>,
 }
 
 fn token_path() -> PathBuf {
     linuxplay_net::tls::config_dir("host").join("portal-restore-token")
 }
 
-/// Set up the portals and start an input-injection task.
-pub async fn open(_fps: u32) -> Result<PortalCapture> {
-    let remote = RemoteDesktop::new().await.context("connecting to the RemoteDesktop portal")?;
-    let screencast = Screencast::new().await.context("connecting to the ScreenCast portal")?;
+impl PortalHost {
+    /// Set up the portal and ask the user which monitors to share. Shows the
+    /// compositor dialog unless a saved restore token lets it start silently.
+    pub async fn create() -> Result<Arc<Self>> {
+        let remote = RemoteDesktop::new().await.context("connecting to the RemoteDesktop portal")?;
+        let screencast = Screencast::new().await.context("connecting to the ScreenCast portal")?;
+        let session = remote.create_session(Default::default()).await.context("creating a portal session")?;
 
-    let session = remote.create_session(Default::default()).await.context("creating a portal session")?;
-
-    // A saved restore token lets GNOME re-grant silently. KDE rejects
-    // persistence on remote-desktop sessions, so we fall back to a fresh
-    // (dialog-prompted) grant there.
-    let saved = fs::read_to_string(token_path()).ok().filter(|s| !s.trim().is_empty());
-
-    let response = match request(&remote, &screencast, &session, saved.as_deref(), true).await {
-        Ok(r) => r,
-        Err(e) => {
-            // Either the token is stale or this compositor (e.g. KDE) refuses
-            // to persist remote-desktop sessions; retry with a fresh,
-            // non-persistent session that prompts the share dialog.
-            debug!("portal persist attempt failed, retrying without persistence: {e:#}");
-            let session = remote.create_session(Default::default()).await.context("recreating a portal session")?;
-            let r = request(&remote, &screencast, &session, None, false).await?;
-            return finish(remote, screencast, session, r).await;
+        let saved = fs::read_to_string(token_path()).ok().filter(|s| !s.trim().is_empty());
+        let response = match request(&remote, &screencast, &session, saved.as_deref(), true).await {
+            Ok(r) => r,
+            Err(e) => {
+                debug!("portal persist attempt failed, retrying without persistence: {e:#}");
+                let session = remote.create_session(Default::default()).await.context("recreating a portal session")?;
+                let r = request(&remote, &screencast, &session, None, false).await?;
+                return Self::from_response(remote, screencast, session, r);
+            }
+        };
+        if let Some(token) = response.restore_token() {
+            save_token(token);
         }
-    };
-
-    if let Some(new_token) = response.restore_token() {
-        let path = token_path();
-        if let Some(dir) = path.parent() {
-            let _ = fs::create_dir_all(dir);
-        }
-        if let Err(e) = fs::write(&path, new_token) {
-            warn!("couldn't save the portal restore token: {e}");
-        }
+        Self::from_response(remote, screencast, session, response)
     }
 
-    finish(remote, screencast, session, response).await
+    fn from_response(
+        remote: RemoteDesktop,
+        screencast: Screencast,
+        session: Session<RemoteDesktop>,
+        response: ashpd::desktop::remote_desktop::SelectedDevices,
+    ) -> Result<Arc<Self>> {
+        let mut monitors = Vec::new();
+        for (index, stream) in response.streams().iter().enumerate() {
+            let (width, height) = stream.size().map(|(w, h)| (w as u32, h as u32)).unwrap_or((0, 0));
+            let (x, y) = stream.position().unwrap_or((0, 0));
+            monitors.push(PortalMonitor {
+                info: MonitorInfo {
+                    index: index as u32,
+                    name: format!("Display {}", index + 1),
+                    width,
+                    height,
+                    x,
+                    y,
+                    primary: index == 0,
+                },
+                node: stream.pipe_wire_node_id(),
+            });
+        }
+        if monitors.is_empty() {
+            return Err(anyhow!("the portal shared no monitors"));
+        }
+        info!(
+            "portal sharing {} monitor(s): {}",
+            monitors.len(),
+            monitors.iter().map(|m| format!("{} {}x{}", m.info.name, m.info.width, m.info.height)).collect::<Vec<_>>().join(", "),
+        );
+        Ok(Arc::new(Self {
+            remote: Arc::new(remote),
+            screencast: Arc::new(screencast),
+            session: Arc::new(session),
+            monitors,
+        }))
+    }
+
+    pub fn monitors(&self) -> Vec<MonitorInfo> {
+        self.monitors.iter().map(|m| m.info.clone()).collect()
+    }
+
+    /// Start streaming one monitor: a fresh PipeWire fd, a `pipewiresrc`
+    /// fragment capped at `fps`, and an input task bound to that monitor's node.
+    pub async fn open_stream(&self, index: u32, fps: u32) -> Result<PortalStream> {
+        let mon = self
+            .monitors
+            .iter()
+            .find(|m| m.info.index == index)
+            .ok_or_else(|| anyhow!("no such monitor {index}"))?;
+
+        let fd = self
+            .screencast
+            .open_pipe_wire_remote(&self.session, OpenPipeWireRemoteOptions::default())
+            .await
+            .context("opening the PipeWire remote")?;
+        // Cap the framerate during PipeWire negotiation: a high-refresh
+        // monitor otherwise delivers (and we'd encode) far more than needed.
+        let source = format!(
+            "pipewiresrc fd={} path={} do-timestamp=true keepalive-time=1000 \
+             ! video/x-raw,max-framerate={fps}/1",
+            fd.as_raw_fd(),
+            mon.node,
+        );
+        let (width, height) = (mon.info.width, mon.info.height);
+
+        let (tx, rx) = mpsc::unbounded_channel::<InputEvent>();
+        tokio::spawn(inject(self.remote.clone(), self.session.clone(), mon.node, (width, height), rx));
+
+        Ok(PortalStream {
+            source,
+            width,
+            height,
+            input: tx,
+            _keep: StreamKeep { _fd: fd, _remote: self.remote.clone(), _session: self.session.clone() },
+        })
+    }
 }
 
-/// Select devices and sources, then start. `persist` asks the compositor to
-/// remember the grant (not all do).
+fn save_token(token: &str) {
+    let path = token_path();
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    if let Err(e) = fs::write(&path, token) {
+        warn!("couldn't save the portal restore token: {e}");
+    }
+}
+
+/// Select devices and all monitors, then start. `persist` asks the compositor
+/// to remember the grant (not every compositor allows it).
 async fn request(
     remote: &RemoteDesktop,
     screencast: &Screencast,
@@ -102,19 +193,20 @@ async fn request(
         )
         .await
         .context("selecting input devices")?;
-    let monitor: BitFlags<SourceType> = SourceType::Monitor.into();
+    let monitors: BitFlags<SourceType> = SourceType::Monitor.into();
     screencast
         .select_sources(
             session,
             SelectSourcesOptions::default()
                 .set_cursor_mode(CursorMode::Embedded)
-                .set_sources(monitor)
-                .set_multiple(false)
+                .set_sources(monitors)
+                // Let the user pick more than one monitor to make available.
+                .set_multiple(true)
                 .set_restore_token(token)
                 .set_persist_mode(mode),
         )
         .await
-        .context("selecting the screen to share")?;
+        .context("selecting the screens to share")?;
     if token.is_none() {
         info!("waiting for the screen-share dialog to be accepted…");
     }
@@ -126,48 +218,9 @@ async fn request(
         .context("the screen-share request was denied")
 }
 
-/// Turn a started session into a running capture.
-async fn finish(
-    remote: RemoteDesktop,
-    screencast: Screencast,
-    session: Session<RemoteDesktop>,
-    response: ashpd::desktop::remote_desktop::SelectedDevices,
-) -> Result<PortalCapture> {
-    let stream = response.streams().first().context("the portal returned no video stream")?;
-    let (width, height) = stream
-        .size()
-        .map(|(w, h)| (w as u32, h as u32))
-        .context("the portal stream has no size")?;
-    let node = stream.pipe_wire_node_id();
-
-    let fd = screencast
-        .open_pipe_wire_remote(&session, OpenPipeWireRemoteOptions::default())
-        .await
-        .context("opening the PipeWire remote")?;
-
-    let source = format!(
-        "pipewiresrc fd={} path={} do-timestamp=true keepalive-time=1000",
-        fd.as_raw_fd(),
-        node,
-    );
-    info!("portal capture: monitor {width}x{height}, pipewire node {node}");
-
-    let remote = Arc::new(remote);
-    let session = Arc::new(session);
-    let (tx, rx) = mpsc::unbounded_channel::<InputEvent>();
-    tokio::spawn(inject(remote.clone(), session.clone(), node, (width, height), rx));
-
-    Ok(PortalCapture {
-        source,
-        width,
-        height,
-        input: tx,
-        _keep: Keep { _session: session, _remote: remote, _fd: fd },
-    })
-}
-
-/// Pump input events into the RemoteDesktop portal until the channel closes,
-/// then release anything still held.
+/// Pump input into the RemoteDesktop portal for one monitor until the channel
+/// closes, then release anything still held. Absolute motion is addressed to
+/// this monitor's `node`; buttons and keys are global to the session.
 async fn inject(
     remote: Arc<RemoteDesktop>,
     session: Arc<Session<RemoteDesktop>>,
@@ -187,14 +240,12 @@ async fn inject(
         }
     }
 
-    // The client went away; lift every key and button it left down.
     for code in keys.drain().collect::<Vec<_>>() {
         let _ = remote.notify_keyboard_keycode(&session, code as i32, KeyState::Released, Default::default()).await;
     }
     for b in buttons.drain().collect::<Vec<_>>() {
         let _ = remote.notify_pointer_button(&session, b.evdev() as i32, KeyState::Released, Default::default()).await;
     }
-    let _ = session.close().await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -225,7 +276,6 @@ async fn apply(
             }
         }
         InputEvent::Scroll { dx, dy } => {
-            // The portal takes whole wheel steps; bank the remainder.
             let v = take_steps(&mut scroll.1, dy);
             if v != 0 {
                 remote.notify_pointer_axis_discrete(session, Axis::Vertical, v, Default::default()).await?;
@@ -266,4 +316,3 @@ fn take_steps(acc: &mut i32, delta: i32) -> i32 {
     *acc -= steps * 120;
     steps
 }
-

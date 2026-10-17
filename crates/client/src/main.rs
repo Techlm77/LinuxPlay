@@ -58,7 +58,13 @@ fn main() -> glib::ExitCode {
     // `linuxplay ADDRESS` connects straight away.
     let address = std::env::args().nth(1);
 
-    let app = adw::Application::builder().application_id(APP_ID).build();
+    // NON_UNIQUE lets a second instance run (used by tests to drive two
+    // displays as separate processes); normally the app is single-instance.
+    let mut builder = adw::Application::builder().application_id(APP_ID);
+    if std::env::var_os("LINUXPLAY_NONUNIQUE").is_some() {
+        builder = builder.flags(gtk::gio::ApplicationFlags::NON_UNIQUE);
+    }
+    let app = builder.build();
     app.connect_startup(|_| {
         let provider = gtk::CssProvider::new();
         provider.load_from_string(CSS);

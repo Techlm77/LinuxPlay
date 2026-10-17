@@ -1,6 +1,7 @@
 mod audio;
 mod capture;
 mod input;
+mod monitor;
 mod portal;
 mod quality;
 mod server;
@@ -122,5 +123,5 @@ async fn main() -> Result<()> {
         audio: !cli.no_audio,
         password: cli.password.filter(|p| !p.is_empty()),
     };
-    Host::new(cfg, identity, trust).run().await
+    Host::new(cfg, identity, trust)?.run().await
 }

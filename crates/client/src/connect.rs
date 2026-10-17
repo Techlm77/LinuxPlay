@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow, bail};
 use linuxplay_net::tls::Identity;
 use linuxplay_net::{pair, ws};
-use linuxplay_proto::signal::{ClientMsg, HostMsg, VideoCodec};
+use linuxplay_proto::signal::{ClientMsg, HostMsg, MonitorInfo, VideoCodec};
 use linuxplay_proto::{DEFAULT_PORT, PROTOCOL_VERSION};
 use tokio::sync::oneshot;
 use tracing::debug;
@@ -22,6 +22,8 @@ pub struct Request {
     pub hw_codecs: Vec<VideoCodec>,
     /// This display's refresh rate.
     pub max_fps: u32,
+    /// Which host display to open; `None` asks the user to choose.
+    pub monitor: Option<u32>,
 }
 
 pub struct Offer {
@@ -32,6 +34,10 @@ pub struct Offer {
     pub fps: u32,
     pub sdp: String,
     pub local_ip: IpAddr,
+    /// The display this stream shows.
+    pub monitor: MonitorInfo,
+    /// Every display the host offered, for opening others.
+    pub monitors: Vec<MonitorInfo>,
 }
 
 pub enum ToUi {
@@ -41,6 +47,12 @@ pub enum ToUi {
         host_name: String,
         password: bool,
         reply: oneshot::Sender<Option<String>>,
+    },
+    /// Ask which display to open; reply with an index, or `None` to cancel.
+    NeedMonitor {
+        host_name: String,
+        monitors: Vec<MonitorInfo>,
+        reply: oneshot::Sender<Option<u32>>,
     },
     /// The host is authenticated: remember (or refresh) it.
     Verified {
@@ -89,8 +101,8 @@ async fn session(req: &Request, identity: &Identity, ui: &async_channel::Sender<
         })
         .await?;
 
-    let mut display_name = host.clone();
-    let offer = loop {
+    // Authenticate (pairing if needed) until the host welcomes us.
+    let display_name = loop {
         match conn.signal.expect::<HostMsg>().await? {
             HostMsg::PairingRequired { host_name, password } => {
                 let (tx, rx) = oneshot::channel();
@@ -107,17 +119,54 @@ async fn session(req: &Request, identity: &Identity, ui: &async_channel::Sender<
                 conn.signal.send(&ClientMsg::PairFinish { mac }).await?;
             }
             HostMsg::Welcome { host_name } => {
-                display_name = host_name.clone();
-                ui.send(ToUi::Verified { address: req.address.clone(), host_name, fingerprint: conn.host_fp })
-                    .await?;
-                ui.send(ToUi::Status("Starting the stream…".into())).await?;
-            }
-            HostMsg::Offer { sdp, codec, width, height, fps } => {
-                break Offer { host_name: display_name, codec, width, height, fps, sdp, local_ip: conn.local_ip };
+                ui.send(ToUi::Verified {
+                    address: req.address.clone(),
+                    host_name: host_name.clone(),
+                    fingerprint: conn.host_fp,
+                })
+                .await?;
+                break host_name;
             }
             HostMsg::Error { message } => bail!(message),
             m => bail!("unexpected message: {m:?}"),
         }
+    };
+
+    // Choose a display from the host's list.
+    let HostMsg::Monitors { monitors } = conn.signal.expect().await? else {
+        bail!("expected the display list");
+    };
+    if monitors.is_empty() {
+        bail!("the host has no displays to share");
+    }
+    let index = match req.monitor {
+        Some(i) => i,
+        None if monitors.len() == 1 => monitors[0].index,
+        None => {
+            let (tx, rx) = oneshot::channel();
+            ui.send(ToUi::NeedMonitor { host_name: display_name.clone(), monitors: monitors.clone(), reply: tx })
+                .await?;
+            rx.await.ok().flatten().ok_or_else(|| anyhow!("no display chosen"))?
+        }
+    };
+    conn.signal.send(&ClientMsg::SelectMonitor { index }).await?;
+    ui.send(ToUi::Status("Starting the stream…".into())).await?;
+
+    let offer = match conn.signal.expect::<HostMsg>().await? {
+        HostMsg::Offer { sdp, codec, width, height, fps } => {
+            let monitor = monitors.iter().find(|m| m.index == index).cloned().unwrap_or(MonitorInfo {
+                index,
+                name: "Display".into(),
+                width,
+                height,
+                x: 0,
+                y: 0,
+                primary: false,
+            });
+            Offer { host_name: display_name, codec, width, height, fps, sdp, local_ip: conn.local_ip, monitor, monitors }
+        }
+        HostMsg::Error { message } => bail!(message),
+        m => bail!("unexpected message: {m:?}"),
     };
 
     let (tx, rx) = oneshot::channel();

@@ -4,9 +4,12 @@ use std::any::Any;
 
 use anyhow::{Result, bail};
 use clap::ValueEnum;
+use linuxplay_proto::signal::MonitorInfo;
 use tracing::info;
 
 use crate::input::{self, InputTx};
+use crate::monitor;
+use crate::portal::PortalStream;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum CaptureKind {
@@ -30,8 +33,8 @@ impl CaptureKind {
     }
 }
 
-/// An open capture: a gst-launch fragment producing raw video, its size, and
-/// where to send input. Dropping it ends the capture session.
+/// An open capture of one monitor: a gst-launch fragment producing raw video,
+/// its size, and where to send input. Dropping it ends the capture.
 pub struct Capture {
     pub source: String,
     pub width: u32,
@@ -40,33 +43,40 @@ pub struct Capture {
     _keep: Box<dyn Any + Send>,
 }
 
-pub async fn open(kind: CaptureKind, fps: u32) -> Result<Capture> {
-    match kind {
-        CaptureKind::X11 => open_x11(fps),
-        CaptureKind::Portal => open_portal(fps).await,
-    }
+/// The monitors the X11 screen exposes.
+pub fn monitors_x11() -> Result<Vec<MonitorInfo>> {
+    monitor::enumerate_x11(std::env::var("DISPLAY").ok().as_deref())
 }
 
-async fn open_portal(fps: u32) -> Result<Capture> {
-    let p = crate::portal::open(fps).await?;
+/// Capture one X11 monitor by cropping `ximagesrc` to its bounds.
+pub fn open_x11(fps: u32, mon: &MonitorInfo) -> Result<Capture> {
+    let display = std::env::var("DISPLAY").ok();
+    let area = (mon.x, mon.y, mon.width, mon.height);
+    let injector = input::x11::X11Injector::connect(display.as_deref(), area)?;
+    let display_prop = display.map(|d| format!(" display-name={d}")).unwrap_or_default();
+    let (endx, endy) = (mon.x + mon.width as i32 - 1, mon.y + mon.height as i32 - 1);
+    let source = format!(
+        "ximagesrc{display_prop} use-damage=false show-pointer=true \
+         startx={} starty={} endx={endx} endy={endy} ! video/x-raw,framerate={fps}/1",
+        mon.x, mon.y,
+    );
+    info!("capturing X11 monitor {} ({}x{} at {},{})", mon.name, mon.width, mon.height, mon.x, mon.y);
     Ok(Capture {
-        source: p.source,
-        width: p.width,
-        height: p.height,
-        input: p.input,
-        _keep: Box::new(p._keep),
+        source,
+        width: mon.width,
+        height: mon.height,
+        input: input::spawn(injector),
+        _keep: Box::new(()),
     })
 }
 
-fn open_x11(fps: u32) -> Result<Capture> {
-    let display = std::env::var("DISPLAY").ok();
-    let (width, height) = input::x11::root_size(display.as_deref())?;
-    let injector = input::x11::X11Injector::connect(display.as_deref(), (0, 0, width, height))?;
-    let display_prop = display.map(|d| format!(" display-name={d}")).unwrap_or_default();
-    let source = format!(
-        "ximagesrc{display_prop} use-damage=false show-pointer=true \
-         ! video/x-raw,framerate={fps}/1"
-    );
-    info!("capturing the X11 screen, {width}x{height}");
-    Ok(Capture { source, width, height, input: input::spawn(injector), _keep: Box::new(()) })
+/// Wrap a portal stream as a [`Capture`].
+pub fn from_portal(stream: PortalStream) -> Capture {
+    Capture {
+        source: stream.source,
+        width: stream.width,
+        height: stream.height,
+        input: stream.input,
+        _keep: Box::new(stream._keep),
+    }
 }

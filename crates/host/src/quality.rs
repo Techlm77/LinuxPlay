@@ -71,6 +71,12 @@ pub fn is_lan(host: IpAddr, peer: IpAddr) -> bool {
     }
 }
 
+/// The most total video bitrate a link should carry, kbit/s. The budget
+/// controller divides this across the active displays.
+pub fn link_ceiling(lan: bool) -> u32 {
+    if lan { 80_000 } else { 25_000 }
+}
+
 /// Roughly how many bits each pixel of each frame costs at good quality for
 /// desktop content, per codec. Newer codecs reach the same look for less.
 fn bits_per_pixel(codec: VideoCodec) -> f64 {
@@ -153,12 +159,13 @@ pub fn plan(
     let base = pixels * fps as f64 * bits_per_pixel(encoder.codec) / 1000.0;
     // On a LAN, latency comes from the encoder, not the link, so spend freely
     // for near-lossless frames; on the internet, hold to an efficient target.
-    let (factor, link_ceiling) = if lan { (2.5, 80_000) } else { (1.0, 25_000) };
+    let factor = if lan { 2.5 } else { 1.0 };
+    let ceiling = link_ceiling(lan);
     let auto_max = (base * factor) as u32;
     let max_kbps = if ov.max_kbps > 0 {
         ov.max_kbps
     } else {
-        auto_max.clamp(2_000, link_ceiling)
+        auto_max.clamp(2_000, ceiling)
     };
     // Start high on a LAN (BWE confirms headroom in under a second); start
     // nearer the middle on the internet to avoid an early overshoot.

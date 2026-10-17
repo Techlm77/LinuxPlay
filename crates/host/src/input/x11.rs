@@ -99,13 +99,6 @@ impl Injector for X11Injector {
     }
 }
 
-/// Size of the X screen's root window.
-pub fn root_size(display: Option<&str>) -> Result<(u32, u32)> {
-    let (conn, screen) = x11rb::connect(display).context("connecting to the X server")?;
-    let s = &conn.setup().roots[screen];
-    Ok((s.width_in_pixels as u32, s.height_in_pixels as u32))
-}
-
 #[cfg(test)]
 mod tests {
     use super::notches;

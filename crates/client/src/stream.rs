@@ -63,7 +63,12 @@ pub struct Stream {
 
 /// Build the stream window for `offer` and answer it. `cancel` hangs up the
 /// signalling connection when the window closes.
-pub fn open(app: &adw::Application, offer: Offer, cancel: async_channel::Sender<()>) -> Result<(Rc<Stream>, String)> {
+pub fn open(
+    app: &adw::Application,
+    offer: Offer,
+    cancel: async_channel::Sender<()>,
+    on_open_display: Rc<dyn Fn(u32)>,
+) -> Result<(Rc<Stream>, String)> {
     let video = VideoOut::new(offer.codec)?;
     let audio = AudioOut::new().inspect_err(|e| warn!("no audio playback: {e:#}")).ok();
     let counters = Arc::new(Counters::default());
@@ -91,7 +96,7 @@ pub fn open(app: &adw::Application, offer: Offer, cancel: async_channel::Sender<
     };
     let (session, answer) = rtc::accept_offer(offer.local_ip, &offer.sdp, handler)?;
 
-    let stream = build(app, &offer, video, audio, session, counters, cancel);
+    let stream = build(app, &offer, video, audio, session, counters, cancel, on_open_display);
 
     let weak = Rc::downgrade(&stream);
     glib::spawn_future_local(async move {
@@ -130,6 +135,7 @@ fn build(
     session: SessionHandle,
     counters: Arc<Counters>,
     cancel: async_channel::Sender<()>,
+    on_open_display: Rc<dyn Fn(u32)>,
 ) -> Rc<Stream> {
     let picture = gtk::Picture::for_paintable(&video.paintable);
     picture.set_content_fit(gtk::ContentFit::Contain);
@@ -178,6 +184,33 @@ fn build(
     header.pack_end(&fullscreen_btn);
     header.pack_end(&stats_btn);
 
+    // A menu to open the host's other displays, each in its own window.
+    let others: Vec<_> = offer.monitors.iter().filter(|m| m.index != offer.monitor.index).cloned().collect();
+    if !others.is_empty() {
+        let popover = gtk::Popover::new();
+        let list = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        for m in others {
+            let button = gtk::Button::builder()
+                .label(format!("{} · {}×{}", m.name, m.width, m.height))
+                .css_classes(["flat"])
+                .build();
+            let open = on_open_display.clone();
+            let popover = popover.clone();
+            button.connect_clicked(move |_| {
+                open(m.index);
+                popover.popdown();
+            });
+            list.append(&button);
+        }
+        popover.set_child(Some(&list));
+        let displays_btn = gtk::MenuButton::builder()
+            .icon_name("video-display-symbolic")
+            .tooltip_text("Open another display")
+            .popover(&popover)
+            .build();
+        header.pack_end(&displays_btn);
+    }
+
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&overlay));
@@ -185,7 +218,7 @@ fn build(
     let (w, h) = initial_size(offer.width, offer.height);
     let window = adw::ApplicationWindow::builder()
         .application(app)
-        .title(format!("{} — LinuxPlay", offer.host_name))
+        .title(format!("{} · {} — LinuxPlay", offer.monitor.name, offer.host_name))
         .default_width(w)
         .default_height(h)
         .content(&toolbar)
@@ -203,7 +236,7 @@ fn build(
             })
             .ok()
     };
-    title.set_subtitle(&format!("{}×{} · {} fps · {} · {}", offer.width, offer.height, offer.fps, offer.codec.name(), video.decoder));
+    title.set_subtitle(&format!("{} · {}×{} · {} fps · {} · {}", offer.monitor.name, offer.width, offer.height, offer.fps, offer.codec.name(), video.decoder));
 
     let stream = Rc::new(Stream {
         window,

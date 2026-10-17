@@ -1,12 +1,14 @@
 //! The main window: type an address or pick a recent host.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use adw::prelude::*;
 use gtk::glib;
 use linuxplay_net::tls::{self, Identity};
+use linuxplay_proto::signal::MonitorInfo;
 use tracing::warn;
 
 use crate::connect::{self, ToUi};
@@ -14,7 +16,9 @@ use crate::known_hosts::KnownHosts;
 use crate::stream::{self, Stream};
 use crate::{media, runtime};
 
-struct Active {
+/// One connection to a host (one display in one window).
+struct Conn {
+    address: String,
     cancel: async_channel::Sender<()>,
     stream: Option<Rc<Stream>>,
 }
@@ -29,7 +33,11 @@ pub struct Launcher {
     recent_rows: RefCell<Vec<adw::ActionRow>>,
     known: RefCell<KnownHosts>,
     identity: Arc<Identity>,
-    active: RefCell<Option<Active>>,
+    /// Every live connection, keyed by a counter.
+    conns: RefCell<HashMap<u64, Conn>>,
+    /// The connection whose progress the launcher button reflects.
+    connecting: Cell<Option<u64>>,
+    next_id: Cell<u64>,
 }
 
 fn hostname() -> String {
@@ -113,7 +121,9 @@ impl Launcher {
             recent_rows: RefCell::default(),
             known: RefCell::new(known),
             identity: Arc::new(identity),
-            active: RefCell::default(),
+            conns: RefCell::default(),
+            connecting: Cell::new(None),
+            next_id: Cell::new(1),
         });
 
         let weak = Rc::downgrade(&this);
@@ -125,7 +135,7 @@ impl Launcher {
         let weak = Rc::downgrade(&this);
         this.connect_btn.connect_clicked(move |_| {
             if let Some(l) = weak.upgrade() {
-                if l.active.borrow().is_some() {
+                if l.connecting.get().is_some() {
                     l.cancel();
                 } else {
                     l.connect(&l.entry.text());
@@ -197,9 +207,15 @@ impl Launcher {
     }
 
     fn cancel(&self) {
-        if let Some(a) = self.active.borrow().as_ref() {
-            let _ = a.cancel.try_send(());
+        if let Some(id) = self.connecting.get() {
+            if let Some(c) = self.conns.borrow().get(&id) {
+                let _ = c.cancel.try_send(());
+            }
         }
+    }
+
+    fn is_foreground(&self, id: u64) -> bool {
+        self.connecting.get() == Some(id)
     }
 
     /// The main monitor's refresh rate in Hz (default 60), so the host won't
@@ -215,44 +231,65 @@ impl Launcher {
             .clamp(24, 240)
     }
 
+    /// Connect to `address` and let the user pick a display.
     pub fn connect(self: &Rc<Self>, address: &str) {
-        let address = address.trim().to_string();
-        if address.is_empty() || self.active.borrow().is_some() {
+        if self.connecting.get().is_some() {
             return;
+        }
+        if let Some(id) = self.start(address, None) {
+            self.connecting.set(Some(id));
+            self.set_busy(true, "Connecting…");
+        }
+    }
+
+    /// Start one connection for a specific display (or `None` to be asked).
+    /// Returns its id, or `None` if it couldn't start.
+    fn start(self: &Rc<Self>, address: &str, monitor: Option<u32>) -> Option<u64> {
+        let address = address.trim().to_string();
+        if address.is_empty() {
+            return None;
         }
         let codecs = media::decodable();
         if codecs.is_empty() {
             self.error("Can't decode video", "No H.264, H.265 or AV1 decoder is installed.");
-            return;
+            return None;
         }
         let pinned = self.known.borrow().get(&address).map(|h| h.fingerprint.clone());
         let req = connect::Request {
-            address,
+            address: address.clone(),
             pinned,
             client_name: hostname(),
             hw_codecs: media::hw_decodable(),
             max_fps: self.refresh_rate(),
             codecs,
+            monitor,
         };
 
         let (ui_tx, ui_rx) = async_channel::unbounded();
         let (cancel_tx, cancel_rx) = async_channel::bounded(1);
-        *self.active.borrow_mut() = Some(Active { cancel: cancel_tx, stream: None });
-        self.set_busy(true, "Connecting…");
+        let id = self.next_id.get();
+        self.next_id.set(id + 1);
+        self.conns.borrow_mut().insert(id, Conn { address, cancel: cancel_tx, stream: None });
         runtime().spawn(connect::run(req, self.identity.clone(), ui_tx, cancel_rx));
 
         let this = self.clone();
         glib::spawn_future_local(async move {
             while let Ok(msg) = ui_rx.recv().await {
-                this.on_message(msg);
+                this.on_message(id, msg);
             }
         });
+        Some(id)
     }
 
-    fn on_message(self: &Rc<Self>, msg: ToUi) {
+    fn on_message(self: &Rc<Self>, id: u64, msg: ToUi) {
         match msg {
-            ToUi::Status(s) => self.set_busy(true, &s),
+            ToUi::Status(s) => {
+                if self.is_foreground(id) {
+                    self.set_busy(true, &s);
+                }
+            }
             ToUi::NeedPin { host_name, password, reply } => self.ask_pin(&host_name, password, reply),
+            ToUi::NeedMonitor { host_name, monitors, reply } => self.ask_monitor(&host_name, monitors, reply),
             ToUi::Verified { address, host_name, fingerprint } => {
                 if let Err(e) = self.known.borrow_mut().remember(&address, &host_name, &fingerprint) {
                     warn!("saving {address}: {e:#}");
@@ -260,17 +297,28 @@ impl Launcher {
                 self.refresh_recent();
             }
             ToUi::Offer(offer, reply) => {
-                let Some(cancel) = self.active.borrow().as_ref().map(|a| a.cancel.clone()) else {
+                let found = {
+                    let conns = self.conns.borrow();
+                    conns.get(&id).map(|c| (c.cancel.clone(), c.address.clone()))
+                };
+                let Some((cancel, address)) = found else {
                     let _ = reply.send(Err(anyhow::anyhow!("cancelled")));
                     return;
                 };
-                match stream::open(&self.app, offer, cancel) {
+                let this = self.clone();
+                let on_open_display = Rc::new(move |index: u32| {
+                    let _ = this.start(&address, Some(index));
+                });
+                match stream::open(&self.app, offer, cancel, on_open_display) {
                     Ok((stream, answer)) => {
-                        if let Some(a) = self.active.borrow_mut().as_mut() {
-                            a.stream = Some(stream);
+                        if let Some(c) = self.conns.borrow_mut().get_mut(&id) {
+                            c.stream = Some(stream);
                         }
                         let _ = reply.send(Ok(answer));
-                        self.window.set_visible(false);
+                        if self.is_foreground(id) {
+                            self.connecting.set(None);
+                            self.set_busy(false, "");
+                        }
                     }
                     Err(e) => {
                         let _ = reply.send(Err(e));
@@ -278,16 +326,47 @@ impl Launcher {
                 }
             }
             ToUi::Ended(err) => {
-                if let Some(stream) = self.active.take().and_then(|a| a.stream) {
+                if let Some(stream) = self.conns.borrow_mut().remove(&id).and_then(|c| c.stream) {
                     stream.close();
                 }
-                self.set_busy(false, "");
-                self.window.present();
+                if self.is_foreground(id) {
+                    self.connecting.set(None);
+                    self.set_busy(false, "");
+                    self.window.present();
+                }
                 if let Some(e) = err {
                     self.error("Connection ended", &e);
                 }
             }
         }
+    }
+
+    /// Ask which display to open, one button per monitor.
+    fn ask_monitor(&self, host_name: &str, monitors: Vec<MonitorInfo>, reply: tokio::sync::oneshot::Sender<Option<u32>>) {
+        if let Ok(idx) = std::env::var("LINUXPLAY_MONITOR").map(|s| s.trim().parse::<u32>()) {
+            let _ = reply.send(idx.ok());
+            return;
+        }
+        let dialog = adw::AlertDialog::new(
+            Some("Choose a display"),
+            Some(&format!("{host_name} is sharing {} displays.", monitors.len())),
+        );
+        for m in &monitors {
+            let tag = if m.primary { " (primary)" } else { "" };
+            dialog.add_response(&m.index.to_string(), &format!("{} · {}×{}{tag}", m.name, m.width, m.height));
+        }
+        dialog.add_response("cancel", "Cancel");
+        dialog.set_close_response("cancel");
+        if let Some(primary) = monitors.iter().find(|m| m.primary).or_else(|| monitors.first()) {
+            dialog.set_default_response(Some(&primary.index.to_string()));
+        }
+        let reply = RefCell::new(Some(reply));
+        dialog.connect_response(None, move |_, response| {
+            if let Some(r) = reply.take() {
+                let _ = r.send(response.parse::<u32>().ok());
+            }
+        });
+        dialog.present(Some(&self.window));
     }
 
     fn ask_pin(&self, host_name: &str, password: bool, reply: tokio::sync::oneshot::Sender<Option<String>>) {

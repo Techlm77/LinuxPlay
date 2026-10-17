@@ -37,6 +37,21 @@ impl VideoCodec {
     }
 }
 
+/// A display the host can share.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct MonitorInfo {
+    /// Stable within one connection; what the client echoes in `SelectMonitor`.
+    pub index: u32,
+    /// Human name, e.g. `HDMI-0` or `Display 1`.
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    /// Position in the host's desktop layout.
+    pub x: i32,
+    pub y: i32,
+    pub primary: bool,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMsg {
@@ -60,6 +75,8 @@ pub enum ClientMsg {
     PairStart { spake: String },
     /// HMAC proving the client derived the same key, hex.
     PairFinish { mac: String },
+    /// Which display to stream (an `index` from [`HostMsg::Monitors`]).
+    SelectMonitor { index: u32 },
     Answer { sdp: String },
 }
 
@@ -71,8 +88,11 @@ pub enum HostMsg {
     PairingRequired { host_name: String, password: bool },
     /// SPAKE2 side B message (base64) and the host's key-confirmation MAC (hex).
     PairReply { spake: String, mac: String },
-    /// Authenticated; a stream offer follows.
+    /// Authenticated; the displays this host can share follow.
     Welcome { host_name: String },
+    /// The displays available to stream; the client replies with
+    /// [`ClientMsg::SelectMonitor`].
+    Monitors { monitors: Vec<MonitorInfo> },
     Offer {
         sdp: String,
         codec: VideoCodec,

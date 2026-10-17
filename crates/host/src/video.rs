@@ -173,8 +173,8 @@ pub struct VideoPipeline {
     session: Arc<OnceLock<SessionHandle>>,
     counters: Arc<Counters>,
     bitrate_kbps: AtomicU32,
-    max_kbps: u32,
-    fps_cap: u32,
+    max_kbps: AtomicU32,
+    fps_cap: AtomicU32,
     fps: AtomicU32,
     stopped: Arc<AtomicBool>,
 }
@@ -262,8 +262,8 @@ impl VideoPipeline {
             session,
             counters,
             bitrate_kbps: AtomicU32::new(start_kbps),
-            max_kbps,
-            fps_cap: fps,
+            max_kbps: AtomicU32::new(max_kbps),
+            fps_cap: AtomicU32::new(fps),
             fps: AtomicU32::new(fps),
             stopped,
         }))
@@ -289,12 +289,38 @@ impl VideoPipeline {
         self.fps.load(Ordering::Relaxed)
     }
 
+    pub fn max_kbps(&self) -> u32 {
+        self.max_kbps.load(Ordering::Relaxed)
+    }
+
+    /// Lower (or raise) this stream's bitrate ceiling while running, used when
+    /// the bandwidth budget is shared with another display.
+    pub fn set_max_kbps(&self, max_kbps: u32) {
+        let max_kbps = max_kbps.max(MIN_KBPS);
+        self.max_kbps.store(max_kbps, Ordering::Relaxed);
+        if self.bitrate_kbps() > max_kbps {
+            set_bitrate(&self.encoder, &self.enc, max_kbps);
+            self.bitrate_kbps.store(max_kbps, Ordering::Relaxed);
+        }
+    }
+
+    /// Lower (or raise) the framerate cap while running, used to keep several
+    /// displays within the encoder's capacity.
+    pub fn set_fps_cap(&self, cap: u32) {
+        let cap = cap.max(15);
+        self.fps_cap.store(cap, Ordering::Relaxed);
+        if self.fps() > cap {
+            self.rate.set_property("max-rate", cap as i32);
+            self.fps.store(cap, Ordering::Relaxed);
+        }
+    }
+
     /// Follow the bandwidth estimate, leaving headroom for audio, data and
     /// retransmissions. Small changes are ignored so the encoder isn't
     /// reconfigured constantly.
     pub fn on_bandwidth_estimate(&self, bps: u64) {
         let target = ((bps / 1000) as f64 * 0.85) as u32;
-        let target = target.clamp(MIN_KBPS, self.max_kbps);
+        let target = target.clamp(MIN_KBPS, self.max_kbps());
         let current = self.bitrate_kbps();
         let change = (target as f64 - current as f64).abs() / current as f64;
         if change >= 0.1 {
@@ -309,21 +335,22 @@ impl VideoPipeline {
     /// 60 fps would make each frame mushy; raise it again when there's room.
     /// Steps are sticky (hysteresis) so the rate doesn't oscillate.
     fn adapt_fps(&self, target_kbps: u32) {
-        let full = self.max_kbps.max(MIN_KBPS) as f64;
+        let cap = self.fps_cap.load(Ordering::Relaxed);
+        let full = self.max_kbps().max(MIN_KBPS) as f64;
         let ratio = target_kbps as f64 / full;
         let current = self.fps();
         // Raise thresholds above the lowering ones so a value that just
         // triggered a drop doesn't immediately trigger a rise.
         let desired = if ratio < 0.25 {
-            (self.fps_cap / 2).max(30)
+            (cap / 2).max(30)
         } else if ratio < 0.45 {
-            (self.fps_cap * 3 / 4).max(30)
+            (cap * 3 / 4).max(30)
         } else if ratio > 0.6 {
-            self.fps_cap
+            cap
         } else {
             current
         };
-        let desired = desired.min(self.fps_cap);
+        let desired = desired.min(cap);
         if desired != current {
             debug!("video {current} → {desired} fps (bitrate at {:.0}% of ceiling)", ratio * 100.0);
             self.rate.set_property("max-rate", desired as i32);
