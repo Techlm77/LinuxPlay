@@ -21,8 +21,7 @@
             gst.gst-plugins-bad
             gst.gst-plugins-ugly
             gst.gst-libav
-            gst.gst-vaapi
-            gst.gst-plugins-pipewire
+            pkgs.pipewire
           ];
         in
         rec {
@@ -84,9 +83,8 @@
               gst.gst-plugins-base
               gst.gst-plugins-good
               gst.gst-plugins-bad
-              gst.gst-vaapi
               gst.gst-libav
-              gst.gst-plugins-pipewire
+              pkgs.pipewire
               libGL
             ];
           };

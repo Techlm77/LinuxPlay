@@ -1,3 +1,6 @@
 /target
 *.log
 
+
+# nix build output
+/result
