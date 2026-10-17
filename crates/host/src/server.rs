@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore};
 
 use anyhow::{Context, Result, anyhow, bail};
 use linuxplay_net::rtc::{self, OfferOptions};
@@ -26,6 +26,7 @@ use crate::audio::AudioPipeline;
 use crate::capture::{self, Capture, CaptureKind};
 use crate::portal::PortalHost;
 use crate::quality::{self, ClientCaps, Overrides};
+use crate::tray::HostTray;
 use crate::trust::TrustStore;
 use crate::video::{self, VideoPipeline};
 
@@ -238,9 +239,21 @@ impl Host {
         let listener = TcpListener::bind((self.cfg.bind, self.cfg.port))
             .await
             .with_context(|| format!("listening on {}:{}", self.cfg.bind, self.cfg.port))?;
-        info!("listening on {}", listener.local_addr()?);
+        let addr = listener.local_addr()?;
+        info!("listening on {addr}");
+
+        let quit = Arc::new(Notify::new());
+        self.start_tray(quit.clone()).await;
+        announce_started(&self.cfg.name, addr.port());
+
         loop {
-            let (tcp, peer) = listener.accept().await?;
+            let (tcp, peer) = tokio::select! {
+                _ = quit.notified() => {
+                    info!("quit requested");
+                    return Ok(());
+                }
+                accepted = listener.accept() => accepted?,
+            };
             // Drop new connections while too many are still authenticating.
             let Ok(permit) = self.pending.clone().try_acquire_owned() else {
                 debug!("{peer}: refused, too many pending connections");
@@ -260,6 +273,51 @@ impl Host {
                 }
             });
         }
+    }
+
+    /// Displays currently being streamed.
+    fn client_count(&self) -> usize {
+        self.active.lock().unwrap().len()
+    }
+
+    /// Show a tray icon (where a StatusNotifier host exists) and keep its
+    /// connected-count fresh. Harmless where no tray is available.
+    async fn start_tray(self: &Arc<Self>, quit: Arc<Notify>) {
+        use ksni::TrayMethods;
+        let fp = linuxplay_net::tls::fingerprint_display(&self.identity.fingerprint);
+        let short: String = fp.chars().take(14).collect();
+        let tray = HostTray {
+            host_name: self.cfg.name.clone(),
+            detail: format!("Port {} · {short}…", self.cfg.port),
+            clients: 0,
+            quit,
+        };
+        let handle = match tokio::time::timeout(Duration::from_secs(3), tray.spawn()).await {
+            Ok(Ok(handle)) => handle,
+            Ok(Err(e)) => {
+                debug!("no system tray: {e}");
+                return;
+            }
+            Err(_) => {
+                debug!("system tray setup timed out");
+                return;
+            }
+        };
+        let this = self.clone();
+        tokio::spawn(async move {
+            let mut last = usize::MAX;
+            loop {
+                tokio::time::sleep(Duration::from_millis(800)).await;
+                if handle.is_closed() {
+                    break;
+                }
+                let n = this.client_count();
+                if n != last {
+                    last = n;
+                    handle.update(|t| t.clients = n).await;
+                }
+            }
+        });
     }
 
     async fn handle(self: &Arc<Self>, mut acc: Accepted) -> Result<()> {
@@ -539,6 +597,16 @@ impl Host {
         }
         result
     }
+}
+
+/// Let the user know the host is up, even with no terminal or tray.
+fn announce_started(name: &str, port: u16) {
+    info!("sharing \"{name}\" on port {port}; waiting for a connection");
+    let _ = std::process::Command::new("notify-send")
+        .args(["--app-name=LinuxPlay", "--icon=io.github.techlm77.LinuxPlay"])
+        .arg("LinuxPlay Host is sharing this screen")
+        .arg(format!("Waiting for a connection on port {port}. It runs in the background; use the tray icon to quit."))
+        .spawn();
 }
 
 /// Show the one-time PIN to whoever is at the host.

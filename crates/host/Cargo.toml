@@ -20,6 +20,7 @@ gstreamer.workspace = true
 gstreamer-app.workspace = true
 gstreamer-video.workspace = true
 hex.workspace = true
+ksni = "0.3"
 serde.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true

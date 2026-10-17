@@ -218,6 +218,10 @@ impl Launcher {
         self.connecting.get() == Some(id)
     }
 
+    fn has_active_stream(&self) -> bool {
+        self.conns.borrow().values().any(|c| c.stream.is_some())
+    }
+
     /// The main monitor's refresh rate in Hz (default 60), so the host won't
     /// send more frames than this screen can show.
     fn refresh_rate(&self) -> u32 {
@@ -319,6 +323,9 @@ impl Launcher {
                             self.connecting.set(None);
                             self.set_busy(false, "");
                         }
+                        // The stream window is now the focus; get the launcher
+                        // out of the way so it's clear something happened.
+                        self.window.set_visible(false);
                     }
                     Err(e) => {
                         let _ = reply.send(Err(e));
@@ -332,6 +339,10 @@ impl Launcher {
                 if self.is_foreground(id) {
                     self.connecting.set(None);
                     self.set_busy(false, "");
+                }
+                // Bring the launcher back when the last window closes, or to
+                // show an error.
+                if err.is_some() || !self.has_active_stream() {
                     self.window.present();
                 }
                 if let Some(e) = err {

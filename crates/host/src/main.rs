@@ -5,6 +5,7 @@ mod monitor;
 mod portal;
 mod quality;
 mod server;
+mod tray;
 mod trust;
 mod video;
 
