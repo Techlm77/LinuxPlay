@@ -11,7 +11,7 @@ pub mod input;
 pub mod signal;
 
 /// Bumped whenever a message changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// TCP port the host listens on for signalling.
 pub const DEFAULT_PORT: u16 = 47800;
