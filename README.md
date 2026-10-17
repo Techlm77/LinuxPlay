@@ -18,13 +18,17 @@ environment or window manager. See [Compatibility](#compatibility).
 
 ## Requirements
 
-Rust (1.85+) and GStreamer to build. The **host** needs only GStreamer; the
-**client** also needs GTK4 and libadwaita.
+A current **Rust** (1.85+) and **GStreamer** to build. The **host** needs only
+GStreamer; the **client** also needs GTK4 and libadwaita.
+
+> **Rust:** install it with [rustup](https://rustup.rs) —
+> `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh` — not your
+> distro's `cargo`, which is often too old to build this (Ubuntu 24.04 ships
+> 1.75). Arch's rolling `rust` package is fine.
 
 ### Arch / Manjaro
 
 ```sh
-# Build + runtime
 sudo pacman -S --needed rust base-devel cmake \
     gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad \
     gst-plugin-va gst-libav gst-plugin-pipewire \
@@ -34,7 +38,8 @@ sudo pacman -S --needed rust base-devel cmake \
 ### Debian / Ubuntu
 
 ```sh
-sudo apt install cargo build-essential cmake pkg-config \
+# Rust from rustup (above); the rest from apt:
+sudo apt install build-essential cmake pkg-config \
     libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
     libgtk-4-dev libadwaita-1-dev \
     gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
@@ -45,13 +50,19 @@ sudo apt install cargo build-essential cmake pkg-config \
 ### Fedora
 
 ```sh
-sudo dnf install cargo gcc cmake pkgconf-pkg-config \
+# Rust from rustup (above); the rest from dnf:
+sudo dnf install gcc cmake pkgconf-pkg-config \
     gstreamer1-devel gstreamer1-plugins-base-devel \
     gtk4-devel libadwaita-devel \
     gstreamer1-plugins-good gstreamer1-plugins-bad-free \
     gstreamer1-plugin-pipewire
 # gstreamer1-vaapi and gstreamer1-libav come from RPM Fusion.
 ```
+
+### NixOS
+
+A `flake.nix` is included: `nix build` produces the binaries, and `nix develop`
+gives a shell with every build dependency.
 
 **Nvidia (NVENC/NVDEC):** also install the `nvcodec` GStreamer plugin — Arch
 `gst-plugins-bad` includes it; Debian/Ubuntu ship it in `gstreamer1.0-plugins-bad`;

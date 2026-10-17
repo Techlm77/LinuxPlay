@@ -1,0 +1,52 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Build in a clean container for each distro, installing exactly the
+# dependencies the README lists, so a release "builds first time" everywhere.
+# Runs on the ubuntu-latest runner and drives each distro with `docker run`
+# (so the minimal images don't need git/node for the actions themselves).
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 24.04
+            image: ubuntu:24.04
+            deps: >-
+              export DEBIAN_FRONTEND=noninteractive;
+              apt-get update -qq;
+              apt-get install -y -qq curl ca-certificates build-essential cmake pkg-config
+              libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+              libgtk-4-dev libadwaita-1-dev
+          - name: Fedora 41
+            image: fedora:41
+            deps: >-
+              dnf -y install curl gcc gcc-c++ cmake pkgconf-pkg-config
+              gstreamer1-devel gstreamer1-plugins-base-devel
+              gtk4-devel libadwaita-devel
+          - name: Arch Linux
+            image: archlinux:latest
+            deps: >-
+              pacman -Syu --noconfirm --needed base-devel cmake curl
+              gstreamer gst-plugins-base gtk4 libadwaita
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test
+        run: |
+          docker run --rm -v "$PWD":/src:ro "${{ matrix.image }}" bash -euc '
+            ${{ matrix.deps }}
+            curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+            . "$HOME/.cargo/env"
+            cd /src
+            export CARGO_TARGET_DIR=/tmp/target
+            cargo build --release --locked
+            cargo test --release --locked
+          '
