@@ -150,6 +150,13 @@ impl Launcher {
         self.window.present();
     }
 
+    /// Test hook: fill the address and click Connect exactly as a user would,
+    /// so the button's own handler runs.
+    pub fn test_click_connect(&self, addr: &str) {
+        self.entry.set_text(addr);
+        self.connect_btn.emit_clicked();
+    }
+
     fn refresh_recent(self: &Rc<Self>) {
         for row in self.recent_rows.borrow_mut().drain(..) {
             self.recent.remove(&row);

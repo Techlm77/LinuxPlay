@@ -4,12 +4,19 @@ mod launcher;
 mod media;
 mod stream;
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::OnceLock;
 
 use adw::prelude::*;
 use gstreamer as gst;
 use gtk::{gdk, glib};
 use linuxplay_net::tls::{self, Identity};
+
+thread_local! {
+    /// Holds the launcher for the life of the process (see connect_activate).
+    static LAUNCHER: RefCell<Option<Rc<launcher::Launcher>>> = const { RefCell::new(None) };
+}
 
 const APP_ID: &str = "io.github.techlm77.LinuxPlay";
 
@@ -87,8 +94,25 @@ fn main() -> glib::ExitCode {
         };
         let launcher = launcher::Launcher::new(app, identity);
         launcher.present();
+        // Keep the Launcher alive for the life of the process. Its widget
+        // signal handlers hold only weak references, so without this it would
+        // be freed as soon as this callback returns and every button would
+        // stop responding.
+        LAUNCHER.with(|slot| *slot.borrow_mut() = Some(launcher.clone()));
         if let Some(addr) = &address {
             launcher.connect(addr);
+        }
+        // Test hook: after the window is up, click Connect through a weak ref
+        // (like the real handlers) to prove the launcher outlives this callback.
+        if let Ok(addr) = std::env::var("LINUXPLAY_TEST_CONNECT") {
+            let weak = Rc::downgrade(&launcher);
+            glib::timeout_add_seconds_local_once(2, move || match weak.upgrade() {
+                Some(l) => {
+                    eprintln!("TEST: launcher alive; clicking Connect");
+                    l.test_click_connect(&addr);
+                }
+                None => eprintln!("TEST: launcher was dropped — button would be dead"),
+            });
         }
     });
     app.run_with_args::<&str>(&[])
