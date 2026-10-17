@@ -1,6 +1,5 @@
 //! Injecting the client's input into this desktop.
 
-pub mod portal;
 pub mod x11;
 
 use std::collections::HashSet;

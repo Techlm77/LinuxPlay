@@ -43,8 +43,19 @@ pub struct Capture {
 pub async fn open(kind: CaptureKind, fps: u32) -> Result<Capture> {
     match kind {
         CaptureKind::X11 => open_x11(fps),
-        CaptureKind::Portal => bail!("portal capture is not implemented yet"),
+        CaptureKind::Portal => open_portal(fps).await,
     }
+}
+
+async fn open_portal(fps: u32) -> Result<Capture> {
+    let p = crate::portal::open(fps).await?;
+    Ok(Capture {
+        source: p.source,
+        width: p.width,
+        height: p.height,
+        input: p.input,
+        _keep: Box::new(p._keep),
+    })
 }
 
 fn open_x11(fps: u32) -> Result<Capture> {

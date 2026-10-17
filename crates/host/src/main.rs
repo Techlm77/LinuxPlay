@@ -1,6 +1,7 @@
 mod audio;
 mod capture;
 mod input;
+mod portal;
 mod quality;
 mod server;
 mod trust;
