@@ -31,6 +31,16 @@ and two **application‑menu entries** so you never need the terminal:
 
 Install system‑wide with `sudo PREFIX=/usr/local ./packaging/install.sh`.
 
+### Flatpak
+
+```
+./packaging/flatpak/build.sh
+```
+
+Builds and installs a sandboxed Flatpak (GNOME runtime, no root needed — it
+uses `flatpak-builder` from Flathub). The same two menu entries appear, and it
+runs as `flatpak run io.github.techlm77.LinuxPlay`.
+
 ## Build and run manually
 
 ```
