@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3584e4"/>
+      <stop offset="1" stop-color="#1c71d8"/>
+    </linearGradient>
+  </defs>
+  <!-- monitor body -->
+  <rect x="14" y="22" width="100" height="68" rx="10" fill="url(#screen)"/>
+  <rect x="14" y="22" width="100" height="68" rx="10" fill="none" stroke="#1a5fb4" stroke-width="2"/>
+  <!-- stand -->
+  <rect x="52" y="90" width="24" height="12" fill="#1a5fb4"/>
+  <rect x="38" y="100" width="52" height="8" rx="4" fill="#1a5fb4"/>
+  <!-- play / stream glyph -->
+  <path d="M54 40 L82 56 L54 72 Z" fill="#ffffff"/>
+  <!-- signal arcs -->
+  <g fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round" opacity="0.85">
+    <path d="M30 46 a14 14 0 0 0 0 20"/>
+    <path d="M98 46 a14 14 0 0 1 0 20"/>
+  </g>
+</svg>

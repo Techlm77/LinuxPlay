@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=LinuxPlay Host
+GenericName=Screen Sharing
+Comment=Share this computer's screen so another can connect to it
+Exec=linuxplay-host
+Icon=io.github.techlm77.LinuxPlay
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=remote;desktop;share;screen;host;server;
+StartupNotify=false
