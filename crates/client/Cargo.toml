@@ -1,29 +1,30 @@
 [package]
 name = "linuxplay-client"
-description = "LinuxPlay client: connect to a LinuxPlay host"
+description = "LinuxPlay client: the stream window that connects to a host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "linuxplay"
-path = "src/main.rs"
-
 [dependencies]
+linuxplay-media.workspace = true
 linuxplay-net.workspace = true
 linuxplay-proto.workspace = true
 
-adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
 anyhow.workspace = true
 async-channel.workspace = true
-gst-plugin-gtk4 = { version = "0.15", features = ["dmabuf", "wayland", "x11egl"] }
 gstreamer.workspace = true
 gstreamer-app.workspace = true
-gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+fontdb.workspace = true
+fontdue.workspace = true
+glow.workspace = true
+gstreamer-gl.workspace = true
+gstreamer-gl-egl.workspace = true
+gstreamer-gl-wayland.workspace = true
+gstreamer-video.workspace = true
+sdl3.workspace = true
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true

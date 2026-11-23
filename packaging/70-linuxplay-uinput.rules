@@ -1,0 +1,7 @@
+# LinuxPlay: let the person logged in at this computer create virtual
+# gamepads, so the controllers of whoever is streaming work in games here.
+# Install with:
+#   sudo cp 70-linuxplay-uinput.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger --name-match=uinput
+# Many gaming distributions (and Steam's own packages) already grant this.
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"

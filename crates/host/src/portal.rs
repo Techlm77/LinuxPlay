@@ -27,6 +27,7 @@ use linuxplay_proto::signal::MonitorInfo;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::input::gamepad::Gamepads;
 use crate::input::{self, InputTx};
 
 /// A monitor shared through the portal.
@@ -265,6 +266,7 @@ async fn inject(
     let mut keys: HashSet<u16> = HashSet::new();
     let mut buttons: HashSet<MouseButton> = HashSet::new();
     let mut scroll = (0i32, 0i32);
+    let mut gamepads = Gamepads::default();
 
     let mut next = None;
     while let Some(first) = match next.take() {
@@ -274,6 +276,10 @@ async fn inject(
         // Each portal call is a D-Bus round trip, so merge motion that piled
         // up meanwhile instead of replaying it.
         let ev = merge_motion(first, &mut rx, &mut next);
+        // The portal knows nothing of gamepads; they are devices of their own.
+        if gamepads.handle(&ev) {
+            continue;
+        }
         if let Err(e) = apply(&remote, &session, node, (w, h), &mut keys, &mut buttons, &mut scroll, ev).await {
             debug!("portal input: {e}");
         }
@@ -383,6 +389,8 @@ async fn apply(
                 release_button(remote, session, b).await;
             }
         }
+        // Handled before this is called; see `inject`.
+        InputEvent::GamepadAttach { .. } | InputEvent::Gamepad(_) | InputEvent::GamepadDetach { .. } => {}
     }
     Ok(())
 }

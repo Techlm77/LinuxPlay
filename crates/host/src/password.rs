@@ -63,6 +63,20 @@ fn read_hidden(prompt: &str) -> Result<String> {
     Ok(line.trim_end_matches(['\n', '\r']).to_string())
 }
 
+/// Ask for a secret once, without showing it.
+pub fn prompt(question: &str) -> Result<String> {
+    read_hidden(question)
+}
+
+/// Ask for a new account password twice.
+pub fn prompt_new_account() -> Result<String> {
+    let first = read_hidden("New password (at least 10 characters): ")?;
+    if first != read_hidden("Again: ")? {
+        bail!("the passwords don't match");
+    }
+    Ok(first)
+}
+
 /// Ask for a new password twice.
 pub fn prompt_new() -> Result<String> {
     let a = read_hidden(&format!("New pairing password (at least {MIN_LEN} characters): "))?;

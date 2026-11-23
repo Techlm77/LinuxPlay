@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use tracing::debug;
@@ -16,6 +17,9 @@ const SERVICE: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
 const APP_NAME: &str = "LinuxPlay";
 const ICON: &str = "io.github.techlm77.LinuxPlay";
+/// A notification server that takes longer than this to answer is treated as
+/// absent, so a missing or hung one can never stall the host.
+const CALL_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Why a notification went away, as the server reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,18 +108,19 @@ impl Notifier {
         if note.urgent {
             let stale: Vec<u32> = std::mem::take(&mut *self.info.lock().unwrap());
             for id in stale {
-                let _: Result<(), _> = self.proxy.call("CloseNotification", &(id,)).await;
+                self.close_on_server(id).await;
             }
         }
-        let timeout: i32 = if note.urgent { 0 } else { -1 };
-        let id: u32 = match self
-            .proxy
-            .call("Notify", &(APP_NAME, 0u32, ICON, note.summary, note.body, actions, hints, timeout))
-            .await
-        {
-            Ok(id) => id,
-            Err(e) => {
+        let expiry: i32 = if note.urgent { 0 } else { -1 };
+        let arguments = (APP_NAME, 0u32, ICON, note.summary, note.body, actions, hints, expiry);
+        let id: u32 = match tokio::time::timeout(CALL_TIMEOUT, self.proxy.call("Notify", &arguments)).await {
+            Ok(Ok(id)) => id,
+            Ok(Err(e)) => {
                 debug!("notification failed: {e}");
+                return None;
+            }
+            Err(_) => {
+                debug!("the notification service did not answer");
                 return None;
             }
         };
@@ -129,6 +134,12 @@ impl Notifier {
 
     pub async fn close(&self, id: u32) {
         self.handlers.lock().unwrap().remove(&id);
-        let _: Result<(), _> = self.proxy.call("CloseNotification", &(id,)).await;
+        self.close_on_server(id).await;
+    }
+
+    async fn close_on_server(&self, id: u32) {
+        let arguments = (id,);
+        let call = self.proxy.call::<_, _, ()>("CloseNotification", &arguments);
+        let _ = tokio::time::timeout(CALL_TIMEOUT, call).await;
     }
 }

@@ -10,12 +10,15 @@ name = "linuxplay-host"
 path = "src/main.rs"
 
 [dependencies]
+linuxplay-media.workspace = true
 linuxplay-net.workspace = true
 linuxplay-proto.workspace = true
 
 anyhow.workspace = true
+base64.workspace = true
 ashpd = { version = "0.13", default-features = false, features = ["tokio", "remote_desktop", "screencast"] }
 clap.workspace = true
+evdev.workspace = true
 futures-util.workspace = true
 gstreamer.workspace = true
 gstreamer-app.workspace = true
@@ -23,6 +26,7 @@ gstreamer-video.workspace = true
 hex.workspace = true
 ksni = "0.3"
 libc.workspace = true
+rand.workspace = true
 serde.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true

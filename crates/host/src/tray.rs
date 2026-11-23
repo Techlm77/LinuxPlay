@@ -48,7 +48,7 @@ pub struct HostTray {
 /// network-byte-order the protocol wants.
 fn icon(size: i32, rgba: &[u8]) -> Icon {
     let mut data = Vec::with_capacity(rgba.len());
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         data.extend_from_slice(&[px[3], px[0], px[1], px[2]]);
     }
     Icon { width: size, height: size, data }

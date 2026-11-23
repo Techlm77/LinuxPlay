@@ -102,17 +102,26 @@ fn score(enc: &Encoder, caps: &ClientCaps, lan: bool) -> i64 {
     if !client_hw && codec != VideoCodec::H264 {
         s -= 800;
     }
+    // Software H.265 and AV1 encoders can't keep up with a live screen
+    // without hundreds of milliseconds of delay; software H.264 can.
+    if !host_hw && codec != VideoCodec::H264 {
+        s -= 2000;
+    }
 
-    // Efficiency vs. latency, by codec. On a LAN there's bandwidth to burn,
-    // so favour the simplest/lowest-latency codec; on the internet, favour
-    // the one that looks best per megabit.
-    let efficiency = match codec {
-        VideoCodec::Av1 => 3,
-        VideoCodec::H265 => 2,
-        VideoCodec::H264 => 1,
+    // Which codec suits the link. Between two computers with hardware on both
+    // ends, H.265 is the best all-rounder: clearly sharper than H.264 at the
+    // same bitrate and, on the encoders measured, no slower (on AMD it is the
+    // fastest of the three). AV1 squeezes out more still, which pays over the
+    // internet, but costs encoding time that a LAN has no reason to spend.
+    let suitability = match (codec, lan) {
+        (VideoCodec::H265, true) => 3,
+        (VideoCodec::H264, true) => 2,
+        (VideoCodec::Av1, true) => 1,
+        (VideoCodec::Av1, false) => 3,
+        (VideoCodec::H265, false) => 2,
+        (VideoCodec::H264, false) => 1,
     };
-    let latency = 4 - efficiency; // H264 lowest latency, AV1 highest
-    s += if lan { latency * 60 } else { efficiency * 60 };
+    s += suitability * 60;
 
     // Break ties toward what the client asked for first.
     s -= caps.preference(codec) as i64;
@@ -123,14 +132,11 @@ fn score(enc: &Encoder, caps: &ClientCaps, lan: bool) -> i64 {
 pub fn plan(
     available: &[Encoder],
     caps: &ClientCaps,
-    host_ip: IpAddr,
-    peer_ip: IpAddr,
+    lan: bool,
     width: u32,
     height: u32,
     ov: &Overrides,
 ) -> Result<Plan> {
-    let lan = is_lan(host_ip, peer_ip);
-
     let encoder = if let Some(name) = &ov.encoder {
         let enc = available
             .iter()
@@ -223,11 +229,12 @@ mod tests {
     }
 
     #[test]
-    fn lan_prefers_hardware_h264_for_latency() {
-        // Client can hw-decode everything; on a LAN we want H264 (lowest latency).
+    fn lan_prefers_hardware_h265() {
+        // The client decodes everything in hardware; on a LAN H.265 is both
+        // the sharpest and, on the encoders measured, the quickest.
         let c = caps(&[VideoCodec::Av1, VideoCodec::H265, VideoCodec::H264], &[VideoCodec::H264, VideoCodec::H265, VideoCodec::Av1]);
-        let p = plan(&all(), &c, "192.168.8.1".parse().unwrap(), "192.168.8.2".parse().unwrap(), 1920, 1080, &Overrides::default()).unwrap();
-        assert_eq!(p.encoder.codec, VideoCodec::H264);
+        let p = plan(&all(), &c, true, 1920, 1080, &Overrides::default()).unwrap();
+        assert_eq!(p.encoder.codec, VideoCodec::H265);
         assert_eq!(p.encoder.backend, Backend::Va);
         assert!(p.lan);
     }
@@ -235,17 +242,30 @@ mod tests {
     #[test]
     fn internet_prefers_efficient_codec() {
         let c = caps(&[VideoCodec::H264, VideoCodec::H265, VideoCodec::Av1], &[VideoCodec::H264, VideoCodec::H265, VideoCodec::Av1]);
-        let p = plan(&all(), &c, "10.0.0.1".parse().unwrap(), "203.0.113.5".parse().unwrap(), 1920, 1080, &Overrides::default()).unwrap();
+        let p = plan(&all(), &c, false, 1920, 1080, &Overrides::default()).unwrap();
         assert_eq!(p.encoder.codec, VideoCodec::Av1);
         assert!(!p.lan);
         assert!(p.max_kbps <= 25_000);
     }
 
     #[test]
+    fn a_host_without_hardware_uses_software_h264_even_for_an_av1_client() {
+        let software = vec![enc("x264enc", VideoCodec::H264, Backend::Software), enc("svtav1enc", VideoCodec::Av1, Backend::Software)];
+        let c = caps(&[VideoCodec::Av1, VideoCodec::H264], &[VideoCodec::Av1, VideoCodec::H264]);
+        for lan in [true, false] {
+            let p = plan(&software, &c, lan, 1920, 1080, &Overrides::default()).unwrap();
+            assert_eq!(p.encoder.element, "x264enc", "lan={lan}");
+        }
+        // With nothing else, software AV1 still works.
+        let only_av1 = vec![enc("svtav1enc", VideoCodec::Av1, Backend::Software)];
+        assert_eq!(plan(&only_av1, &c, true, 1920, 1080, &Overrides::default()).unwrap().encoder.element, "svtav1enc");
+    }
+
+    #[test]
     fn avoids_software_decode_on_client() {
         // Client lists HEVC but can only decode H264 in hardware.
         let c = caps(&[VideoCodec::H265, VideoCodec::H264], &[VideoCodec::H264]);
-        let p = plan(&all(), &c, "203.0.113.1".parse().unwrap(), "198.51.100.2".parse().unwrap(), 1920, 1080, &Overrides::default()).unwrap();
+        let p = plan(&all(), &c, false, 1920, 1080, &Overrides::default()).unwrap();
         assert_eq!(p.encoder.codec, VideoCodec::H264);
     }
 }

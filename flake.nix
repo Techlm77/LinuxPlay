@@ -38,8 +38,7 @@
               rustPlatform.bindgenHook
             ];
             buildInputs = with pkgs; [
-              gtk4
-              libadwaita
+              sdl3
               gst.gstreamer
               gst.gst-plugins-base
               libGL
@@ -77,8 +76,7 @@
               rustPlatform.bindgenHook
             ];
             buildInputs = with pkgs; [
-              gtk4
-              libadwaita
+              sdl3
               gst.gstreamer
               gst.gst-plugins-base
               gst.gst-plugins-good

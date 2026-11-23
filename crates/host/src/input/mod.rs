@@ -2,8 +2,10 @@
 //!
 //! Everything a client sends is untrusted. It passes through an
 //! [`InputGate`] (permission, rate limit, validation) and a bounded queue
-//! before an [`Injector`] sees it.
+//! before an [`Injector`] sees it. Keyboard and pointer go to the injector of
+//! the session's desktop; gamepads become virtual devices of their own.
 
+pub mod gamepad;
 pub mod x11;
 
 use std::collections::HashSet;
@@ -11,11 +13,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use linuxplay_proto::input::{InputEvent, KEY_MAX, MouseButton};
+use linuxplay_proto::input::{InputEvent, KEY_MAX, MAX_GAMEPADS, MouseButton};
 use linuxplay_proto::{MAX_INPUT_MESSAGE, decode};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tracing::debug;
+
+use self::gamepad::Gamepads;
 
 /// Events waiting for the injector.
 const INPUT_QUEUE: usize = 512;
@@ -30,7 +34,15 @@ const RATE_BURST: f64 = 2000.0;
 /// Can this event be dropped when the backend falls behind? Motion and
 /// scrolling can; key and button transitions must arrive, or keys stick.
 fn lossy(ev: &InputEvent) -> bool {
-    matches!(ev, InputEvent::PointerAbs { .. } | InputEvent::PointerRel { .. } | InputEvent::Scroll { .. })
+    matches!(
+        ev,
+        InputEvent::PointerAbs { .. }
+            | InputEvent::PointerRel { .. }
+            | InputEvent::Scroll { .. }
+            // A gamepad update carries the pad's whole state, so the next
+            // one repairs a dropped one.
+            | InputEvent::Gamepad(_)
+    )
 }
 
 /// The injector's queue could not take a key or button transition.
@@ -75,6 +87,8 @@ pub fn sanitize(ev: InputEvent) -> Option<InputEvent> {
             InputEvent::Scroll { dx: dx.clamp(-MAX_SCROLL, MAX_SCROLL), dy: dy.clamp(-MAX_SCROLL, MAX_SCROLL) }
         }
         InputEvent::Key { code, .. } if code > KEY_MAX => return None,
+        InputEvent::GamepadAttach { pad, .. } | InputEvent::GamepadDetach { pad } if pad >= MAX_GAMEPADS => return None,
+        InputEvent::Gamepad(state) if state.pad >= MAX_GAMEPADS => return None,
         other => other,
     })
 }
@@ -182,6 +196,8 @@ fn apply(inj: &mut dyn Injector, held: &mut Held, ev: InputEvent) {
             }
         }
         InputEvent::ReleaseAll => release_all(inj, held),
+        // Gamepads never reach an injector; see `spawn`.
+        InputEvent::GamepadAttach { .. } | InputEvent::Gamepad(_) | InputEvent::GamepadDetach { .. } => {}
     }
 }
 
@@ -203,6 +219,7 @@ pub fn spawn(mut inj: impl Injector) -> InputTx {
         .name("linuxplay-input".into())
         .spawn(move || {
             let mut held = Held::default();
+            let mut gamepads = Gamepads::default();
             while let Some(first) = rx.blocking_recv() {
                 let mut pending = Some(first);
                 while let Some(ev) = pending.take() {
@@ -219,6 +236,9 @@ pub fn spawn(mut inj: impl Injector) -> InputTx {
                         }
                     } else {
                         pending = rx.try_recv().ok();
+                    }
+                    if gamepads.handle(&ev) {
+                        continue;
                     }
                     apply(&mut inj, &mut held, ev);
                 }

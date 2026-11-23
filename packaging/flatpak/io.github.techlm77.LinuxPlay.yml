@@ -1,0 +1,86 @@
+# Flatpak manifest for LinuxPlay.
+#
+# Build with packaging/flatpak/build.sh, which needs no root: it uses
+# flatpak-builder from the org.flatpak.Builder flatpak.
+#
+# The Freedesktop runtime already carries what LinuxPlay runs on: GStreamer
+# with the VA-API, Vulkan and PipeWire plugins (plus NVENC/NVDEC once the
+# matching Nvidia driver extension is installed, which Flatpak does by
+# itself), SDL 3 and the system fonts.
+#
+# This build fetches crates from the network (build-args: --share=network).
+# A Flathub submission would vendor them instead (flatpak-cargo-generator).
+id: io.github.techlm77.LinuxPlay
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: linuxplay
+
+finish-args:
+  # Peer-to-peer media and the signalling connection.
+  - --share=network
+  # X11 shared memory, for the stream window and screen capture on X11.
+  - --share=ipc
+  # The stream window: Wayland, with X11 as the fallback.
+  - --socket=wayland
+  - --socket=fallback-x11
+  # Desktop sound in (host) and out (client).
+  - --socket=pulseaudio
+  # GPUs for encoding and decoding, game controllers on the client, and
+  # /dev/uinput for the virtual controllers a host creates. Flatpak has no
+  # narrower permission that covers uinput.
+  - --device=all
+  # Pairing PINs, approval requests and status notifications.
+  - --talk-name=org.freedesktop.Notifications
+  # The host's tray icon.
+  - --talk-name=org.kde.StatusNotifierWatcher
+  # Screen capture and input on Wayland go through the ScreenCast and
+  # RemoteDesktop portals, which are always reachable from the sandbox.
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  build-args:
+    - --share=network
+  env:
+    CARGO_HOME: /run/build/linuxplay/cargo
+
+modules:
+  # The runtime's GStreamer has no X11 screen capture; a host on an X11
+  # desktop needs it. Only that one plugin is built, at the runtime's version.
+  - name: ximagesrc
+    buildsystem: meson
+    config-opts:
+      - -Dauto_features=disabled
+      - -Dximagesrc=enabled
+      - -Dximagesrc-xshm=enabled
+      - -Dximagesrc-xfixes=enabled
+      - -Dximagesrc-xdamage=enabled
+    sources:
+      - type: archive
+        url: https://gstreamer.freedesktop.org/src/gst-plugins-good/gst-plugins-good-1.28.6.tar.xz
+        sha256: b0c620a4b18b6ee931b4c43bbf1760d308666dc37f730a7e7f1ad327e59ce2df
+
+  - name: linuxplay
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --locked -p linuxplay -p linuxplay-host
+      - install -Dm755 target/release/linuxplay /app/bin/linuxplay
+      - install -Dm755 target/release/linuxplay-host /app/bin/linuxplay-host
+      - install -Dm644 packaging/io.github.techlm77.LinuxPlay.svg
+        /app/share/icons/hicolor/scalable/apps/io.github.techlm77.LinuxPlay.svg
+      # Desktops name and badge windows by these.
+      - install -Dm644 packaging/io.github.techlm77.LinuxPlay.desktop
+        /app/share/applications/io.github.techlm77.LinuxPlay.desktop
+      - install -Dm644 packaging/io.github.techlm77.LinuxPlay.Host.desktop
+        /app/share/applications/io.github.techlm77.LinuxPlay.Host.desktop
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - .git
+          - packaging/flatpak/build
+          - packaging/flatpak/repo
+          - packaging/flatpak/.flatpak-builder

@@ -21,7 +21,7 @@ use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::{Notify, mpsc};
 
 use crate::approval::Decision;
-use crate::capture::CaptureKind;
+use crate::capture::{CaptureKind, TestPattern, TestPicture};
 use crate::server::{Host, HostConfig, Timeouts};
 use crate::trust::TrustStore;
 
@@ -67,6 +67,8 @@ async fn rig(name: &str, unattended: bool, displays: Option<BTreeSet<u32>>) -> R
         unattended,
         password: None,
         displays,
+        test_picture: TestPicture { width: 320, height: 240, pattern: TestPattern::Ball },
+        account: None,
     };
     let mut host = Host::with_notifier(cfg, Identity::generate("host").unwrap(), trust, None).unwrap();
     Arc::get_mut(&mut host).unwrap().timeouts = Timeouts {
@@ -286,7 +288,7 @@ async fn start_stream(
         SessionEvent::Video { .. } | SessionEvent::Audio { .. } => {}
         other => drop(tx.send(other)),
     });
-    let (session, answer) = rtc::accept_offer(conn.local_ip, &sdp, handler)?;
+    let (session, answer) = rtc::accept_offer(conn.route.reach(), &sdp, handler).await?;
     conn.signal.send(&ClientMsg::Answer { sdp: answer }).await?;
     Ok((session, rx, control))
 }

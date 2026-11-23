@@ -3,12 +3,12 @@
 //! address, Tailscale down) is an error rather than a fallback to all
 //! interfaces.
 
-use std::ffi::CStr;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::process::Command;
+use std::net::{IpAddr, Ipv4Addr};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use clap::ValueEnum;
+pub use linuxplay_net::netif::is_tailscale;
+use linuxplay_net::netif::{Iface, interfaces, is_private, tailscale_addresses};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ListenMode {
@@ -33,48 +33,6 @@ impl ListenMode {
     }
 }
 
-/// One address on one network interface.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Iface {
-    pub name: String,
-    pub addr: IpAddr,
-}
-
-/// The addresses on interfaces that are up.
-pub fn interfaces() -> Result<Vec<Iface>> {
-    let mut out = Vec::new();
-    // SAFETY: getifaddrs fills a linked list that we only read, and free once.
-    unsafe {
-        let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
-        if libc::getifaddrs(&mut head) != 0 {
-            return Err(std::io::Error::last_os_error()).context("listing network interfaces");
-        }
-        let mut cur = head;
-        while !cur.is_null() {
-            let ifa = &*cur;
-            cur = ifa.ifa_next;
-            if ifa.ifa_addr.is_null() || ifa.ifa_flags & libc::IFF_UP as libc::c_uint == 0 {
-                continue;
-            }
-            let addr = match (*ifa.ifa_addr).sa_family as libc::c_int {
-                libc::AF_INET => {
-                    let sa = &*(ifa.ifa_addr as *const libc::sockaddr_in);
-                    IpAddr::V4(Ipv4Addr::from(u32::from_be(sa.sin_addr.s_addr)))
-                }
-                libc::AF_INET6 => {
-                    let sa = &*(ifa.ifa_addr as *const libc::sockaddr_in6);
-                    IpAddr::V6(Ipv6Addr::from(sa.sin6_addr.s6_addr))
-                }
-                _ => continue,
-            };
-            let name = CStr::from_ptr(ifa.ifa_name).to_string_lossy().into_owned();
-            out.push(Iface { name, addr });
-        }
-        libc::freeifaddrs(head);
-    }
-    Ok(out)
-}
-
 /// Interfaces that are virtual plumbing or someone else's network rather than
 /// the LAN: containers, VMs and VPNs.
 fn is_virtual(name: &str) -> bool {
@@ -85,64 +43,12 @@ fn is_virtual(name: &str) -> bool {
     PREFIXES.iter().any(|p| name.starts_with(p))
 }
 
-fn is_private(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => v4.is_private(),
-        // Unique local addresses (fc00::/7). Link-local needs a scope id to
-        // bind, so it isn't offered.
-        IpAddr::V6(v6) => v6.segments()[0] & 0xfe00 == 0xfc00,
-    }
-}
-
-/// Tailscale's address ranges: 100.64.0.0/10 and fd7a:115c:a1e0::/48.
-pub fn is_tailscale(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let o = v4.octets();
-            o[0] == 100 && (o[1] & 0xc0) == 64
-        }
-        IpAddr::V6(v6) => {
-            let s = v6.segments();
-            s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0
-        }
-    }
-}
-
 /// Private addresses on physical-looking interfaces.
 pub fn lan_addresses(ifaces: &[Iface]) -> Vec<IpAddr> {
     let mut v: Vec<IpAddr> =
         ifaces.iter().filter(|i| !is_virtual(&i.name) && is_private(i.addr)).map(|i| i.addr).collect();
     v.dedup();
     v
-}
-
-/// This node's Tailscale addresses that are actually up on an interface,
-/// from `tailscale ip`, or from the `tailscale*` interface if the CLI isn't
-/// installed. Fails (closed) when Tailscale isn't connected.
-fn tailscale_addresses(ifaces: &[Iface]) -> Result<Vec<IpAddr>> {
-    let local: Vec<IpAddr> = ifaces.iter().map(|i| i.addr).collect();
-    let from_cli = match Command::new("tailscale").arg("ip").output() {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|l| l.trim().parse::<IpAddr>().ok())
-            .filter(|ip| is_tailscale(*ip))
-            .collect::<Vec<_>>(),
-        Ok(out) => bail!(
-            "Tailscale isn't connected ({}); start it, or choose another --listen mode",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ifaces
-            .iter()
-            .filter(|i| i.name.starts_with("tailscale") && is_tailscale(i.addr))
-            .map(|i| i.addr)
-            .collect(),
-        Err(e) => return Err(e).context("running `tailscale ip`"),
-    };
-    let up: Vec<IpAddr> = from_cli.into_iter().filter(|ip| local.contains(ip)).collect();
-    if up.is_empty() {
-        bail!("this machine has no Tailscale address up; connect Tailscale, or choose another --listen mode");
-    }
-    Ok(up)
 }
 
 /// The addresses to listen on: `explicit` if given, else those of `mode`.
@@ -162,7 +68,7 @@ pub fn resolve(mode: ListenMode, explicit: &[IpAddr]) -> Result<Vec<IpAddr>> {
             }
             v
         }
-        ListenMode::Tailscale => tailscale_addresses(&interfaces()?)?,
+        ListenMode::Tailscale => tailscale_addresses().context("choose another --listen mode, or connect Tailscale")?,
     })
 }
 
@@ -202,15 +108,6 @@ mod tests {
         let got = lan_addresses(&ifaces);
         let want: Vec<IpAddr> = ["192.168.8.124", "192.168.8.120", "fd00::5"].iter().map(|s| s.parse().unwrap()).collect();
         assert_eq!(got, want);
-    }
-
-    #[test]
-    fn tailscale_ranges() {
-        assert!(is_tailscale("100.99.122.56".parse().unwrap()));
-        assert!(is_tailscale("100.64.0.1".parse().unwrap()));
-        assert!(!is_tailscale("100.128.0.1".parse().unwrap()));
-        assert!(is_tailscale("fd7a:115c:a1e0::1".parse().unwrap()));
-        assert!(!is_tailscale("192.168.1.1".parse().unwrap()));
     }
 
     #[test]

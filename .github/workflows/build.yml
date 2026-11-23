@@ -18,25 +18,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Ubuntu 24.04
-            image: ubuntu:24.04
+          # SDL 3 is packaged from Ubuntu 25.04 and Fedora 42 on.
+          - name: Ubuntu 26.04
+            image: ubuntu:26.04
             deps: >-
               export DEBIAN_FRONTEND=noninteractive;
               apt-get update -qq;
               apt-get install -y -qq curl ca-certificates build-essential cmake pkg-config
-              libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
-              libgtk-4-dev libadwaita-1-dev
-          - name: Fedora 41
-            image: fedora:41
+              libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libsdl3-dev
+          - name: Fedora 45
+            image: fedora:45
             deps: >-
               dnf -y install curl gcc gcc-c++ cmake pkgconf-pkg-config
-              gstreamer1-devel gstreamer1-plugins-base-devel
-              gtk4-devel libadwaita-devel
+              gstreamer1-devel gstreamer1-plugins-base-devel SDL3-devel
           - name: Arch Linux
             image: archlinux:latest
             deps: >-
               pacman -Syu --noconfirm --needed base-devel cmake curl
-              gstreamer gst-plugins-base gtk4 libadwaita
+              gstreamer gst-plugins-base sdl3
     steps:
       - uses: actions/checkout@v4
       - name: Build and test
@@ -61,7 +60,7 @@ jobs:
       - name: Clippy
         run: |
           docker run --rm -v "$PWD":/src:ro archlinux:latest bash -euc '
-            pacman -Syu --noconfirm --needed base-devel cmake curl gstreamer gst-plugins-base gtk4 libadwaita
+            pacman -Syu --noconfirm --needed base-devel cmake curl gstreamer gst-plugins-base sdl3
             curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy
             . "$HOME/.cargo/env"
             cd /src
