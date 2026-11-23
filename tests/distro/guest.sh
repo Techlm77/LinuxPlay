@@ -6,7 +6,9 @@
 #   install FILE       install LinuxPlay the way a user would: a Flatpak bundle
 #                      (*.flatpak) or an AppImage (*.AppImage), next to this script
 #   facts              what the build finds here: encoders, decoders, uinput
-#   stream CAPTURE     host + client on this machine for 14 s (CAPTURE: test or x11)
+#   stream CAPTURE     host + client on this machine for 14 s (CAPTURE: test, x11, or
+#                      portal, which waits STREAM_WAIT s for the share dialog to be
+#                      answered and offers a virtual display)
 #   stop               end anything `stream` left running
 set -u
 APP=io.github.techlm77.LinuxPlay
@@ -144,6 +146,7 @@ stream)
     mkdir -p "$conf"; ( umask 077; printf '%s\n' "$PASSWORD" > "$conf/password" )
     stop_all
     extra=(); [ "$capture" = test ] && extra=(--test-size 1280x720 --test-pattern bars)
+    [ "$capture" = portal ] && extra=(--virtual-display)
     if [ "$KIND" = appimage ]; then
         run_host=("$AI" host); run_client=("$AI")
     else
@@ -154,7 +157,7 @@ stream)
     sleep 4
     LINUXPLAY_PIN="$PASSWORD" RUST_LOG=info,linuxplay_client::viewer::stream=debug nohup "${run_client[@]}" \
         127.0.0.1 --display 0 --stats > "$DIR/client-$capture.log" 2>&1 &
-    sleep 14
+    sleep "${STREAM_WAIT:-14}"
     kv SCREENSHOT_NOW yes
     sleep 3
     stop_all

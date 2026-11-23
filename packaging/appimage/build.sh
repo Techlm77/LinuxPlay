@@ -27,7 +27,10 @@ case $ARCH in
     *) echo "Unsupported architecture: $ARCH" >&2; exit 1 ;;
 esac
 # Libraries every system provides itself (the AppImage excludelist), plus the
-# ones that must match the system's drivers: VA-API, Vulkan, CUDA, Mesa.
+# ones that must match the system's drivers: VA-API's core (a VA driver needs a
+# libva at least as new as the one it was built for), Vulkan, CUDA, Mesa.
+# libva's small X11 and Wayland parts, which FFmpeg needs and not every
+# system installs, are bundled; they work with any newer libva core.
 EXCLUDE=' ld-linux.so.2 ld-linux-x86-64.so.2 ld-linux-aarch64.so.1 libanl.so.1 libBrokenLocale.so.1
  libcidn.so.1 libc.so.6 libdl.so.2 libm.so.6 libmvec.so.1 libnss_compat.so.2 libnss_dns.so.2
  libnss_files.so.2 libnss_hesiod.so.2 libpthread.so.0 libresolv.so.2 librt.so.1 libthread_db.so.1
@@ -37,7 +40,7 @@ EXCLUDE=' ld-linux.so.2 ld-linux-x86-64.so.2 ld-linux-aarch64.so.1 libanl.so.1 l
  libfontconfig.so.1 libfreetype.so.6 libharfbuzz.so.0 libcom_err.so.2 libexpat.so.1 libgcc_s.so.1
  libgpg-error.so.0 libICE.so.6 libSM.so.6 libusb-1.0.so.0 libuuid.so.1 libz.so.1 libjack.so.0
  libpipewire-0.3.so.0 libxcb-dri3.so.0 libxcb-dri2.so.0 libfribidi.so.0 libgmp.so.10
- libva.so.2 libva-drm.so.2 libva-x11.so.2 libva-wayland.so.2 libvulkan.so.1 libcuda.so.1
+ libva.so.2 libva-drm.so.2 libvulkan.so.1 libcuda.so.1
  libudev.so.1 libsystemd.so.0 libdbus-1.so.3 libpulse.so.0 '
 EXCLUDE=" $(echo $EXCLUDE) "
 # GStreamer plugins LinuxPlay uses: capture, conversion, parsing, codecs
@@ -57,7 +60,7 @@ $SUDO apt-get install -y -qq --no-install-recommends \
     gstreamer1.0-gl gstreamer1.0-pulseaudio \
     libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev \
     libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev \
-    libgles-dev libdrm-dev libgbm-dev libudev-dev libdbus-1-dev >/dev/null
+    libgles-dev libdrm-dev libgbm-dev libudev-dev libdbus-1-dev libdecor-0-plugin-1-cairo >/dev/null
 
 echo "== Rust"
 if ! command -v cargo >/dev/null; then
@@ -83,6 +86,13 @@ for p in $PLUGINS; do
 done
 cp -L "$LIB/gstreamer1.0/gstreamer-1.0/gst-plugin-scanner" "$APPDIR/usr/libexec/"
 
+echo "== Window decorations"
+# SDL draws GNOME's window frames through a libdecor plugin. The system's own
+# would load the system's GTK and GLib next to the bundled GLib, so the
+# AppImage brings libdecor's self-contained Cairo plugin (see AppRun).
+mkdir -p "$APPDIR/usr/lib/libdecor/plugins-1"
+cp -L "$LIB/libdecor/plugins-1/libdecor-cairo.so" "$APPDIR/usr/lib/libdecor/plugins-1/"
+
 echo "== Libraries"
 excluded() { case $EXCLUDE in *" $1 "*) return 0 ;; esac; return 1; }
 find "$APPDIR/usr" -type f | while read -r f; do
@@ -95,6 +105,12 @@ find "$APPDIR/usr" -type f | while read -r f; do  # bundled libraries are found 
     file -b "$f" | grep -q '^ELF' || continue
     patchelf --set-rpath "\$ORIGIN/$(realpath --relative-to="$(dirname "$f")" "$APPDIR/usr/lib")" "$f"
 done
+# libva for systems that have none (Ubuntu's desktop install doesn't): FFmpeg
+# won't load without it. Kept out of usr/lib so the system's own, which its VA
+# drivers need, wins wherever there is one; AppRun adds this only when there
+# isn't, and then there are no VA drivers to disagree with.
+mkdir -p "$APPDIR/usr/lib/fallback"
+cp -L "$LIB/libva.so.2" "$LIB/libva-drm.so.2" "$APPDIR/usr/lib/fallback/"
 strip --strip-unneeded "$APPDIR/usr/bin/"* 2>/dev/null || true
 
 echo "== AppImage"
