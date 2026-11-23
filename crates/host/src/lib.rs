@@ -7,6 +7,7 @@
 mod approval;
 mod audio;
 mod capture;
+mod clipboard;
 pub mod control;
 mod input;
 mod invites;

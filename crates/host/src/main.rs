@@ -65,6 +65,10 @@ struct Cli {
     /// Don't stream desktop audio.
     #[arg(long)]
     no_audio: bool,
+    /// On Wayland, also offer a new virtual screen in the share dialog: a
+    /// display that exists only for the stream (for headless computers).
+    #[arg(long)]
+    virtual_display: bool,
     /// Size of the picture `--capture test` shows, e.g. 1920x1080.
     #[arg(long, hide = true, value_name = "WIDTHxHEIGHT", value_parser = parse_size, default_value = "1280x720")]
     test_size: (u32, u32),
@@ -340,6 +344,7 @@ async fn main() -> Result<()> {
         password,
         displays: (!cli.displays.is_empty()).then(|| cli.displays.iter().copied().collect::<BTreeSet<_>>()),
         test_picture: TestPicture { width: cli.test_size.0, height: cli.test_size.1, pattern: cli.test_pattern },
+        virtual_display: cli.virtual_display,
         account: Account::load(&Account::default_path())?,
     };
     Host::new(cfg, identity, trust).await?.run().await

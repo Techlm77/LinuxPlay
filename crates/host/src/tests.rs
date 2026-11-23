@@ -68,6 +68,7 @@ async fn rig(name: &str, unattended: bool, displays: Option<BTreeSet<u32>>) -> R
         password: None,
         displays,
         test_picture: TestPicture { width: 320, height: 240, pattern: TestPattern::Ball },
+        virtual_display: false,
         account: None,
     };
     let mut host = Host::with_notifier(cfg, Identity::generate("host").unwrap(), trust, None).unwrap();

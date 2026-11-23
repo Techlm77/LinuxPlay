@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tracing::debug;
 
+pub use self::gamepad::Feedback;
 use self::gamepad::Gamepads;
 
 /// Events waiting for the injector.
@@ -210,16 +211,17 @@ fn release_all(inj: &mut dyn Injector, held: &mut Held) {
     }
 }
 
-/// Run an injector on its own thread. Pointer motion that piles up while the
+/// Run an injector on its own thread; rumble from the session's virtual
+/// gamepads goes to `feedback`. Pointer motion that piles up while the
 /// backend is busy is merged, so a slow backend can't fall behind the mouse.
 /// Everything still held is released when the sender is dropped.
-pub fn spawn(mut inj: impl Injector) -> InputTx {
+pub fn spawn(mut inj: impl Injector, feedback: Feedback) -> InputTx {
     let (tx, mut rx) = channel();
     std::thread::Builder::new()
         .name("linuxplay-input".into())
         .spawn(move || {
             let mut held = Held::default();
-            let mut gamepads = Gamepads::default();
+            let mut gamepads = Gamepads::new(feedback);
             while let Some(first) = rx.blocking_recv() {
                 let mut pending = Some(first);
                 while let Some(ev) = pending.take() {
@@ -362,7 +364,7 @@ mod tests {
     #[test]
     fn held_keys_are_released_when_the_client_goes() {
         let log = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let tx = spawn(Recorder(log.clone()));
+        let tx = spawn(Recorder(log.clone()), Feedback::default());
         tx.push(InputEvent::Key { code: 30, pressed: true }).unwrap();
         tx.push(InputEvent::Button { button: MouseButton::Left, pressed: true }).unwrap();
         drop(tx);

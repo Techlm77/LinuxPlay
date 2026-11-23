@@ -229,6 +229,9 @@ pub struct StartHosting {
     /// sign in to this computer by its Tailscale name.
     #[serde(default)]
     pub account_server: bool,
+    /// On Wayland, also offer a new virtual screen in the share dialog.
+    #[serde(default)]
+    pub virtual_display: bool,
 }
 
 fn yes() -> bool {
@@ -325,7 +328,7 @@ mod tests {
             serde_json::from_str(r#"{"jsonrpc":"2.0","id":7,"method":"host.start","params":{"unattended":true}}"#).unwrap();
         assert_eq!(request.method, method::HOST_START);
         let params: StartHosting = serde_json::from_value(request.params).unwrap();
-        assert_eq!(params, StartHosting { unattended: true, audio: true, account_server: false });
+        assert_eq!(params, StartHosting { unattended: true, audio: true, account_server: false, virtual_display: false });
 
         // Params may be left out altogether.
         let bare: Request = serde_json::from_str(r#"{"jsonrpc":"2.0","id":"a","method":"state"}"#).unwrap();

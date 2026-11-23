@@ -9,7 +9,7 @@ use linuxplay_proto::input::InputEvent;
 use linuxplay_proto::signal::MonitorInfo;
 use tracing::info;
 
-use crate::input::{self, InputTx};
+use crate::input::{self, Feedback, InputTx};
 use crate::monitor;
 use crate::portal::PortalStream;
 
@@ -47,6 +47,8 @@ pub struct Capture {
     pub height: u32,
     /// Where to send input; `None` for a view-only session.
     pub input: Option<InputTx>,
+    /// Where rumble from the session's virtual gamepads goes.
+    pub feedback: Feedback,
     _keep: Box<dyn Any + Send>,
 }
 
@@ -60,8 +62,9 @@ pub fn monitors_x11() -> Result<Vec<MonitorInfo>> {
 pub fn open_x11(fps: u32, mon: &MonitorInfo, control: bool) -> Result<Capture> {
     let display = std::env::var("DISPLAY").ok();
     let area = (mon.x, mon.y, mon.width, mon.height);
+    let feedback = Feedback::default();
     let input = if control {
-        Some(input::spawn(input::x11::X11Injector::connect(display.as_deref(), area)?))
+        Some(input::spawn(input::x11::X11Injector::connect(display.as_deref(), area)?, feedback.clone()))
     } else {
         None
     };
@@ -78,6 +81,7 @@ pub fn open_x11(fps: u32, mon: &MonitorInfo, control: bool) -> Result<Capture> {
         width: mon.width,
         height: mon.height,
         input,
+        feedback,
         _keep: Box::new(()),
     })
 }
@@ -146,11 +150,13 @@ pub fn open_test(
         mon.width,
         mon.height
     );
+    let feedback = Feedback::default();
     Capture {
         source,
         width: mon.width,
         height: mon.height,
-        input: control.then(|| input::spawn(input::Recorder(log))),
+        input: control.then(|| input::spawn(input::Recorder(log), feedback.clone())),
+        feedback,
         _keep: Box::new(()),
     }
 }
@@ -162,6 +168,7 @@ pub fn from_portal(stream: PortalStream) -> Capture {
         width: stream.width,
         height: stream.height,
         input: stream.input,
+        feedback: stream.feedback,
         _keep: Box::new(stream._keep),
     }
 }

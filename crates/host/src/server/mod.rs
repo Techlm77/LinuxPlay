@@ -38,7 +38,8 @@ use crate::invites::Invites;
 use crate::limits::{PairLimiter, Pending, PendingPermit};
 use crate::netif::{self, ListenMode};
 use crate::notify::Notifier;
-use crate::portal::{self, PortalHost};
+use crate::clipboard::Clipboard;
+use crate::portal::{self, PortalHost, PortalOptions};
 use crate::sessions::{Sessions, State};
 use crate::trust::TrustStore;
 
@@ -69,6 +70,8 @@ pub struct HostConfig {
     pub displays: Option<BTreeSet<u32>>,
     /// What the test capture shows.
     pub test_picture: TestPicture,
+    /// On Wayland, also offer a new virtual screen in the share dialog.
+    pub virtual_display: bool,
     /// The account this computer is signed in to, if any: it makes the host
     /// reachable through the account's rendezvous server.
     pub account: Option<Account>,
@@ -102,6 +105,7 @@ impl HostConfig {
             password: None,
             displays: None,
             test_picture: TestPicture::default(),
+            virtual_display: false,
             account: None,
         })
     }
@@ -165,6 +169,8 @@ pub struct Host {
     quit: Arc<Notify>,
     /// Whether the internet can reach this host, which it shouldn't.
     exposure: Exposure,
+    /// This desktop's clipboard, shared with sessions that may control it.
+    pub(crate) clipboard: Clipboard,
     /// Invites handed out, and which sessions came by which invite. Guests
     /// are not trusted devices, so the trust store says nothing about them.
     invites: Invites,
@@ -218,6 +224,7 @@ impl Host {
             budget: Budget::default(),
             quit: Arc::default(),
             exposure,
+            clipboard: Clipboard::default(),
             invites: Invites::default(),
             guests: Mutex::default(),
             test_input: Arc::default(),
@@ -230,7 +237,12 @@ impl Host {
         if let Some(p) = guard.as_ref() {
             return Ok(p.clone());
         }
-        let p = PortalHost::create(self.cfg.unattended).await?;
+        let options = PortalOptions {
+            persist: self.cfg.unattended,
+            virtual_display: self.cfg.virtual_display,
+            clipboard: self.clipboard.port(),
+        };
+        let p = PortalHost::create(options).await?;
         *guard = Some(p.clone());
         Ok(p)
     }
@@ -378,6 +390,9 @@ impl Host {
 
         let quit = self.quit.clone();
         tokio::spawn(control::serve(control_listener, self.clone()));
+        if self.capture_kind == CaptureKind::X11 {
+            crate::clipboard::x11::spawn(std::env::var("DISPLAY").ok(), self.clipboard.port());
+        }
         if let Some(account) = self.cfg.account.clone() {
             tokio::spawn(self.clone().stay_reachable(account));
         }

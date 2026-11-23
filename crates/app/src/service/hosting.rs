@@ -39,6 +39,7 @@ impl Running {
         let mut config = HostConfig::standard(name)?;
         config.unattended = options.unattended;
         config.audio = options.audio;
+        config.virtual_display = options.virtual_display;
         config.account = account;
         if options.unattended {
             // Nobody is there to read a PIN: new devices pair with the

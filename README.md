@@ -146,7 +146,9 @@ with them on Tailscale (Tailscale's *Share* feature) rather than opening ports.
 | Ctrl+Alt+Shift+**S** | statistics: resolution, bitrate, and where each millisecond goes |
 
 Game controllers plugged into the client appear on the host as virtual
-gamepads. That needs the host's user to be allowed to create input devices.
+gamepads, and rumble from games on the host plays on the client's controller.
+Text copied on either computer can be pasted on the other (only in sessions
+allowed to control the host). That needs the host's user to be allowed to create input devices.
 In our tests Bazzite, SteamOS, CachyOS, EndeavourOS, Manjaro, Fedora KDE and
 Pop!_OS already allow it; elsewhere (Arch, Debian, Ubuntu, Mint, Zorin, Fedora GNOME,
 openSUSE, NixOS) install LinuxPlay's udev rule once:
@@ -157,6 +159,13 @@ sudo udevadm control --reload && sudo udevadm trigger --name-match=uinput
 ```
 `linuxplay --help` lists the options (`--display`, `--fullscreen`,
 `--game-mouse`, `--stats`).
+
+### Headless hosts: virtual displays
+
+On Wayland, `linuxplay-host --virtual-display` (or `"virtual_display": true`
+through the API) adds "a new virtual screen" to the share dialog: the
+compositor makes a display that exists only for the stream, so a computer with
+no monitor attached can still be used.
 
 ### Managing a running host
 
@@ -397,8 +406,7 @@ over real sockets and the account server end to end.
 ## Not there yet
 
 - The graphical front end (the engine and its API are ready for it).
-- Virtual displays for headless hosts, clipboard sync, rumble, a client-side
-  cursor, and an AppImage.
+- A client-side cursor, and an AppImage.
 
 ## License
 

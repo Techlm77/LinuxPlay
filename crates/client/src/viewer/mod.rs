@@ -23,7 +23,7 @@ use sdl3::EventPump;
 use sdl3::event::{Event, WindowEvent};
 use sdl3::keyboard::{Mod, Scancode};
 use tokio::sync::oneshot;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use self::hud::Line;
 use self::render::{RenderThread, Scene};
@@ -107,6 +107,8 @@ struct Viewer {
     hint_until: Option<Instant>,
     /// Something the user should act on, shown at the bottom of the window.
     warning: Option<String>,
+    /// The clipboard text last exchanged with the host, either way.
+    clipboard: Option<String>,
     next_tick: Instant,
     /// What the render thread was last told to draw.
     scene: Scene,
@@ -179,6 +181,7 @@ impl Viewer {
             show_stats: options.stats,
             hint_until: None,
             warning: None,
+            clipboard: None,
             next_tick: Instant::now() + TICK,
             scene: Scene::default(),
             quit: false,
@@ -209,6 +212,10 @@ impl Viewer {
         match &event {
             Event::Quit { .. } | Event::Window { win_event: WindowEvent::CloseRequested, .. } => self.quit = true,
             Event::Window { win_event, .. } => self.on_window_event(win_event),
+            Event::ClipboardUpdate { .. } => {
+                self.share_clipboard();
+                return;
+            }
             Event::User { .. } => {
                 // Taking the payload out frees it.
                 if event.as_user_event_type::<Wake>().is_some() {
@@ -247,6 +254,18 @@ impl Viewer {
                 stream.send_input(InputEvent::ReleaseAll);
             }
         self.layout();
+    }
+
+    /// Text was copied on this computer: hand it to the host.
+    fn share_clipboard(&mut self) {
+        let Stage::Streaming { stream, .. } = &self.stage else { return };
+        let Ok(text) = self.gl.video.clipboard().clipboard_text() else { return };
+        if text.is_empty() || self.clipboard.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        debug!("clipboard: {} characters copied here, sent to the host", text.chars().count());
+        stream.send_clipboard(&text);
+        self.clipboard = Some(text);
     }
 
     /// Handle Ctrl+Alt+Shift+key. Returns whether the event was a hotkey.
@@ -409,6 +428,15 @@ impl Viewer {
         }
         for effect in changes.rumble {
             self.gamepads.rumble(effect);
+        }
+        if let Some(text) = changes.clipboard.filter(|text| self.clipboard.as_ref() != Some(text)) {
+            debug!("clipboard: {} characters from the host", text.chars().count());
+            // Remembered first, so the clipboard update this causes isn't
+            // sent straight back.
+            self.clipboard = Some(text.clone());
+            if let Err(e) = self.gl.video.clipboard().set_clipboard_text(&text) {
+                warn!("couldn't set the clipboard: {e}");
+            }
         }
         if let Some(failure) = changes.ended {
             self.end(failure);

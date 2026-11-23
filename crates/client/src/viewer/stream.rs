@@ -40,6 +40,8 @@ pub struct Changes {
     pub input_opened: bool,
     /// Rumble effects the host asked for.
     pub rumble: Vec<Rumble>,
+    /// Text copied on the host, newest.
+    pub clipboard: Option<String>,
     /// The stream is over; the inner value says why if it failed.
     pub ended: Option<Option<String>>,
 }
@@ -182,6 +184,7 @@ impl Stream {
                 }
                 Ok(ControlMsg::Stats(stats)) => self.host = Some(stats),
                 Ok(ControlMsg::Rumble(effect)) => changes.rumble.push(effect),
+                Ok(ControlMsg::Clipboard { text }) if self.control => changes.clipboard = Some(text),
                 Ok(other) => debug!("control: {other:?}"),
                 Err(e) => debug!("control: {e}"),
             },
@@ -242,6 +245,15 @@ impl Stream {
     }
 
     /// Send input to the host, once it can be received and if it is allowed.
+    /// Share text copied here with the host, if this session may control it
+    /// and the text fits in one message.
+    pub fn send_clipboard(&self, text: &str) {
+        let message = encode(&ControlMsg::Clipboard { text: text.to_string() });
+        if self.control && message.len() <= MAX_CONTROL_MESSAGE {
+            self.session.send(Channel::Control, message);
+        }
+    }
+
     pub fn send_input(&self, event: InputEvent) {
         // The host ignores input from a view-only session anyway.
         if self.control && self.input_ready {
