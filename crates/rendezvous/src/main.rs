@@ -52,7 +52,7 @@ fn addresses(listen: &str, port: u16) -> Result<Vec<SocketAddr>> {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,zbus=error".into()))
         .init();
     let cli = Cli::parse();
     let store = Store::open(&cli.database).with_context(|| format!("opening {}", cli.database.display()))?;

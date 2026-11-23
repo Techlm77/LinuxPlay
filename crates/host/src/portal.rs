@@ -292,6 +292,12 @@ async fn request(
         .context("starting the portal session")?
         .response()
         .context("the screen-share request was denied")?;
+    // The compositor may share the screen but not the clipboard.
+    let clipboard = clipboard.filter(|_| {
+        let enabled = selected.is_clipboard_enabled();
+        info!("clipboard sharing {}", if enabled { "allowed" } else { "not allowed by the desktop" });
+        enabled
+    });
     Ok((selected, clipboard))
 }
 

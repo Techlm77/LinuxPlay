@@ -45,6 +45,7 @@ pub async fn serve(portal: Portal, session: Arc<Session<RemoteDesktop>>, mut por
     loop {
         tokio::select! {
             Some((_, change)) = owners.next() => {
+                debug!("clipboard owner changed (ours: {:?}) offering {:?}", change.session_is_owner(), change.mime_types());
                 // Our own offer coming back is not a copy.
                 if change.session_is_owner() == Some(true) {
                     continue;
