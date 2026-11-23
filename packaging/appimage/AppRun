@@ -1,0 +1,18 @@
+#!/bin/sh
+# LinuxPlay AppImage entry point.
+#   LinuxPlay.AppImage TARGET | connect … | service | api …   the stream window and engine
+#   LinuxPlay.AppImage host [options]                          share this computer
+HERE=$(dirname "$(readlink -f "$0")")
+VERSION=$(cat "$HERE/usr/share/linuxplay/version" 2>/dev/null || echo unknown)
+CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/linuxplay
+mkdir -p "$CACHE"
+# The bundled GStreamer, with its own plugin registry; graphics drivers, VA-API
+# and CUDA come from the system.
+export GST_PLUGIN_SYSTEM_PATH_1_0="$HERE/usr/lib/gstreamer-1.0"
+export GST_PLUGIN_PATH_1_0=
+export GST_PLUGIN_SCANNER_1_0="$HERE/usr/libexec/gst-plugin-scanner"
+export GST_REGISTRY_1_0="$CACHE/gstreamer-registry-$VERSION.bin"
+case "${1:-}" in
+    host) shift; exec "$HERE/usr/bin/linuxplay-host" "$@" ;;
+    *) exec "$HERE/usr/bin/linuxplay" "$@" ;;
+esac

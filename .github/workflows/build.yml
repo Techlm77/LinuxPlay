@@ -68,6 +68,21 @@ jobs:
             cargo clippy --workspace --all-targets --locked -- -D clippy::correctness -D clippy::suspicious
           '
 
+  # The AppImage, built on Ubuntu 24.04 as packaging/appimage/build.sh says.
+  appimage:
+    name: AppImage
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: packaging/appimage/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LinuxPlay-AppImage
+          path: dist/*.AppImage
+
   # Known vulnerabilities in dependencies (RustSec advisory database).
   audit:
     name: Dependency audit

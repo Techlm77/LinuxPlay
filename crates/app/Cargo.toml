@@ -9,6 +9,9 @@ license.workspace = true
 name = "linuxplay"
 path = "src/main.rs"
 
+[features]
+bundled-sdl = ["linuxplay-client/bundled-sdl"]
+
 [dependencies]
 linuxplay-client = { path = "../client" }
 linuxplay-host = { path = "../host" }

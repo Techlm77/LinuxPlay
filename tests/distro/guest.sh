@@ -3,7 +3,8 @@
 # the test user. Prints KEY=VALUE lines that run.py collects; anything else is
 # log. Apps are started inside the logged-in graphical session.
 #
-#   install BUNDLE     install the Flatpak bundle (a file next to this script) the way a user would
+#   install FILE       install LinuxPlay the way a user would: a Flatpak bundle
+#                      (*.flatpak) or an AppImage (*.AppImage), next to this script
 #   facts              what the build finds here: encoders, decoders, uinput
 #   stream CAPTURE     host + client on this machine for 14 s (CAPTURE: test or x11)
 #   stop               end anything `stream` left running
@@ -47,11 +48,47 @@ pkg_install() {
     else return 1; fi
 }
 
-host() { flatpak run --command=linuxplay-host "$APP" "$@"; }
 plain() { sed 's/\x1b\[[0-9;]*m//g'; }
+
+# How LinuxPlay was installed decides how it is run.
+KIND=$(cat "$DIR/kind" 2>/dev/null || echo flatpak)
+AI="$HOME/Applications/LinuxPlay.AppImage"
+client() {
+    if [ "$KIND" = appimage ]; then "$AI" "$@"; else flatpak run "$APP" "$@"; fi
+}
+host() {
+    if [ "$KIND" = appimage ]; then "$AI" host "$@"; else flatpak run --command=linuxplay-host "$APP" "$@"; fi
+}
+host_config() {
+    if [ "$KIND" = appimage ]; then echo "$HOME/.config/linuxplay/host"; else echo "$HOME/.var/app/$APP/config/linuxplay/host"; fi
+}
+stop_all() {
+    if [ "$KIND" = appimage ]; then pkill -x linuxplay-host; pkill -x linuxplay; else flatpak kill "$APP"; fi
+} 2>/dev/null
 
 case "${1:-}" in
 install)
+    if [ "${2##*.}" = AppImage ]; then
+        echo appimage > "$DIR/kind"
+        mkdir -p "$HOME/Applications"
+        install -m755 "$DIR/$2" "$AI"
+        start=$(date +%s)
+        # The AppImage mounts itself with FUSE 3's fusermount.
+        if ! "$AI" --version > "$DIR/install.log" 2>&1; then
+            if grep -qi fuse "$DIR/install.log"; then
+                kv EXTRA_STEP "install FUSE 3 (the package that provides fusermount3)"
+                pkg_install fuse3 >> "$DIR/install.log" 2>&1 || pkg_install fuse >> "$DIR/install.log" 2>&1
+            fi
+        fi
+        kv INSTALL_SECONDS "$(( $(date +%s) - start ))"
+        if "$AI" --version >> "$DIR/install.log" 2>&1; then
+            kv INSTALL_OK yes; kv RUNTIME "AppImage $("$AI" --version 2>/dev/null)"
+        else
+            kv INSTALL_OK no; kv ERROR "$(tail -3 "$DIR/install.log")"; exit 1
+        fi
+        exit 0
+    fi
+    echo flatpak > "$DIR/kind"
     bundle="$DIR/$2"
     if ! have flatpak; then
         kv EXTRA_STEP "install Flatpak first"
@@ -86,31 +123,41 @@ install)
     ;;
 facts)
     import_session || kv WARNING "no graphical session found"
-    kv HELP_CLIENT "$(flatpak run "$APP" connect --help 2>&1 | grep -c -- '--fullscreen\|--game-mouse\|--display')"
+    kv HELP_CLIENT "$(client connect --help 2>&1 | grep -c -- '--fullscreen\|--game-mouse\|--display')"
     kv HELP_HOST "$(host --help 2>&1 | grep -c 'account\|invite\|sessions')"
     kv ENCODERS "$(host encoders 2>/dev/null | awk '{print $1}' | tr '\n' ' ')"
-    kv X11_CAPTURE "$(flatpak run --command=gst-inspect-1.0 "$APP" --exists ximagesrc 2>/dev/null && echo yes || echo no)"
+    if [ "$KIND" = appimage ]; then
+        (cd "$DIR" && rm -rf squashfs-root && "$AI" --appimage-extract usr/lib/gstreamer-1.0/libgstximagesrc.so >/dev/null 2>&1)
+        kv X11_CAPTURE "$([ -e "$DIR/squashfs-root/usr/lib/gstreamer-1.0/libgstximagesrc.so" ] && echo yes || echo no)"
+        rm -rf "$DIR/squashfs-root"
+    else
+        kv X11_CAPTURE "$(flatpak run --command=gst-inspect-1.0 "$APP" --exists ximagesrc 2>/dev/null && echo yes || echo no)"
+    fi
     # Virtual gamepads need write access to /dev/uinput, outside the sandbox too.
     if [ -w /dev/uinput ]; then kv UINPUT writable; elif [ -e /dev/uinput ]; then kv UINPUT "not writable ($(stat -c '%U:%G %a' /dev/uinput))"; else kv UINPUT missing; fi
-    kv GL_RENDERER "$(flatpak run --command=sh "$APP" -c 'command -v eglinfo >/dev/null && eglinfo -B 2>/dev/null | grep -m1 "OpenGL core profile renderer\|OpenGL renderer"' | sed 's/.*: //')"
     ;;
 stream)
     capture="${2:-test}"
     import_session || { kv ERROR "no graphical session"; exit 1; }
     kv SESSION_TYPE "${XDG_SESSION_TYPE:-unknown}"
-    conf="$HOME/.var/app/$APP/config/linuxplay/host"
+    conf=$(host_config)
     mkdir -p "$conf"; ( umask 077; printf '%s\n' "$PASSWORD" > "$conf/password" )
-    flatpak kill "$APP" 2>/dev/null
+    stop_all
     extra=(); [ "$capture" = test ] && extra=(--test-size 1280x720 --test-pattern bars)
-    RUST_LOG=info nohup flatpak run --command=linuxplay-host "$APP" --listen loopback --capture "$capture" \
+    if [ "$KIND" = appimage ]; then
+        run_host=("$AI" host); run_client=("$AI")
+    else
+        run_host=(flatpak run --command=linuxplay-host "$APP"); run_client=(flatpak run --env=LINUXPLAY_PIN="$PASSWORD" "$APP")
+    fi
+    RUST_LOG=info nohup "${run_host[@]}" --listen loopback --capture "$capture" \
         --unattended --no-audio "${extra[@]}" > "$DIR/host-$capture.log" 2>&1 &
     sleep 4
-    RUST_LOG=info,linuxplay_client::viewer::stream=debug nohup flatpak run --env=LINUXPLAY_PIN="$PASSWORD" "$APP" \
+    LINUXPLAY_PIN="$PASSWORD" RUST_LOG=info,linuxplay_client::viewer::stream=debug nohup "${run_client[@]}" \
         127.0.0.1 --display 0 --stats > "$DIR/client-$capture.log" 2>&1 &
     sleep 14
     kv SCREENSHOT_NOW yes
     sleep 3
-    flatpak kill "$APP" 2>/dev/null
+    stop_all
     sleep 1
     hostlog=$(plain < "$DIR/host-$capture.log"); clientlog=$(plain < "$DIR/client-$capture.log")
     kv VIDEO_DRIVER "$(printf '%s\n' "$clientlog" | sed -n 's/.*video driver: //p' | head -1)"
@@ -121,7 +168,7 @@ stream)
     kv HOST_PROBLEMS "$(printf '%s\n' "$hostlog" | grep -E ' WARN | ERROR |panicked' | grep -v 'unattended access is on\|close_notify' | cut -c29-220 | head -4 | tr '\n' ';')"
     ;;
 stop)
-    flatpak kill "$APP" 2>/dev/null; kv STOPPED yes
+    stop_all; kv STOPPED yes
     ;;
 *)
     echo "usage: $0 install BUNDLE | facts | stream test|x11 | stop"; exit 2

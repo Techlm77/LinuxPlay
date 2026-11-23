@@ -8,7 +8,9 @@ captured as well. Nothing here makes a sound, and no VM window opens on the
 owner's desktop (the lab runs them headless).
 
   run.py --lab /path/to/distro-lab --bundle LinuxPlay.flatpak [--out DIR] VM [VM...]
-  run.py --lab /path/to/distro-lab --bundle LinuxPlay.flatpak --all
+  run.py --lab /path/to/distro-lab --bundle LinuxPlay-VERSION-x86_64.AppImage --all
+
+--bundle takes either package; each is installed the way its README section says.
 
 The lab's own tools (lab/vm.py, lab/guest.py) do the VM handling.
 """
@@ -109,7 +111,7 @@ class Run:
         rc, kv = self.guest("install", bundle.name, timeout=1500)
         R["install"] = kv
         self.check("install", kv.get("INSTALL_OK") == "yes",
-                   f"{kv.get('INSTALL_SECONDS', '?')} s, {kv.get('FLATPAK', 'no flatpak')}"
+                   f"{kv.get('INSTALL_SECONDS', '?')} s, {kv.get('FLATPAK') or kv.get('RUNTIME', '?')}"
                    + (f"; extra steps: {'; '.join(R['extra_steps'])}" if R["extra_steps"] else ""))
         if kv.get("INSTALL_OK") != "yes":
             return
@@ -119,7 +121,7 @@ class Run:
         self.check("encoders", bool(facts.get("ENCODERS")), facts.get("ENCODERS", "none"))
         self.stream("test")
         if info.get("SESSION_TYPE") == "x11":
-            self.check("x11_capture_plugin", facts.get("X11_CAPTURE") == "yes", "ximagesrc in the bundle")
+            self.check("x11_capture_plugin", facts.get("X11_CAPTURE") == "yes", "ximagesrc in the package")
             self.stream("x11")
         R["uinput"] = facts.get("UINPUT", "")
         R["seconds"] = round(time.time() - t0)
@@ -172,6 +174,7 @@ def main():
                     pass
                 V.stop_vm(vm)
         R = run.result
+        R["package"] = "AppImage" if a.bundle.suffix == ".AppImage" else "Flatpak"
         R["passed"] = bool(R["checks"]) and all(c["ok"] for c in R["checks"].values()) and not R["errors"]
         (out / "result.json").write_text(json.dumps(R, indent=2) + "\n")
         summary.append(R)

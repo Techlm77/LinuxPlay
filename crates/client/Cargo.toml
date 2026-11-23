@@ -5,6 +5,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Build SDL 3 from source and link it in, for packages (the AppImage) built
+# on systems that don't ship SDL 3.
+bundled-sdl = ["sdl3/build-from-source-static"]
+
 [dependencies]
 linuxplay-media.workspace = true
 linuxplay-net.workspace = true

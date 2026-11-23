@@ -48,6 +48,24 @@ flatpak install flathub org.freedesktop.Platform.GL.default//26.08 org.freedeskt
 The Flatpak brings its own GStreamer, SDL and codecs; on Nvidia, Flatpak adds
 the matching driver extension by itself.
 
+### AppImage
+
+One file that runs without installing anything:
+
+```sh
+chmod +x LinuxPlay-*-x86_64.AppImage
+./LinuxPlay-*-x86_64.AppImage TARGET          # the stream window
+./LinuxPlay-*-x86_64.AppImage host            # share this computer
+./LinuxPlay-*-x86_64.AppImage service         # the engine, for a front end
+```
+
+It bundles SDL and GStreamer with the plugins LinuxPlay uses, and takes the
+graphics drivers (VA-API, NVIDIA's CUDA, Mesa) from the system. It needs glibc
+2.39 or newer: Ubuntu 24.04, Debian 13, Fedora 40, Linux Mint 22 and later,
+and the Arch family; on older systems use the Flatpak. Build it with
+`packaging/appimage/build.sh` on Ubuntu 24.04 (for example in
+`docker run --rm -v "$PWD:/src" -w /src ubuntu:24.04 packaging/appimage/build.sh`).
+
 ### From source
 
 Rust 1.85+ (from [rustup](https://rustup.rs)), GStreamer with its base, good,
@@ -406,7 +424,7 @@ over real sockets and the account server end to end.
 ## Not there yet
 
 - The graphical front end (the engine and its API are ready for it).
-- A client-side cursor, and an AppImage.
+- A client-side cursor (the host draws the pointer into the picture).
 
 ## License
 
