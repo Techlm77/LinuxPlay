@@ -3,6 +3,8 @@ name: build
 on:
   push:
     branches: [main]
+    # A tag like v2.0.0 also publishes a release (the release job below).
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -82,6 +84,69 @@ jobs:
         with:
           name: LinuxPlay-AppImage
           path: dist/*.AppImage
+
+  # The Flatpak bundle, from the same manifest as packaging/flatpak/build.sh.
+  # Flathub's builder image; flatpak-builder's sandbox needs --privileged.
+  flatpak:
+    name: Flatpak
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          # Build directories outside the checkout, which the manifest copies.
+          flatpak-builder --repo=/tmp/fp-repo --state-dir=/tmp/fp-state --force-clean --disable-rofiles-fuse \
+            --install-deps-from=flathub /tmp/fp-build packaging/flatpak/io.github.techlm77.LinuxPlay.yml
+          mkdir -p dist
+          flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+            /tmp/fp-repo "dist/LinuxPlay-$version-x86_64.flatpak" io.github.techlm77.LinuxPlay
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LinuxPlay-Flatpak
+          path: dist/*.flatpak
+
+  # On a version tag: publish both packages as a GitHub release, with the notes
+  # from .github/release-notes/TAG.md and the files' SHA-256 checksums.
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, clippy, appimage, flatpak, audit]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "v$version" = "$TAG" ] || { echo "tag $TAG doesn't match version $version in Cargo.toml"; exit 1; }
+          notes=.github/release-notes/$TAG.md
+          [ -f "$notes" ] || { echo "missing $notes"; exit 1; }
+          cd dist
+          {
+            cat "../$notes"
+            echo
+            echo "### SHA-256"
+            echo
+            echo '```'
+            sha256sum *.flatpak *.AppImage
+            echo '```'
+          } > notes.md
+          gh release create "$TAG" --verify-tag --title "LinuxPlay $version" --notes-file notes.md \
+            *.flatpak *.AppImage
 
   # Known vulnerabilities in dependencies (RustSec advisory database).
   audit:
