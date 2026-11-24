@@ -14,12 +14,26 @@ fi
 VERSION=$(cat "$HERE/usr/share/linuxplay/version" 2>/dev/null || echo unknown)
 CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/linuxplay
 mkdir -p "$CACHE"
+# PipeWire itself comes from the system, so the screen capture plugin has to
+# suit its version: libpipewire-0.3.so.0.1611.0 is PipeWire 1.6.11. The newer
+# plugin needs 1.4; older systems get the one built for 1.0.
+pipewire=1.0
+multiarch=/usr/lib/$(uname -m)-linux-gnu
+for lib in "$multiarch" /usr/lib64 /usr/lib "/lib/${multiarch#/usr/lib/}"; do
+    for f in "$lib"/libpipewire-0.3.so.0.*; do
+        [ -e "$f" ] || continue
+        v=${f##*.so.0.}; v=${v%%.*}
+        case $v in *[!0-9]*|'') continue ;; esac
+        [ "$v" -ge 1400 ] && pipewire=1.4
+        break 2
+    done
+done
 # The bundled GStreamer, with its own plugin registry; graphics drivers, VA-API
 # and CUDA come from the system.
-export GST_PLUGIN_SYSTEM_PATH_1_0="$HERE/usr/lib/gstreamer-1.0"
+export GST_PLUGIN_SYSTEM_PATH_1_0="$HERE/usr/lib/gstreamer-1.0:$HERE/usr/lib/gstreamer-pipewire/$pipewire"
 export GST_PLUGIN_PATH_1_0=
 export GST_PLUGIN_SCANNER_1_0="$HERE/usr/libexec/gst-plugin-scanner"
-export GST_REGISTRY_1_0="$CACHE/gstreamer-registry-$VERSION.bin"
+export GST_REGISTRY_1_0="$CACHE/gstreamer-registry-$VERSION-pw$pipewire.bin"
 export LIBDECOR_PLUGIN_DIR="$HERE/usr/lib/libdecor/plugins-1"
 # The system's libva if it has one (its VA drivers need it), else the bundled one.
 has_libva=false
