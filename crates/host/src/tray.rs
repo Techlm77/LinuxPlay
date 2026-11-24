@@ -35,7 +35,7 @@ pub enum TrayCmd {
 
 pub struct HostTray {
     pub host_name: String,
-    /// e.g. "Local network only · 192.168.8.184:47800"
+    /// e.g. "Local network only · 192.168.1.30:47800"
     pub detail: String,
     pub unattended: bool,
     pub state: TrayState,

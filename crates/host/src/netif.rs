@@ -95,10 +95,10 @@ mod tests {
     fn lan_mode_skips_public_loopback_and_virtual_interfaces() {
         let ifaces = [
             iface("lo", "127.0.0.1"),
-            iface("eno1", "192.168.8.124"),
-            iface("wlp11s0", "192.168.8.120"),
+            iface("eno1", "192.168.1.20"),
+            iface("wlp11s0", "192.168.1.21"),
             iface("eth1", "203.0.113.7"),
-            iface("tailscale0", "100.99.122.56"),
+            iface("tailscale0", "100.101.102.104"),
             iface("docker0", "172.17.0.1"),
             iface("wg0", "10.8.0.2"),
             iface("eno1", "fd00::5"),
@@ -106,7 +106,7 @@ mod tests {
             iface("eno1", "2001:db8::5"),
         ];
         let got = lan_addresses(&ifaces);
-        let want: Vec<IpAddr> = ["192.168.8.124", "192.168.8.120", "fd00::5"].iter().map(|s| s.parse().unwrap()).collect();
+        let want: Vec<IpAddr> = ["192.168.1.20", "192.168.1.21", "fd00::5"].iter().map(|s| s.parse().unwrap()).collect();
         assert_eq!(got, want);
     }
 

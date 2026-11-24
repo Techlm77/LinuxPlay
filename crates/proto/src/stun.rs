@@ -112,7 +112,7 @@ mod tests {
     fn a_request_and_its_answer_round_trip() {
         let request = binding_request(&ID);
         assert_eq!(parse_binding_request(&request), Some(ID));
-        for from in ["203.0.113.7:54321", "[2001:db8::1234]:443", "192.168.8.184:47801"] {
+        for from in ["203.0.113.7:54321", "[2001:db8::1234]:443", "192.168.1.30:47801"] {
             let from: SocketAddr = from.parse().unwrap();
             let response = binding_response(&ID, from);
             assert_eq!(parse_binding_response(&response, &ID), Some(from));

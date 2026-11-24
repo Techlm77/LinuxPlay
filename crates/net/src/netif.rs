@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn only_addresses_a_peer_could_use_are_offered() {
-        assert!(reachable(&iface("eno1", "192.168.8.124")));
+        assert!(reachable(&iface("eno1", "192.168.1.20")));
         assert!(reachable(&iface("tailscale0", "100.101.102.103")));
         assert!(reachable(&iface("wlan0", "2a00:23c8::1")));
         assert!(!reachable(&iface("lo", "127.0.0.1")));
@@ -173,7 +173,7 @@ mod tests {
             assert!(is_public(public.parse().unwrap()), "{public}");
         }
         for not_public in [
-            "127.0.0.1", "0.0.0.0", "192.168.8.124", "10.1.2.3", "172.16.0.1", "169.254.1.1", "100.99.122.56",
+            "127.0.0.1", "0.0.0.0", "192.168.1.20", "10.1.2.3", "172.16.0.1", "169.254.1.1", "100.101.102.104",
             "::1", "::", "fd00::5", "fe80::1", "fd7a:115c:a1e0::1", "::ffff:192.168.1.1",
         ] {
             assert!(!is_public(not_public.parse().unwrap()), "{not_public}");
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn tailscale_ranges() {
-        assert!(is_tailscale("100.99.122.56".parse().unwrap()));
+        assert!(is_tailscale("100.101.102.104".parse().unwrap()));
         assert!(is_tailscale("100.64.0.1".parse().unwrap()));
         assert!(!is_tailscale("100.128.0.1".parse().unwrap()));
         assert!(is_tailscale("fd7a:115c:a1e0::1".parse().unwrap()));

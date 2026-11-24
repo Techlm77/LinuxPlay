@@ -59,8 +59,8 @@ mod tests {
 
     #[test]
     fn only_the_internet_raises_the_warning() {
-        let exposure = Exposure::new(&[addr("100.99.122.56:47800"), addr("192.168.8.124:47800")]);
-        for quiet in ["127.0.0.1", "100.99.122.56", "192.168.8.124", "fd7a:115c:a1e0::1"] {
+        let exposure = Exposure::new(&[addr("100.101.102.104:47800"), addr("192.168.1.20:47800")]);
+        for quiet in ["127.0.0.1", "100.101.102.104", "192.168.1.20", "fd7a:115c:a1e0::1"] {
             assert!(!exposure.contact(quiet.parse().unwrap()));
         }
         assert_eq!(exposure.warning(), None);

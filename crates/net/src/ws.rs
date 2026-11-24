@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn addresses() {
         let p = |s| parse_address(s, 47800).unwrap();
-        assert_eq!(p("192.168.8.184"), ("192.168.8.184".into(), 47800));
+        assert_eq!(p("192.168.1.30"), ("192.168.1.30".into(), 47800));
         assert_eq!(p("server:1234"), ("server".into(), 1234));
         assert_eq!(p("fe80::1"), ("fe80::1".into(), 47800));
         assert_eq!(p("[fe80::1]:99"), ("fe80::1".into(), 99));

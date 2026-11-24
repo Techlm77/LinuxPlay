@@ -223,8 +223,8 @@ mod tests {
 
     #[test]
     fn lan_detection() {
-        assert!(is_lan("192.168.8.184".parse().unwrap(), "192.168.8.120".parse().unwrap()));
-        assert!(!is_lan("192.168.8.184".parse().unwrap(), "9.9.9.9".parse().unwrap()));
+        assert!(is_lan("192.168.1.30".parse().unwrap(), "192.168.1.21".parse().unwrap()));
+        assert!(!is_lan("192.168.1.30".parse().unwrap(), "9.9.9.9".parse().unwrap()));
         assert!(is_lan("1.2.3.4".parse().unwrap(), "127.0.0.1".parse().unwrap()));
     }
 

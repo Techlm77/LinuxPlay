@@ -353,8 +353,8 @@ mod tests {
     fn a_tailscale_name_is_enough_to_find_the_server() {
         assert_eq!(base("office-pc").unwrap(), "http://office-pc:47900");
         assert_eq!(base("office-pc.tail1234.ts.net").unwrap(), "http://office-pc.tail1234.ts.net:47900");
-        assert_eq!(base("100.99.122.56").unwrap(), "http://100.99.122.56:47900");
-        assert_eq!(base("http://100.99.122.56:5000/").unwrap(), "http://100.99.122.56:5000");
+        assert_eq!(base("100.101.102.104").unwrap(), "http://100.101.102.104:47900");
+        assert_eq!(base("http://100.101.102.104:5000/").unwrap(), "http://100.101.102.104:5000");
         assert_eq!(base("[fd7a:115c:a1e0::1]").unwrap(), "http://[fd7a:115c:a1e0::1]:47900");
         assert_eq!(base("https://play.example.org").unwrap(), "https://play.example.org");
         assert!(base("http://127.0.0.1:47900").is_ok());
@@ -362,7 +362,7 @@ mod tests {
 
     #[test]
     fn plain_http_across_a_network_is_refused() {
-        for unsafe_address in ["192.168.8.184", "http://203.0.113.9", "[2001:db8::1]"] {
+        for unsafe_address in ["192.168.1.30", "http://203.0.113.9", "[2001:db8::1]"] {
             let error = base(unsafe_address).unwrap_err().to_string();
             assert!(error.contains("Tailscale"), "{unsafe_address}: {error}");
         }

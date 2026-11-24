@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct KnownHost {
-    /// What the user typed, e.g. `192.168.8.184` or `server:47800`.
+    /// What the user typed, e.g. `192.168.1.30` or `server:47800`.
     pub address: String,
     pub name: String,
     /// Hex SHA-256 of the host's certificate.
