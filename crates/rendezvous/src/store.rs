@@ -41,6 +41,15 @@ pub fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// A time in seconds as SQLite stores it (a signed 64-bit integer).
+fn to_sql(t: u64) -> i64 {
+    i64::try_from(t).unwrap_or(i64::MAX)
+}
+
+fn from_sql(t: i64) -> u64 {
+    u64::try_from(t).unwrap_or(0)
+}
+
 /// A signed-in device, as found from its token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
@@ -103,7 +112,7 @@ impl Store {
         self.with(|db| {
             db.execute(
                 "INSERT INTO accounts (username, password_hash, created) VALUES (?1, ?2, ?3)",
-                params![username, password_hash, now()],
+                params![username, password_hash, to_sql(now())],
             )?;
             Ok(db.last_insert_rowid())
         })
@@ -139,7 +148,7 @@ impl Store {
                 .optional()?;
             let device_id = match existing {
                 Some(id) => {
-                    tx.execute("UPDATE devices SET name = ?1, last_seen = ?2 WHERE id = ?3", params![name, now(), id])?;
+                    tx.execute("UPDATE devices SET name = ?1, last_seen = ?2 WHERE id = ?3", params![name, to_sql(now()), id])?;
                     tx.execute("DELETE FROM sessions WHERE device_id = ?1", [&id])?;
                     id
                 }
@@ -148,14 +157,14 @@ impl Store {
                     tx.execute(
                         "INSERT INTO devices (id, account_id, name, fingerprint, created, last_seen)
                          VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-                        params![id, account_id, name, fingerprint, now()],
+                        params![id, account_id, name, fingerprint, to_sql(now())],
                     )?;
                     id
                 }
             };
             tx.execute(
                 "INSERT INTO sessions (token_hash, device_id, created) VALUES (?1, ?2, ?3)",
-                params![secrets::token_hash(token), device_id, now()],
+                params![secrets::token_hash(token), device_id, to_sql(now())],
             )?;
             tx.commit()?;
             Ok(device_id)
@@ -210,15 +219,15 @@ impl Store {
     }
 
     pub fn touch(&self, device_id: &str) -> rusqlite::Result<()> {
-        self.with(|db| db.execute("UPDATE devices SET last_seen = ?1 WHERE id = ?2", params![now(), device_id]).map(drop))
+        self.with(|db| db.execute("UPDATE devices SET last_seen = ?1 WHERE id = ?2", params![to_sql(now()), device_id]).map(drop))
     }
 
     /// Create an invite to `device_id`; returns its id.
     pub fn create_invite(&self, device_id: &str, expires_at: u64) -> rusqlite::Result<String> {
         let id = secrets::new_id();
         self.with(|db| {
-            db.execute("DELETE FROM invites WHERE expires_at <= ?1", [now()])?;
-            db.execute("INSERT INTO invites (id, device_id, expires_at) VALUES (?1, ?2, ?3)", params![id, device_id, expires_at])
+            db.execute("DELETE FROM invites WHERE expires_at <= ?1", [to_sql(now())])?;
+            db.execute("INSERT INTO invites (id, device_id, expires_at) VALUES (?1, ?2, ?3)", params![id, device_id, to_sql(expires_at)])
         })?;
         Ok(id)
     }
@@ -226,7 +235,7 @@ impl Store {
     /// The device an invite leads to, if the invite exists and hasn't expired.
     pub fn invite_host(&self, invite_id: &str) -> rusqlite::Result<Option<String>> {
         self.with(|db| {
-            db.query_row("SELECT device_id FROM invites WHERE id = ?1 AND expires_at > ?2", params![invite_id, now()], |r| {
+            db.query_row("SELECT device_id FROM invites WHERE id = ?1 AND expires_at > ?2", params![invite_id, to_sql(now())], |r| {
                 r.get(0)
             })
             .optional()
@@ -248,7 +257,7 @@ fn device_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceRow> {
         account_id: row.get(1)?,
         name: row.get(2)?,
         fingerprint: row.get(3)?,
-        last_seen: row.get(4)?,
+        last_seen: from_sql(row.get(4)?),
     })
 }
 
