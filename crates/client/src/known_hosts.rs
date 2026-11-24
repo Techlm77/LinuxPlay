@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
-use linuxplay_net::fsutil;
+use anyhow::{Context, Result, bail};
+use linuxplay_net::{fsutil, tls};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -49,6 +49,11 @@ fn now() -> u64 {
 }
 
 impl KnownHosts {
+    /// Where the client keeps the store.
+    pub fn default_path() -> PathBuf {
+        tls::config_dir("client").join("known_hosts.toml")
+    }
+
     /// Load the store; only a missing file counts as empty.
     pub fn load(path: PathBuf) -> Result<Self> {
         let hosts = match fsutil::read_private_text(&path)? {
@@ -106,6 +111,28 @@ impl KnownHosts {
         self.save()
     }
 
+    /// Forget the host remembered under `target`, an address or a host's
+    /// name, and return it. A name shared by several hosts is refused, since
+    /// the wrong one could be dropped; the address picks one.
+    pub fn forget_matching(&mut self, target: &str) -> Result<KnownHost> {
+        let found: Vec<KnownHost> = match self.get(target) {
+            Some(host) => vec![host.clone()],
+            None => self.hosts.iter().filter(|h| h.name.eq_ignore_ascii_case(target)).cloned().collect(),
+        };
+        match found.as_slice() {
+            [] => bail!("no paired host is called or reached at {target:?}; `linuxplay hosts` lists them"),
+            [host] => {
+                self.forget(&host.address)?;
+                Ok(host.clone())
+            }
+            several => bail!(
+                "{} paired hosts are called {target:?}; forget one by its address: {}",
+                several.len(),
+                several.iter().map(|h| h.address.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+        }
+    }
+
     fn save(&self) -> Result<()> {
         let text = toml::to_string_pretty(&File { hosts: self.hosts.clone() })?;
         fsutil::write_private(&self.path, text.as_bytes())
@@ -144,6 +171,25 @@ mod tests {
         let (fresh, aside) = KnownHosts::reset(&path).unwrap();
         assert!(fresh.recent().is_empty());
         assert!(aside.exists() && !path.exists());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn forgetting_by_address_or_name() {
+        let path = scratch("forget");
+        let mut k = KnownHosts::load(path.clone()).unwrap();
+        k.remember("192.168.1.30", "Server", &[1; 32]).unwrap();
+        k.remember("192.168.1.31", "Desk", &[2; 32]).unwrap();
+        k.remember("192.168.1.32", "Desk", &[3; 32]).unwrap();
+
+        assert_eq!(k.forget_matching("server").unwrap().address, "192.168.1.30");
+        assert!(k.forget_matching("Desk").is_err(), "an ambiguous name forgets nothing");
+        assert!(k.forget_matching("nowhere").is_err());
+        assert_eq!(k.forget_matching("192.168.1.32").unwrap().name, "Desk");
+
+        let k = KnownHosts::load(path.clone()).unwrap();
+        let left: Vec<String> = k.recent().into_iter().map(|h| h.address).collect();
+        assert_eq!(left, ["192.168.1.31"]);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

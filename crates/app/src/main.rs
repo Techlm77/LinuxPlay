@@ -2,6 +2,7 @@
 //! small command-line client for that engine.
 
 mod ctl;
+mod hosts;
 mod service;
 
 use anyhow::Result;
@@ -22,6 +23,14 @@ enum Command {
     /// Run the engine: it shares this computer, keeps it signed in, and
     /// opens stream windows when a front end asks over its local API.
     Service,
+    /// List the hosts this device has paired with.
+    Hosts,
+    /// Forget a paired host (by address or name), e.g. after it was
+    /// reinstalled; connecting to it again pairs from scratch.
+    Forget {
+        /// The host's address or name, as `linuxplay hosts` shows it.
+        host: String,
+    },
     /// Call a method of the running engine's API and print the answer.
     Api {
         /// For example `state`, `host.start` or `account.login`.
@@ -66,7 +75,7 @@ fn hostname() -> String {
 /// The command line with `connect` filled in when it starts with a target
 /// instead of a command: `linuxplay 192.168.1.20` means `linuxplay connect …`.
 fn arguments() -> Vec<String> {
-    const WORDS: [&str; 8] = ["connect", "service", "api", "help", "-h", "--help", "-V", "--version"];
+    const WORDS: [&str; 10] = ["connect", "service", "hosts", "forget", "api", "help", "-h", "--help", "-V", "--version"];
     let mut args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|first| !WORDS.contains(&first.as_str())) {
         args.insert(1, "connect".into());
@@ -96,6 +105,8 @@ fn main() -> Result<()> {
         // The stream window needs the main thread to itself.
         Command::Connect(options) => connect(options),
         Command::Service => runtime()?.block_on(service::run(hostname())),
+        Command::Hosts => hosts::list(),
+        Command::Forget { host } => hosts::forget(&host),
         Command::Api { method, params } => runtime()?.block_on(ctl::call(&method, params.as_deref())),
     }
 }
@@ -116,5 +127,7 @@ mod tests {
         assert!(Cli::try_parse_from(["linuxplay", "connect", "192.168.1.20", "--stats"]).is_ok());
         assert!(Cli::try_parse_from(["linuxplay", "api", "host.start", r#"{"unattended":true}"#]).is_ok());
         assert!(Cli::try_parse_from(["linuxplay", "service"]).is_ok());
+        assert!(Cli::try_parse_from(["linuxplay", "forget", "192.168.1.30"]).is_ok());
+        assert!(Cli::try_parse_from(["linuxplay", "hosts"]).is_ok());
     }
 }

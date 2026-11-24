@@ -87,8 +87,9 @@ jobs:
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest
+    # Plain cargo-audit: fails on any vulnerability, lists warnings, and
+    # needs no write permission (so pull requests from forks work too).
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit

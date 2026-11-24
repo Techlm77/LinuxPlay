@@ -127,8 +127,7 @@ impl Viewer {
 
         let identity = Identity::load_or_create(&tls::config_dir("client"), "LinuxPlay client")
             .context("creating this device's identity")?;
-        let known_path = tls::config_dir("client").join("known_hosts.toml");
-        let known_hosts = KnownHosts::load(known_path).context(
+        let known_hosts = KnownHosts::load(KnownHosts::default_path()).context(
             "the list of paired hosts can't be read; fix or remove known_hosts.toml in LinuxPlay's config folder",
         )?;
         let pins = known_hosts.pins()?;

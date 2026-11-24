@@ -44,16 +44,23 @@ EXCLUDE=' ld-linux.so.2 ld-linux-x86-64.so.2 ld-linux-aarch64.so.1 libanl.so.1 l
  libudev.so.1 libsystemd.so.0 libdbus-1.so.3 libpulse.so.0 '
 EXCLUDE=" $(echo $EXCLUDE) "
 # GStreamer plugins LinuxPlay uses: capture, conversion, parsing, codecs
-# (hardware and software), OpenGL hand-over, audio.
+# (hardware and software), OpenGL hand-over, audio. PipeWire's comes in two
+# builds, below.
 PLUGINS='coreelements app videoconvertscale videorate videotestsrc audioconvert audioresample
- autodetect pulseaudio opus ximagesrc pipewire videoparsersbad va nvcodec vulkan libav x264
+ autodetect pulseaudio opus ximagesrc videoparsersbad va nvcodec vulkan libav x264
  dav1d svtav1 opengl typefindfunctions volume'
+# A newer PipeWire capture plugin, for systems with PipeWire 1.4 or newer. The
+# one Ubuntu 24.04 ships (PipeWire 1.0) can't agree on buffers with KWin on
+# Nvidia ("error alloc buffers"), but it is the one that loads with PipeWire
+# 1.0 to 1.3, so both are bundled and AppRun picks one.
+PIPEWIRE_TAG=1.6.8
+PIPEWIRE_COMMIT=b741e0c74f5436f0c925f7741140db0efd32cf4e
 
 echo "== Packages"
 export DEBIAN_FRONTEND=noninteractive
 $SUDO apt-get update -qq
 $SUDO apt-get install -y -qq --no-install-recommends \
-    build-essential cmake pkg-config curl ca-certificates file patchelf git \
+    build-essential cmake pkg-config curl ca-certificates file patchelf git meson ninja-build \
     libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev \
     gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-pipewire gstreamer1.0-x \
@@ -84,6 +91,22 @@ for p in $PLUGINS; do
         echo "   (no $p plugin on this system; left out)"
     fi
 done
+
+echo "== PipeWire capture plugins"
+mkdir -p "$APPDIR/usr/lib/gstreamer-pipewire/1.0" "$APPDIR/usr/lib/gstreamer-pipewire/1.4"
+cp -L "$LIB/gstreamer-1.0/libgstpipewire.so" "$APPDIR/usr/lib/gstreamer-pipewire/1.0/"
+rm -rf "$WORK/pipewire"
+git clone -q --depth 1 --branch "$PIPEWIRE_TAG" https://gitlab.freedesktop.org/pipewire/pipewire.git "$WORK/pipewire" 2>/dev/null
+[ "$(git -C "$WORK/pipewire" rev-parse HEAD)" = "$PIPEWIRE_COMMIT" ] || { echo "PipeWire $PIPEWIRE_TAG is not the pinned commit" >&2; exit 1; }
+# Only the GStreamer plugin is built; it uses the system's libpipewire.
+(cd "$WORK/pipewire" &&
+    meson setup build -Dauto_features=disabled -Dgstreamer=enabled -Dgstreamer-device-provider=enabled \
+        -Dspa-plugins=enabled -Dsupport=enabled -Dsession-managers=[] -Dexamples=disabled -Dtests=disabled \
+        -Dman=disabled -Ddocs=disabled -Dpipewire-alsa=disabled -Dpipewire-jack=disabled \
+        -Dpipewire-v4l2=disabled >/dev/null &&
+    ninja -C build src/gst/libgstpipewire.so >/dev/null)
+install -m755 "$WORK/pipewire/build/src/gst/libgstpipewire.so" "$APPDIR/usr/lib/gstreamer-pipewire/1.4/"
+strip --strip-unneeded "$APPDIR/usr/lib/gstreamer-pipewire/1.4/libgstpipewire.so"
 cp -L "$LIB/gstreamer1.0/gstreamer-1.0/gst-plugin-scanner" "$APPDIR/usr/libexec/"
 
 echo "== Window decorations"

@@ -76,7 +76,8 @@ where
         Some(p) if p == host_fp => State::KnownHostVerified,
         Some(_) => bail!(
             "This host's identity has changed since you paired with it. If it was reinstalled, \
-             forget it and pair again; otherwise someone may be intercepting the connection."
+             forget it (`linuxplay forget ADDRESS`) and connect again to pair; otherwise someone \
+             may be intercepting the connection."
         ),
         None => State::Unknown,
     };

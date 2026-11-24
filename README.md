@@ -101,6 +101,11 @@ The first time, the host shows a PIN; type it into the client's window. After
 that the two recognise each other. Unless the host runs `--unattended`,
 someone at the host approves each connection (with a view-only choice).
 
+`linuxplay hosts` lists the hosts this computer has paired with. If one is
+reinstalled, its identity changes and the client refuses it (as it would an
+impostor); `linuxplay forget ADDRESS` (or its name) drops the old pairing, and
+the next connection pairs from scratch.
+
 ### From anywhere, over Tailscale
 
 LinuxPlay reaches your computers away from home over
