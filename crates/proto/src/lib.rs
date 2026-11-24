@@ -6,12 +6,15 @@
 //! - [`input`] and [`control`]: compact postcard messages on the WebRTC data
 //!   channels once the session is up.
 
+pub mod api;
 pub mod control;
 pub mod input;
+pub mod rendezvous;
 pub mod signal;
+pub mod stun;
 
 /// Bumped whenever a message changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// TCP port the host listens on for signalling.
 pub const DEFAULT_PORT: u16 = 47800;
@@ -53,8 +56,8 @@ pub fn decode<'a, T: serde::Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, Decod
 
 #[cfg(test)]
 mod tests {
-    use crate::control::ControlMsg;
-    use crate::input::InputEvent;
+    use crate::control::{ControlMsg, HostStats, Rumble};
+    use crate::input::{GamepadButton, GamepadKind, GamepadState, InputEvent};
     use crate::signal::{ClientMsg, HostMsg};
 
     /// A data-channel peer is untrusted: decoding attacker-controlled bytes
@@ -85,12 +88,51 @@ mod tests {
             InputEvent::PointerAbs { x: 1, y: 2 },
             InputEvent::Scroll { dx: -3, dy: 120 },
             InputEvent::ReleaseAll,
+            InputEvent::GamepadAttach { pad: 1, kind: GamepadKind::PlayStation },
+            InputEvent::Gamepad(GamepadState { pad: 1, buttons: 0x7fff, left_x: i16::MIN, ..Default::default() }),
+            InputEvent::GamepadDetach { pad: 1 },
         ];
         for e in events {
             assert_eq!(super::decode::<InputEvent>(&super::encode(&e)).unwrap(), e);
         }
-        let msg = ControlMsg::Stats { bitrate_kbps: 9000, fps: 60, encoder: "vah264enc".into() };
-        assert_eq!(super::decode::<ControlMsg>(&super::encode(&msg)).unwrap(), msg);
+        let messages = [
+            ControlMsg::Stats(HostStats { bitrate_kbps: 9000, fps: 60, encoder: "vah264enc".into(), encode_us: 4200 }),
+            ControlMsg::Pong { t: 7, host_us: u64::MAX },
+            ControlMsg::VideoClock { base_us: 123_456_789 },
+            ControlMsg::Rumble(Rumble { pad: 0, low: 1, high: u16::MAX, duration_ms: 250 }),
+        ];
+        for m in messages {
+            assert_eq!(super::decode::<ControlMsg>(&super::encode(&m)).unwrap(), m);
+        }
+    }
+
+    /// The host drops input messages above [`MAX_INPUT_MESSAGE`], so the
+    /// largest real one has to fit.
+    #[test]
+    fn the_largest_input_event_fits_the_limit() {
+        let worst = InputEvent::Gamepad(GamepadState {
+            pad: u8::MAX,
+            buttons: u32::MAX,
+            left_x: i16::MIN,
+            left_y: i16::MIN,
+            right_x: i16::MIN,
+            right_y: i16::MIN,
+            left_trigger: u16::MAX,
+            right_trigger: u16::MAX,
+        });
+        assert!(super::encode(&worst).len() <= super::MAX_INPUT_MESSAGE);
+    }
+
+    #[test]
+    fn gamepad_buttons_have_distinct_bits() {
+        let mut state = GamepadState::default();
+        for b in GamepadButton::ALL {
+            assert!(!state.pressed(b));
+            state.set(b, true);
+        }
+        assert_eq!(state.buttons.count_ones() as usize, GamepadButton::ALL.len());
+        state.set(GamepadButton::Guide, false);
+        assert!(!state.pressed(GamepadButton::Guide) && state.pressed(GamepadButton::Start));
     }
 
     /// Signalling JSON comes from an untrusted peer too: mutated and truncated
@@ -98,7 +140,7 @@ mod tests {
     #[test]
     fn mutated_signalling_never_panics() {
         let samples = [
-            r#"{"type":"hello","version":3,"name":"pc","codecs":["h264"],"hw_codecs":[],"max_fps":60,"audio":true,"pair":true}"#,
+            r#"{"type":"hello","version":4,"name":"pc","codecs":["h264"],"hw_codecs":[],"max_fps":60,"audio":true,"pair":true}"#,
             r#"{"type":"pair_start","spake":"QUJD"}"#,
             r#"{"type":"pair_finish","mac":"00ff"}"#,
             r#"{"type":"select_monitor","index":4294967295}"#,

@@ -5,6 +5,7 @@
 //! has to resolve, never silently an empty list (which would make every
 //! paired host look new and invite pairing with whoever answers).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct KnownHost {
-    /// What the user typed, e.g. `192.168.8.184` or `server:47800`.
+    /// What the user typed, e.g. `192.168.1.30` or `server:47800`.
     pub address: String,
     pub name: String,
     /// Hex SHA-256 of the host's certificate.
@@ -73,6 +74,11 @@ impl KnownHosts {
         Ok((Self { path: path.to_path_buf(), hosts: Vec::new() }, aside))
     }
 
+    /// Every pinned certificate, by the address its host is remembered under.
+    pub fn pins(&self) -> Result<HashMap<String, [u8; 32]>> {
+        self.hosts.iter().map(|h| Ok((h.address.clone(), h.pin()?))).collect()
+    }
+
     pub fn get(&self, address: &str) -> Option<&KnownHost> {
         self.hosts.iter().find(|h| h.address == address)
     }
@@ -80,7 +86,7 @@ impl KnownHosts {
     /// Most recently used first.
     pub fn recent(&self) -> Vec<KnownHost> {
         let mut v = self.hosts.clone();
-        v.sort_by(|a, b| b.last_used.cmp(&a.last_used));
+        v.sort_by_key(|h| std::cmp::Reverse(h.last_used));
         v
     }
 

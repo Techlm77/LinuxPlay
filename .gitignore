@@ -4,3 +4,5 @@
 
 # nix build output
 /result
+/dist/
+__pycache__/

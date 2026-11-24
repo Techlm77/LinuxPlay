@@ -1,24 +1,3 @@
-mod approval;
-mod audio;
-mod capture;
-mod control;
-mod input;
-mod limits;
-mod monitor;
-mod netif;
-mod notify;
-mod password;
-mod portal;
-mod quality;
-mod server;
-mod sessions;
-mod tray;
-mod trust;
-mod video;
-
-#[cfg(test)]
-mod tests;
-
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -26,18 +5,17 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use gstreamer as gst;
+use linuxplay_net::rendezvous::{Account, Server};
 use linuxplay_net::tls::{self, Identity};
+use linuxplay_proto::rendezvous::DeviceInfo;
 use linuxplay_proto::DEFAULT_PORT;
 
 /// `DEFAULT_MEDIA_PORTS` as the command line spells it.
 const MEDIA_PORTS: &str = "47801-47816";
 
-use crate::approval::Decision;
-use crate::capture::CaptureKind;
-use crate::control::Command as Ctl;
-use crate::netif::ListenMode;
-use crate::server::{Host, HostConfig};
-use crate::trust::TrustStore;
+use linuxplay_host::control::{self, Command as Ctl};
+use linuxplay_host::netif::{self, ListenMode};
+use linuxplay_host::{CaptureKind, Decision, Host, HostConfig, TestPattern, TestPicture, TrustStore, password, portal, video};
 
 #[derive(Parser)]
 #[command(name = "linuxplay-host", version, about = "Share this desktop with LinuxPlay clients")]
@@ -87,6 +65,25 @@ struct Cli {
     /// Don't stream desktop audio.
     #[arg(long)]
     no_audio: bool,
+    /// On Wayland, also offer a new virtual screen in the share dialog: a
+    /// display that exists only for the stream (for headless computers).
+    #[arg(long)]
+    virtual_display: bool,
+    /// Size of the picture `--capture test` shows, e.g. 1920x1080.
+    #[arg(long, hide = true, value_name = "WIDTHxHEIGHT", value_parser = parse_size, default_value = "1280x720")]
+    test_size: (u32, u32),
+    /// What `--capture test` shows.
+    #[arg(long, hide = true, value_enum, default_value_t = TestPattern::Ball)]
+    test_pattern: TestPattern,
+}
+
+/// Parse `WIDTHxHEIGHT`, within what an encoder can take.
+fn parse_size(text: &str) -> Result<(u32, u32), String> {
+    let parsed = text.split_once(['x', 'X']).and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
+    match parsed {
+        Some((w, h)) if (16..=8192).contains(&w) && (16..=8192).contains(&h) => Ok((w, h)),
+        _ => Err(format!("expected a size like 1920x1080, got {text:?}")),
+    }
 }
 
 #[derive(Subcommand)]
@@ -122,6 +119,96 @@ enum Command {
         #[arg(long)]
         clear: bool,
     },
+    /// Sign this computer in to an account, so your other devices can find it.
+    Account {
+        #[command(subcommand)]
+        action: AccountAction,
+    },
+    /// Make a link that lets a guest connect to the running host.
+    Invite {
+        /// How long the link works, in minutes.
+        #[arg(long, default_value_t = 60)]
+        minutes: u32,
+        /// The guest may watch but not control.
+        #[arg(long)]
+        view_only: bool,
+    },
+    /// Withdraw an invite (its id is listed by `sessions`).
+    Uninvite { id: String },
+}
+
+#[derive(Subcommand)]
+enum AccountAction {
+    /// Create an account on a LinuxPlay server and sign in.
+    Create(SignIn),
+    /// Sign in to an existing account.
+    Login(SignIn),
+    /// Sign out.
+    Logout,
+    /// Show the account and its devices.
+    Status,
+}
+
+#[derive(clap::Args)]
+struct SignIn {
+    /// The LinuxPlay server, e.g. https://play.example.org.
+    #[arg(long)]
+    server: String,
+    #[arg(long)]
+    username: String,
+    /// Read the password from this environment variable instead of asking.
+    #[arg(long, env = "LINUXPLAY_ACCOUNT_PASSWORD", hide_env_values = true, hide = true)]
+    password: Option<String>,
+}
+
+/// Carry out an `account` command.
+async fn account(action: AccountAction, name: String, identity: &Identity) -> Result<()> {
+    let path = Account::default_path();
+    let sign_in = |form: SignIn, create: bool| async move {
+        let server = Server::new(&form.server)?;
+        let password = match form.password {
+            Some(p) => p,
+            None if create => password::prompt_new_account()?,
+            None => password::prompt("Password: ")?,
+        };
+        let device = DeviceInfo { name, fingerprint: hex::encode(identity.fingerprint) };
+        let account = if create {
+            server.create_account(&form.username, &password, device).await?
+        } else {
+            server.sign_in(&form.username, &password, device).await?
+        };
+        account.save(&Account::default_path())?;
+        println!("signed in as {} on {}", account.username(), account.server().address());
+        println!("restart the host for it to become reachable through the account");
+        Ok::<_, anyhow::Error>(())
+    };
+    match action {
+        AccountAction::Create(form) => sign_in(form, true).await,
+        AccountAction::Login(form) => sign_in(form, false).await,
+        AccountAction::Logout => {
+            if let Some(account) = Account::load(&path)? {
+                // Still sign out here if the server can't be told.
+                if let Err(e) = account.sign_out().await {
+                    eprintln!("the server wasn't told ({e:#}); signing out on this computer only");
+                }
+            }
+            linuxplay_net::fsutil::remove(&path)?;
+            println!("signed out");
+            Ok(())
+        }
+        AccountAction::Status => {
+            let Some(account) = Account::load(&path)? else {
+                println!("not signed in");
+                return Ok(());
+            };
+            println!("signed in as {} on {}", account.username(), account.server().address());
+            for d in account.devices().await? {
+                let state = if d.online { "online" } else { "offline" };
+                println!("  {:<24} {state:<8} {}{}", d.name, &d.fingerprint[..16], if d.current { "  (this device)" } else { "" });
+            }
+            Ok(())
+        }
+    }
 }
 
 fn hostname() -> String {
@@ -148,7 +235,7 @@ async fn tell_host(cmd: Ctl) -> Result<()> {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,zbus=error".into()),
         )
         .init();
     let cli = Cli::parse();
@@ -202,6 +289,15 @@ async fn main() -> Result<()> {
             let target = if id == "all" { None } else { Some(id.parse()?) };
             return tell_host(Ctl::Disconnect(target)).await;
         }
+        Some(Command::Account { action }) => {
+            linuxplay_net::init_crypto();
+            let identity = Identity::load_or_create(&dir, "LinuxPlay host")?;
+            return account(action, cli.name.unwrap_or_else(hostname), &identity).await;
+        }
+        Some(Command::Invite { minutes, view_only }) => {
+            return tell_host(Ctl::Invite { minutes, control: !view_only }).await;
+        }
+        Some(Command::Uninvite { id }) => return tell_host(Ctl::Uninvite(id)).await,
         Some(Command::SetPassword { clear }) => {
             let path = password::default_path();
             if clear {
@@ -232,9 +328,6 @@ async fn main() -> Result<()> {
     };
     let listen = netif::resolve(cli.listen, &cli.bind)?;
     let exposure = if cli.bind.is_empty() { cli.listen.describe().to_string() } else { "chosen addresses".into() };
-    if listen.iter().any(|ip| ip.is_unspecified()) {
-        tracing::warn!("listening on every interface, including any public ones; prefer --listen lan or tailscale");
-    }
     let cfg = HostConfig {
         name: cli.name.unwrap_or_else(hostname),
         listen,
@@ -250,6 +343,9 @@ async fn main() -> Result<()> {
         unattended: cli.unattended,
         password,
         displays: (!cli.displays.is_empty()).then(|| cli.displays.iter().copied().collect::<BTreeSet<_>>()),
+        test_picture: TestPicture { width: cli.test_size.0, height: cli.test_size.1, pattern: cli.test_pattern },
+        virtual_display: cli.virtual_display,
+        account: Account::load(&Account::default_path())?,
     };
     Host::new(cfg, identity, trust).await?.run().await
 }
@@ -286,6 +382,8 @@ mod cli_tests {
         assert_eq!(cli.media_ports, (50000, 50003));
         assert_eq!(cli.displays, vec![0, 2]);
         assert!(Cli::try_parse_from(["linuxplay-host", "--media-ports", "9-1"]).is_err());
+        assert_eq!(parse_size("1920x1080"), Ok((1920, 1080)));
+        assert!(parse_size("1920").is_err() && parse_size("0x0").is_err() && parse_size("99999x9").is_err());
         assert!(Cli::try_parse_from(["linuxplay-host", "--password", "x"]).is_err(), "no secrets on the command line");
         assert!(Cli::try_parse_from(["linuxplay-host", "revoke"]).is_err(), "revoke needs a fingerprint or --all");
         assert!(Cli::try_parse_from(["linuxplay-host", "revoke", "--all"]).is_ok());

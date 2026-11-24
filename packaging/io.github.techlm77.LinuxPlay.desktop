@@ -4,10 +4,13 @@ Version=1.0
 Name=LinuxPlay
 GenericName=Remote Desktop
 Comment=Connect to another computer's screen over your network
-Exec=linuxplay %u
+Exec=linuxplay connect %u
 Icon=io.github.techlm77.LinuxPlay
 Terminal=false
 Categories=Network;RemoteAccess;
 Keywords=remote;desktop;screen;stream;control;vnc;rdp;
 StartupNotify=true
+# Opened with a target by the front end or a link; the front end provides the
+# entry people see in their menu.
+NoDisplay=true
 StartupWMClass=io.github.techlm77.LinuxPlay

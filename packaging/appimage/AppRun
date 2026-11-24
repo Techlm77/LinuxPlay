@@ -1,0 +1,33 @@
+#!/bin/sh
+# LinuxPlay AppImage entry point.
+#   LinuxPlay.AppImage TARGET | connect … | service | api …   the stream window and engine
+#   LinuxPlay.AppImage host [options]                          share this computer
+HERE=$(dirname "$(readlink -f "$0")")
+# Built against glibc 2.39; older systems get a clear message instead of a
+# missing-symbol error.
+glibc=$(getconf GNU_LIBC_VERSION 2>/dev/null | cut -d' ' -f2)
+if [ -n "$glibc" ] && [ "$(printf '%s\n2.39\n' "$glibc" | sort -V | head -1)" != 2.39 ]; then
+    echo "This LinuxPlay AppImage needs glibc 2.39 or newer; this system has $glibc." >&2
+    echo "Use the Flatpak instead: see https://github.com/Techlm77/LinuxPlay#flatpak" >&2
+    exit 1
+fi
+VERSION=$(cat "$HERE/usr/share/linuxplay/version" 2>/dev/null || echo unknown)
+CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/linuxplay
+mkdir -p "$CACHE"
+# The bundled GStreamer, with its own plugin registry; graphics drivers, VA-API
+# and CUDA come from the system.
+export GST_PLUGIN_SYSTEM_PATH_1_0="$HERE/usr/lib/gstreamer-1.0"
+export GST_PLUGIN_PATH_1_0=
+export GST_PLUGIN_SCANNER_1_0="$HERE/usr/libexec/gst-plugin-scanner"
+export GST_REGISTRY_1_0="$CACHE/gstreamer-registry-$VERSION.bin"
+export LIBDECOR_PLUGIN_DIR="$HERE/usr/lib/libdecor/plugins-1"
+# The system's libva if it has one (its VA drivers need it), else the bundled one.
+has_libva=false
+for dir in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib /lib/x86_64-linux-gnu; do
+    [ -e "$dir/libva.so.2" ] && has_libva=true && break
+done
+$has_libva || export LD_LIBRARY_PATH="$HERE/usr/lib/fallback${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+case "${1:-}" in
+    host) shift; exec "$HERE/usr/bin/linuxplay-host" "$@" ;;
+    *) exec "$HERE/usr/bin/linuxplay" "$@" ;;
+esac

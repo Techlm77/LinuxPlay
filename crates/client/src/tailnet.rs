@@ -79,7 +79,7 @@ mod tests {
     fn parses_status() {
         let json = br#"{
             "BackendState": "Running",
-            "Self": {"HostName": "pc", "TailscaleIPs": ["100.99.122.56"]},
+            "Self": {"HostName": "pc", "TailscaleIPs": ["100.101.102.104"]},
             "Peer": {
                 "nodekey:1": {"HostName": "server", "TailscaleIPs": ["fd7a:115c:a1e0::1", "100.70.1.2"], "Online": true, "OS": "linux"},
                 "nodekey:2": {"HostName": "phone", "TailscaleIPs": ["100.70.1.3"], "Online": false, "OS": "android"},

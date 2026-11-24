@@ -9,7 +9,7 @@ use linuxplay_proto::input::InputEvent;
 use linuxplay_proto::signal::MonitorInfo;
 use tracing::info;
 
-use crate::input::{self, InputTx};
+use crate::input::{self, Feedback, InputTx};
 use crate::monitor;
 use crate::portal::PortalStream;
 
@@ -19,9 +19,9 @@ pub enum CaptureKind {
     X11,
     /// ScreenCast + RemoteDesktop portals on a Wayland session.
     Portal,
-    /// A generated test picture and an input recorder, for automated tests.
-    #[value(skip)]
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// A generated test picture whose input goes nowhere: for trying a
+    /// connection without sharing a screen, and for automated tests.
+    #[value(hide = true)]
     Test,
 }
 
@@ -47,6 +47,8 @@ pub struct Capture {
     pub height: u32,
     /// Where to send input; `None` for a view-only session.
     pub input: Option<InputTx>,
+    /// Where rumble from the session's virtual gamepads goes.
+    pub feedback: Feedback,
     _keep: Box<dyn Any + Send>,
 }
 
@@ -60,8 +62,9 @@ pub fn monitors_x11() -> Result<Vec<MonitorInfo>> {
 pub fn open_x11(fps: u32, mon: &MonitorInfo, control: bool) -> Result<Capture> {
     let display = std::env::var("DISPLAY").ok();
     let area = (mon.x, mon.y, mon.width, mon.height);
+    let feedback = Feedback::default();
     let input = if control {
-        Some(input::spawn(input::x11::X11Injector::connect(display.as_deref(), area)?))
+        Some(input::spawn(input::x11::X11Injector::connect(display.as_deref(), area)?, feedback.clone()))
     } else {
         None
     };
@@ -78,19 +81,55 @@ pub fn open_x11(fps: u32, mon: &MonitorInfo, control: bool) -> Result<Capture> {
         width: mon.width,
         height: mon.height,
         input,
+        feedback,
         _keep: Box::new(()),
     })
 }
 
-/// The displays of the built-in test capture.
-pub fn monitors_test() -> Vec<MonitorInfo> {
+/// What the built-in test capture shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TestPicture {
+    pub width: u32,
+    pub height: u32,
+    pub pattern: TestPattern,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TestPattern {
+    /// A ball bouncing on black: almost free to encode.
+    Ball,
+    /// Colour bars.
+    Bars,
+    /// Noise that changes every frame: the hardest picture there is, for
+    /// trying an encoder and a link at full bitrate.
+    Snow,
+}
+
+impl TestPattern {
+    fn videotestsrc(self) -> &'static str {
+        match self {
+            Self::Ball => "ball",
+            Self::Bars => "smpte",
+            Self::Snow => "snow",
+        }
+    }
+}
+
+impl Default for TestPicture {
+    fn default() -> Self {
+        Self { width: 1280, height: 720, pattern: TestPattern::Ball }
+    }
+}
+
+/// The displays of the built-in test capture: two, side by side.
+pub fn monitors_test(picture: TestPicture) -> Vec<MonitorInfo> {
     (0..2)
         .map(|i| MonitorInfo {
             index: i,
             name: format!("Test {}", i + 1),
-            width: 320,
-            height: 240,
-            x: 320 * i as i32,
+            width: picture.width,
+            height: picture.height,
+            x: (picture.width * i) as i32,
             y: 0,
             primary: i == 0,
         })
@@ -98,16 +137,26 @@ pub fn monitors_test() -> Vec<MonitorInfo> {
 }
 
 /// A moving test pattern; input goes to `log`.
-pub fn open_test(fps: u32, mon: &MonitorInfo, control: bool, log: Arc<Mutex<Vec<InputEvent>>>) -> Capture {
+pub fn open_test(
+    fps: u32,
+    mon: &MonitorInfo,
+    pattern: TestPattern,
+    control: bool,
+    log: Arc<Mutex<Vec<InputEvent>>>,
+) -> Capture {
     let source = format!(
-        "videotestsrc is-live=true pattern=ball ! video/x-raw,width={},height={},framerate={fps}/1",
-        mon.width, mon.height
+        "videotestsrc is-live=true pattern={} ! video/x-raw,width={},height={},framerate={fps}/1",
+        pattern.videotestsrc(),
+        mon.width,
+        mon.height
     );
+    let feedback = Feedback::default();
     Capture {
         source,
         width: mon.width,
         height: mon.height,
-        input: control.then(|| input::spawn(input::Recorder(log))),
+        input: control.then(|| input::spawn(input::Recorder(log), feedback.clone())),
+        feedback,
         _keep: Box::new(()),
     }
 }
@@ -119,6 +168,7 @@ pub fn from_portal(stream: PortalStream) -> Capture {
         width: stream.width,
         height: stream.height,
         input: stream.input,
+        feedback: stream.feedback,
         _keep: Box::new(stream._keep),
     }
 }

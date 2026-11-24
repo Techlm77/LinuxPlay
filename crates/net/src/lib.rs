@@ -2,10 +2,15 @@
 //! session, TLS identities, PIN pairing and the signalling WebSocket.
 
 pub mod auth;
+pub mod exposure;
 pub mod fsutil;
+pub mod ice;
+pub mod netif;
 pub mod pair;
+pub mod rendezvous;
 pub mod rtc;
 pub mod tls;
+pub mod tunnel;
 pub mod ws;
 
 pub use rtc::{Channel, Drops, SessionEvent, SessionHandle};

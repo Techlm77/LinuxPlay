@@ -27,7 +27,7 @@ if [[ "${1:-}" == "uninstall" ]]; then
     exit 0
 fi
 
-# The host builds with just GStreamer; the client (GUI) also needs GTK4 and
+# The host builds with just GStreamer; the stream window also needs SDL 3 and
 # libadwaita. On a machine meant only to be shared (a host), GTK4 may be
 # absent, so build the client optionally and install whatever succeeded.
 echo "Building the host…"
@@ -35,12 +35,12 @@ cargo build --release -p linuxplay-host
 
 client_built=false
 echo "Building the client…"
-if cargo build --release -p linuxplay-client; then
+if cargo build --release -p linuxplay; then
     client_built=true
 else
     echo "Note: the client (GUI) didn't build — installing the host only."
-    echo "      To include the client, install GTK4 + libadwaita dev packages"
-    echo "      (Ubuntu: libgtk-4-dev libadwaita-1-dev; Arch: gtk4 libadwaita) and re-run."
+    echo "      To include it, install SDL 3's development package"
+    echo "      (Ubuntu 25.04+: libsdl3-dev; Fedora: SDL3-devel; Arch: sdl3) and re-run."
 fi
 
 echo "Installing to $prefix …"

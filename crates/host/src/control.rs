@@ -27,13 +27,17 @@ pub fn socket_path() -> PathBuf {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Re-read the trust store and end sessions that are no longer trusted.
     Reload,
     List,
     Decide(u64, Decision),
     Disconnect(Option<u64>),
+    /// Make an invite link, valid for this many minutes.
+    Invite { minutes: u32, control: bool },
+    /// Withdraw an invite by its id, ending the sessions that came by it.
+    Uninvite(String),
 }
 
 impl Command {
@@ -49,12 +53,17 @@ impl Command {
             ("deny", Some(id), None) => Self::Decide(id.parse().ok()?, Decision::Deny),
             ("disconnect", Some("all"), None) => Self::Disconnect(None),
             ("disconnect", Some(id), None) => Self::Disconnect(Some(id.parse().ok()?)),
+            ("invite", Some(minutes), Some(scope)) => {
+                let control = Decision::parse(scope).filter(|d| *d != Decision::Deny)? == Decision::Control;
+                Self::Invite { minutes: minutes.parse().ok()?, control }
+            }
+            ("uninvite", Some(id), None) => Self::Uninvite(id.to_string()),
             _ => return None,
         };
         words.next().is_none().then_some(cmd)
     }
 
-    pub fn to_line(self) -> String {
+    pub fn to_line(&self) -> String {
         match self {
             Self::Reload => "reload".into(),
             Self::List => "list".into(),
@@ -63,6 +72,9 @@ impl Command {
             Self::Decide(id, Decision::Control) => format!("approve {id} control"),
             Self::Disconnect(None) => "disconnect all".into(),
             Self::Disconnect(Some(id)) => format!("disconnect {id}"),
+            Self::Invite { minutes, control: true } => format!("invite {minutes} control"),
+            Self::Invite { minutes, control: false } => format!("invite {minutes} view"),
+            Self::Uninvite(id) => format!("uninvite {id}"),
         }
     }
 }
@@ -171,8 +183,14 @@ mod tests {
             Command::Decide(4, Decision::Deny),
             Command::Disconnect(None),
             Command::Disconnect(Some(9)),
+            Command::Invite { minutes: 30, control: true },
+            Command::Invite { minutes: 5, control: false },
+            Command::Uninvite("abc-123".into()),
         ] {
             assert_eq!(Command::parse(&c.to_line()), Some(c));
+        }
+        for bad in ["invite 30", "invite x view", "invite 30 deny", "uninvite"] {
+            assert_eq!(Command::parse(bad), None, "{bad}");
         }
         assert_eq!(Command::parse("approve 3 deny"), None);
         assert_eq!(Command::parse("approve x control"), None);

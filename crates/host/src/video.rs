@@ -2,7 +2,8 @@
 //! capture → convert → encode → appsink, handing each frame to the session.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
@@ -111,12 +112,14 @@ fn configure(el: &gst::Element, enc: &Encoder, fps: u32) {
             set(el, "rate-control", "vbr");
             set(el, "target-percentage", "95");
             // 1 (best quality) .. 7 (fastest). The fastest preset blocks up
-            // badly on video; 4 is a good quality/latency balance for a GPU.
+            // badly on video; 4 is a good balance and costs no extra delay.
             set(el, "target-usage", "4");
             // Spread bits to the busy blocks so motion doesn't smear.
             set(el, "mbbrc", "1");
             set(el, "b-frames", "0");
-            set(el, "ref-frames", "2");
+            // A second reference frame makes the encoder hold every frame
+            // back until the next one arrives: a whole frame of delay.
+            set(el, "ref-frames", "1");
             set(el, "key-int-max", &gop);
         }
         Backend::Nvenc => {
@@ -147,6 +150,11 @@ fn configure(el: &gst::Element, enc: &Encoder, fps: u32) {
             "svtav1enc" => {
                 set(el, "preset", "12");
                 set(el, "intra-period-length", &gop);
+                // SVT-AV1's defaults look far ahead: about 760 ms of delay at
+                // 1366x768. No look-ahead and a shallow hierarchy bring it to
+                // about 120 ms; its true low-delay mode stalls in GStreamer
+                // 1.28. Only used when no better encoder exists here.
+                set(el, "parameters-string", "rc=1:lookahead=0:hierarchical-levels=2");
             }
             _ => {}
         },
@@ -162,10 +170,56 @@ fn set_bitrate(el: &gst::Element, enc: &Encoder, kbps: u32) {
     set(el, name, &value.to_string());
 }
 
+/// Frames the encoder has taken in and not yet put out, at most. A hardware
+/// encoder holds a frame or two; more than this means it has stalled.
+const MAX_FRAMES_IN_ENCODER: usize = 32;
+
+/// Remembers when each frame entered the encoder, to stamp what comes out.
+///
+/// Encoders can't be trusted with timestamps: some shift them by a constant,
+/// some by a frame. With no B-frames, though, frames leave in the order they
+/// entered, so the capture times queue up on the way in and are matched
+/// again on the way out.
+#[derive(Default)]
+struct CaptureTimes {
+    entered: Mutex<VecDeque<gst::ClockTime>>,
+}
+
+impl CaptureTimes {
+    /// Note the capture time (as running time) of every frame entering `encoder`.
+    fn watch(self: &Arc<Self>, encoder: &gst::Element) {
+        let Some(pad) = encoder.static_pad("sink") else { return };
+        let times = self.clone();
+        pad.add_probe(gst::PadProbeType::BUFFER, move |pad, info| {
+            if let Some(captured) = info.buffer().and_then(|b| b.pts()).and_then(|pts| running_time(pad, pts)) {
+                let mut entered = times.entered.lock().unwrap();
+                if entered.len() == MAX_FRAMES_IN_ENCODER {
+                    entered.pop_front();
+                }
+                entered.push_back(captured);
+            }
+            gst::PadProbeReturn::Ok
+        });
+    }
+
+    /// The capture time of the frame now leaving the encoder.
+    fn next(&self) -> Option<gst::ClockTime> {
+        self.entered.lock().unwrap().pop_front()
+    }
+}
+
+/// A timestamp on `pad` as running time, using the segment in force there.
+fn running_time(pad: &gst::Pad, pts: gst::ClockTime) -> Option<gst::ClockTime> {
+    let segment = pad.sticky_event::<gst::event::Segment>(0)?;
+    segment.segment().downcast_ref::<gst::ClockTime>()?.to_running_time(pts)
+}
+
 #[derive(Default)]
 struct Counters {
     frames: AtomicU64,
     bytes: AtomicU64,
+    /// Total time frames spent between capture and the network, microseconds.
+    encode_us: AtomicU64,
 }
 
 pub struct VideoPipeline {
@@ -187,12 +241,35 @@ pub struct VideoPipeline {
 pub struct Stats {
     pub fps: f64,
     pub kbps: f64,
+    /// Average time from capture to the network, microseconds.
+    pub encode_us: u32,
 }
 
 /// Lowest bitrate the adaptation will go to, kbit/s.
 const MIN_KBPS: u32 = 1_000;
 /// After the session drops a frame, ask for a keyframe at most this often.
 const KEYFRAME_RECOVERY_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Some captures (GNOME's virtual screens) send frames only when the
+/// picture changes, and with no duration. videorate in drop-only mode aborts
+/// the whole process on such a frame, so each one gets a duration here:
+/// three quarters of the current frame period. videorate then drops frames
+/// that come sooner than that after the last one, which keeps the live
+/// framerate cap working without halving the rate on a little jitter.
+fn give_frames_a_duration(rate: &gst::Element) {
+    let Some(pad) = rate.static_pad("sink") else { return };
+    let weak = rate.downgrade();
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+        if let Some(gst::PadProbeData::Buffer(buffer)) = &mut info.data
+            && buffer.duration().is_none()
+            && let Some(rate) = weak.upgrade()
+        {
+            let fps = rate.property::<i32>("max-rate").max(1) as u64;
+            buffer.make_mut().set_duration(gst::ClockTime::from_nseconds(750_000_000 / fps));
+        }
+        gst::PadProbeReturn::Ok
+    });
+}
 
 impl VideoPipeline {
     /// Build and start the pipeline. `source` is a gst-launch fragment that
@@ -221,8 +298,12 @@ impl VideoPipeline {
             .context("building the video pipeline")?
             .downcast::<gst::Pipeline>()
             .map_err(|_| anyhow!("not a pipeline"))?;
+        // Timestamp against the monotonic system clock (a capture source may
+        // offer its own), so capture times can be compared with the client's.
+        pipeline.use_clock(Some(&gst::SystemClock::obtain()));
         let encoder = pipeline.by_name("enc").context("no encoder")?;
         let rate = pipeline.by_name("rate").context("no videorate")?;
+        give_frames_a_duration(&rate);
         let sink = pipeline
             .by_name("sink")
             .and_then(|s| s.downcast::<gst_app::AppSink>().ok())
@@ -234,6 +315,8 @@ impl VideoPipeline {
 
         let session: Arc<OnceLock<SessionHandle>> = Arc::default();
         let counters: Arc<Counters> = Arc::default();
+        let capture_times: Arc<CaptureTimes> = Arc::default();
+        capture_times.watch(&encoder);
         {
             let session = session.clone();
             let counters = counters.clone();
@@ -243,12 +326,16 @@ impl VideoPipeline {
                     .new_sample(move |sink| {
                         let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
                         let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
-                        let pts = buffer.pts().unwrap_or(gst::ClockTime::ZERO);
+                        // When this frame was captured, as running time.
+                        let captured = capture_times.next().unwrap_or(gst::ClockTime::ZERO);
                         let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
                         counters.frames.fetch_add(1, Ordering::Relaxed);
                         counters.bytes.fetch_add(map.len() as u64, Ordering::Relaxed);
+                        if let Some(now) = sink.current_running_time() {
+                            counters.encode_us.fetch_add(now.saturating_sub(captured).useconds(), Ordering::Relaxed);
+                        }
                         if let Some(h) = session.get() {
-                            let sent = h.write_video(map.as_slice().to_vec(), Duration::from_nanos(pts.nseconds()));
+                            let sent = h.write_video(map.as_slice().to_vec(), Duration::from_nanos(captured.nseconds()));
                             // The session is behind and dropped this frame; the
                             // frames after it can't be decoded until a keyframe.
                             if !sent && last_recovery.is_none_or(|t| t.elapsed() >= KEYFRAME_RECOVERY_INTERVAL) {
@@ -376,8 +463,20 @@ impl VideoPipeline {
     pub fn take_stats(&self, elapsed: Duration) -> Stats {
         let frames = self.counters.frames.swap(0, Ordering::Relaxed);
         let bytes = self.counters.bytes.swap(0, Ordering::Relaxed);
+        let encode_us = self.counters.encode_us.swap(0, Ordering::Relaxed);
         let secs = elapsed.as_secs_f64().max(0.001);
-        Stats { fps: frames as f64 / secs, kbps: bytes as f64 * 8.0 / 1000.0 / secs }
+        Stats {
+            fps: frames as f64 / secs,
+            kbps: bytes as f64 * 8.0 / 1000.0 / secs,
+            encode_us: (encode_us / frames.max(1)) as u32,
+        }
+    }
+
+    /// The host's monotonic clock, in microseconds, at the moment the video's
+    /// timestamps (and so its RTP clock) read zero. `None` until the pipeline
+    /// is running.
+    pub fn clock_base_us(&self) -> Option<u64> {
+        self.pipeline.base_time().map(|t| t.useconds())
     }
 
     pub fn stop(&self) {
@@ -427,4 +526,40 @@ pub fn watch_bus(pipeline: &gst::Pipeline, stopped: Arc<AtomicBool>, on_error: i
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Frames with no duration on a variable-rate stream, as GNOME's virtual
+    /// screens send them, pass videorate without aborting, and the framerate
+    /// cap still holds: 60 frames a second capped at 30 keeps every other one.
+    #[test]
+    fn frames_without_a_duration_survive_videorate() {
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(
+            "appsrc name=src format=time caps=video/x-raw,format=I420,width=16,height=16,framerate=0/1 \
+             ! videorate name=rate drop-only=true max-rate=30 ! appsink name=sink sync=false",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        give_frames_a_duration(&pipeline.by_name("rate").unwrap());
+        let src = pipeline.by_name("src").unwrap().downcast::<gst_app::AppSrc>().unwrap();
+        let sink = pipeline.by_name("sink").unwrap().downcast::<gst_app::AppSink>().unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        for i in 0..20u64 {
+            let mut buffer = gst::Buffer::from_mut_slice(vec![0u8; 16 * 16 * 3 / 2]);
+            buffer.get_mut().unwrap().set_pts(gst::ClockTime::from_nseconds(i * 16_666_667));
+            src.push_buffer(buffer).unwrap();
+        }
+        src.end_of_stream().unwrap();
+        let mut frames = 0;
+        while sink.pull_sample().is_ok() {
+            frames += 1;
+        }
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert_eq!(frames, 10);
+    }
 }

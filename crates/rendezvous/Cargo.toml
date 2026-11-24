@@ -1,0 +1,33 @@
+[package]
+name = "linuxplay-rendezvous"
+description = "LinuxPlay's sign-in and rendezvous server: accounts, device lists, invites and relayed signalling"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "linuxplay-rendezvous"
+path = "src/main.rs"
+
+[dependencies]
+linuxplay-net.workspace = true
+linuxplay-proto.workspace = true
+
+anyhow.workspace = true
+argon2 = "0.5"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "ws", "query"] }
+base64.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+rand.workspace = true
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tokio-tungstenite.workspace = true

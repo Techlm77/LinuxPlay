@@ -2,16 +2,16 @@
 //!
 //! The host is always the offerer: it sends video (and optionally audio) and
 //! opens the data channels. The client answers and only receives media.
-//! Candidates are host candidates on the interface the signalling connection
-//! already uses, so no candidate trickling is needed on a LAN.
+//! Each side gathers all its candidates before it sends its half of the
+//! offer/answer (see [`crate::ice`]), so none have to be trickled later.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, UdpSocket};
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result};
 use linuxplay_proto::signal::VideoCodec;
 use linuxplay_proto::{CONTROL_CHANNEL, INPUT_CHANNEL};
 use str0m::bwe::{Bitrate, BweKind};
@@ -19,9 +19,11 @@ use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::channel::{ChannelConfig, ChannelId, Reliability};
 use str0m::media::{Direction, Frequency, KeyframeRequestKind, MediaKind, MediaTime, Mid, Pt};
 use str0m::net::{Protocol, Receive};
-use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
+use str0m::{Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 use tokio::sync::{Notify, mpsc};
 use tracing::{debug, info, warn};
+
+use crate::ice::{self, Reach};
 
 /// Commands waiting for the session thread. Small: a session that can't keep
 /// up should drop work, not buffer it.
@@ -212,35 +214,20 @@ fn enable_codec(cfg: RtcConfig, codec: VideoCodec) -> RtcConfig {
     }
 }
 
-/// Bind the media socket on `local_ip`, on the first free port of `ports`
-/// (or any port).
-fn bind_socket(local_ip: IpAddr, ports: Option<(u16, u16)>) -> Result<UdpSocket> {
-    let Some((first, last)) = ports else {
-        return UdpSocket::bind((local_ip, 0)).context("binding the media UDP socket");
-    };
-    for port in first..=last {
-        match UdpSocket::bind((local_ip, port)) {
-            Ok(s) => return Ok(s),
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
-            Err(e) => return Err(e).with_context(|| format!("binding media port {local_ip}:{port}")),
-        }
+/// Open the media sockets for `reach` and tell `rtc` about them.
+async fn open_sockets(reach: Reach, ports: Option<(u16, u16)>, rtc: &mut Rtc) -> Result<Vec<UdpSocket>> {
+    let gathered = ice::gather(reach, ports).await?;
+    for candidate in gathered.candidates {
+        debug!("local candidate {candidate}");
+        rtc.add_local_candidate(candidate);
     }
-    bail!("all media ports {first}-{last} on {local_ip} are in use")
-}
-
-fn bind(local_ip: IpAddr, ports: Option<(u16, u16)>, rtc: &mut Rtc) -> Result<UdpSocket> {
-    let socket = bind_socket(local_ip, ports)?;
-    let addr = socket.local_addr()?;
-    let candidate = Candidate::host(addr, "udp").map_err(|e| anyhow!("host candidate {addr}: {e}"))?;
-    rtc.add_local_candidate(candidate);
-    debug!("media socket on {addr}");
-    Ok(socket)
+    Ok(gathered.sockets)
 }
 
 /// A host-side session whose offer has been sent but not yet answered.
 pub struct PendingSession {
     rtc: Rtc,
-    socket: UdpSocket,
+    sockets: Vec<UdpSocket>,
     pending: SdpPendingOffer,
     video: Mid,
     audio: Option<Mid>,
@@ -248,14 +235,14 @@ pub struct PendingSession {
 
 /// Host side: create the offer. Returns the session waiting for its answer and
 /// the SDP to send to the client.
-pub fn create_offer(local_ip: IpAddr, opts: &OfferOptions) -> Result<(PendingSession, String)> {
+pub async fn create_offer(reach: Reach, opts: &OfferOptions) -> Result<(PendingSession, String)> {
     let mut cfg = enable_codec(base_config(), opts.codec)
         .enable_bwe(Some(Bitrate::bps(opts.start_bitrate)));
     if opts.audio {
         cfg = cfg.enable_opus(true, false);
     }
     let mut rtc = cfg.build(Instant::now());
-    let socket = bind(local_ip, opts.ports, &mut rtc)?;
+    let sockets = open_sockets(reach, opts.ports, &mut rtc).await?;
 
     let mut api = rtc.sdp_api();
     let stream = Some("linuxplay".to_string());
@@ -272,7 +259,7 @@ pub fn create_offer(local_ip: IpAddr, opts: &OfferOptions) -> Result<(PendingSes
     api.add_channel(CONTROL_CHANNEL.into());
     let (offer, pending) = api.apply().context("empty offer")?;
 
-    let session = PendingSession { rtc, socket, pending, video, audio };
+    let session = PendingSession { rtc, sockets, pending, video, audio };
     Ok((session, offer.to_sdp_string()))
 }
 
@@ -287,30 +274,32 @@ impl PendingSession {
         let mut state = LoopState::new(on_event);
         state.video = Some(self.video);
         state.audio = self.audio;
-        spawn(self.rtc, self.socket, state)
+        spawn(self.rtc, self.sockets, state)
     }
 }
 
 /// Client side: answer the host's offer and start the session thread.
 /// Returns the handle and the SDP answer to send back.
-pub fn accept_offer(local_ip: IpAddr, offer_sdp: &str, on_event: EventHandler) -> Result<(SessionHandle, String)> {
+pub async fn accept_offer(reach: Reach, offer_sdp: &str, on_event: EventHandler) -> Result<(SessionHandle, String)> {
     let mut cfg = base_config().enable_opus(true, false);
     for codec in [VideoCodec::H264, VideoCodec::H265, VideoCodec::Av1] {
         cfg = enable_codec(cfg, codec);
     }
     let mut rtc = cfg.build(Instant::now());
-    let socket = bind(local_ip, None, &mut rtc)?;
+    let sockets = open_sockets(reach, None, &mut rtc).await?;
 
     let offer = SdpOffer::from_sdp_string(offer_sdp).context("parsing the SDP offer")?;
     let answer = rtc.sdp_api().accept_offer(offer).context("accepting the SDP offer")?;
-    let handle = spawn(rtc, socket, LoopState::new(on_event))?;
+    let handle = spawn(rtc, sockets, LoopState::new(on_event))?;
     Ok((handle, answer.to_sdp_string()))
 }
 
-fn spawn(rtc: Rtc, socket: UdpSocket, mut state: LoopState) -> Result<SessionHandle> {
+fn spawn(rtc: Rtc, sockets: Vec<UdpSocket>, mut state: LoopState) -> Result<SessionHandle> {
     let (handle, rx) = SessionHandle::new();
     let shared = handle.shared.clone();
-    socket.set_nonblocking(true)?;
+    for socket in &sockets {
+        socket.set_nonblocking(true)?;
+    }
     std::thread::Builder::new()
         .name("linuxplay-rtc".into())
         .spawn(move || {
@@ -318,7 +307,7 @@ fn spawn(rtc: Rtc, socket: UdpSocket, mut state: LoopState) -> Result<SessionHan
                 .enable_all()
                 .build()
                 .expect("tokio runtime");
-            let result = rt.block_on(run(rtc, socket, rx, &shared, &mut state));
+            let result = rt.block_on(run(rtc, sockets, rx, &shared, &mut state));
             if let Err(e) = &result {
                 warn!("session ended: {e:#}");
             }
@@ -327,26 +316,81 @@ fn spawn(rtc: Rtc, socket: UdpSocket, mut state: LoopState) -> Result<SessionHan
     Ok(handle)
 }
 
+/// A datagram that arrived on one of the session's sockets.
+struct Datagram {
+    /// The local address it arrived on.
+    destination: SocketAddr,
+    source: SocketAddr,
+    contents: Vec<u8>,
+}
+
+/// Datagrams waiting for the session loop. At 1200 bytes each this is a few
+/// frames' worth; beyond it they are dropped, as a full socket buffer would.
+const DATAGRAM_QUEUE: usize = 512;
+
+/// The session's sockets: one reader task each, feeding one queue.
+struct Sockets {
+    by_address: HashMap<SocketAddr, Arc<tokio::net::UdpSocket>>,
+    incoming: mpsc::Receiver<Datagram>,
+    readers: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Sockets {
+    fn new(sockets: Vec<UdpSocket>) -> Result<Self> {
+        let (tx, incoming) = mpsc::channel(DATAGRAM_QUEUE);
+        let mut by_address = HashMap::new();
+        let mut readers = Vec::new();
+        for socket in sockets {
+            let socket = Arc::new(tokio::net::UdpSocket::from_std(socket)?);
+            let destination = socket.local_addr()?;
+            by_address.insert(destination, socket.clone());
+            let tx = tx.clone();
+            readers.push(tokio::spawn(async move {
+                let mut buf = vec![0u8; 2048];
+                while let Ok((n, source)) = socket.recv_from(&mut buf).await {
+                    // A full queue drops the datagram; the stream recovers
+                    // as it does from any loss.
+                    let _ = tx.try_send(Datagram { destination, source, contents: buf[..n].to_vec() });
+                }
+            }));
+        }
+        Ok(Self { by_address, incoming, readers })
+    }
+
+    /// Send from the socket bound to `source`.
+    async fn send(&self, source: SocketAddr, destination: SocketAddr, contents: &[u8]) {
+        let Some(socket) = self.by_address.get(&source) else {
+            debug!("no socket bound to {source}");
+            return;
+        };
+        if let Err(e) = socket.send_to(contents, destination).await {
+            debug!("send to {destination}: {e}");
+        }
+    }
+}
+
+impl Drop for Sockets {
+    fn drop(&mut self) {
+        for reader in &self.readers {
+            reader.abort();
+        }
+    }
+}
+
 async fn run(
     mut rtc: Rtc,
-    socket: UdpSocket,
+    sockets: Vec<UdpSocket>,
     mut rx: mpsc::Receiver<Cmd>,
     shared: &Shared,
     st: &mut LoopState,
 ) -> Result<()> {
-    let socket = tokio::net::UdpSocket::from_std(socket)?;
-    let local = socket.local_addr()?;
-    let mut buf = vec![0u8; 2048];
+    let mut sockets = Sockets::new(sockets)?;
 
     loop {
         let timeout = loop {
             match rtc.poll_output()? {
                 Output::Timeout(t) => break t,
-                Output::Transmit(t) => {
-                    if let Err(e) = socket.send_to(&t.contents, t.destination).await {
-                        debug!("send to {}: {e}", t.destination);
-                    }
-                }
+                Output::Transmit(t) => sockets.send(t.source, t.destination, &t.contents).await,
                 Output::Event(e) => {
                     if !st.handle_event(&mut rtc, e) {
                         rtc.disconnect();
@@ -381,12 +425,16 @@ async fn run(
                     st.apply(&mut rtc, cmd)?
                 }
             },
-            r = socket.recv_from(&mut buf) => {
-                let (n, source) = r?;
+            Some(datagram) = sockets.incoming.recv() => {
                 // Anything that isn't STUN/DTLS/RTP is ignored.
-                if let Ok(contents) = buf[..n].try_into() {
-                    let input = Input::Receive(Instant::now(), Receive { proto: Protocol::Udp, source, destination: local, contents });
-                    rtc.handle_input(input)?;
+                if let Ok(contents) = datagram.contents.as_slice().try_into() {
+                    let receive = Receive {
+                        proto: Protocol::Udp,
+                        source: datagram.source,
+                        destination: datagram.destination,
+                        contents,
+                    };
+                    rtc.handle_input(Input::Receive(Instant::now(), receive))?;
                 }
             }
             _ = tokio::time::sleep_until(timeout.into()) => {
@@ -491,11 +539,10 @@ impl LoopState {
                 write_media(rtc, mid, &mut self.audio_pt, Frequency::FORTY_EIGHT_KHZ, data, pts)?;
             }
             Cmd::Send(ch, data) => {
-                if let Some(mut c) = self.channel_ids.get(&ch).and_then(|id| rtc.channel(*id)) {
-                    if let Err(e) = c.write(true, &data) {
+                if let Some(mut c) = self.channel_ids.get(&ch).and_then(|id| rtc.channel(*id))
+                    && let Err(e) = c.write(true, &data) {
                         debug!("{ch:?} channel write: {e}");
                     }
-                }
             }
             Cmd::RequestKeyframe => self.request_keyframe(rtc),
             Cmd::DesiredBitrate(bps) => rtc.bwe().set_desired_bitrate(Bitrate::bps(bps)),
@@ -577,24 +624,5 @@ mod tests {
                 .await
                 .expect("close is never lost");
         });
-    }
-
-    #[test]
-    fn media_ports_come_from_the_range() {
-        let ip: IpAddr = "127.0.0.1".parse().unwrap();
-        // Find two free adjacent ports, then hold the first.
-        let probe = UdpSocket::bind((ip, 0)).unwrap();
-        let base = probe.local_addr().unwrap().port().clamp(1024, 65000);
-        drop(probe);
-        let range = (base, base + 3);
-        let a = bind_socket(ip, Some(range)).unwrap();
-        let b = bind_socket(ip, Some(range)).unwrap();
-        let pa = a.local_addr().unwrap().port();
-        let pb = b.local_addr().unwrap().port();
-        assert!((range.0..=range.1).contains(&pa) && (range.0..=range.1).contains(&pb));
-        assert_ne!(pa, pb);
-        let _c = bind_socket(ip, Some(range));
-        let _d = bind_socket(ip, Some(range));
-        assert!(bind_socket(ip, Some(range)).is_err(), "a full range must fail, not fall back to any port");
     }
 }

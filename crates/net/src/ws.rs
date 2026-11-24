@@ -15,7 +15,62 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
+use crate::ice::Reach;
 use crate::tls::{Fingerprint, Identity, peer_fingerprint};
+
+/// A byte stream the signalling connection can run over: a TCP connection,
+/// or a tunnel through the rendezvous server.
+pub trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
+pub type BoxIo = Box<dyn Io>;
+
+/// How the two ends of a signalling connection reach each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    /// Straight over the network.
+    Direct {
+        /// Our address on the interface that leads to the peer.
+        local_ip: IpAddr,
+        peer: SocketAddr,
+    },
+    /// Through the rendezvous server, so the peer's address is unknown.
+    /// `stun` is where to learn our own public address for the media.
+    Relayed { stun: Option<SocketAddr> },
+}
+
+impl Route {
+    /// The peer's address, for limits and logs; unspecified when relayed, so
+    /// every relayed peer counts as the same source.
+    pub fn peer_ip(&self) -> IpAddr {
+        match self {
+            Self::Direct { peer, .. } => peer.ip(),
+            Self::Relayed { .. } => IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        }
+    }
+
+    /// Where the media sockets for this connection should be.
+    pub fn reach(&self) -> Reach {
+        match *self {
+            Self::Direct { local_ip, .. } => Reach::Interface(local_ip),
+            Self::Relayed { stun } => Reach::Anywhere { stun },
+        }
+    }
+
+    /// Is the peer this very computer? Its sound must then not be played
+    /// here: the host would record it again, in a loop that only gets louder.
+    pub fn is_same_machine(&self) -> bool {
+        matches!(self, Self::Direct { local_ip, peer } if peer.ip().is_loopback() || peer.ip() == *local_ip)
+    }
+}
+
+impl std::fmt::Display for Route {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Direct { peer, .. } => write!(f, "{peer}"),
+            Self::Relayed { .. } => f.write_str("via the rendezvous server"),
+        }
+    }
+}
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -72,21 +127,28 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Signal<S> {
 
 /// An accepted, TLS-authenticated signalling connection on the host.
 pub struct Accepted {
-    pub signal: Signal<tokio_rustls::server::TlsStream<TcpStream>>,
+    pub signal: Signal<tokio_rustls::server::TlsStream<BoxIo>>,
     pub client_fp: Fingerprint,
-    /// Our address on the interface the client reached us through.
-    pub local_ip: IpAddr,
-    pub peer: SocketAddr,
+    pub route: Route,
+    /// The invite this client came by, when the rendezvous server said so.
+    /// The client still has to prove it knows the invite's secret.
+    pub invite: Option<String>,
 }
 
+/// Accept a client that connected directly.
 pub async fn accept(tcp: TcpStream, acceptor: &TlsAcceptor) -> Result<Accepted> {
     // IPv4-mapped IPv6 addresses are reported as plain IPv4.
     let local_ip = tcp.local_addr()?.ip().to_canonical();
     let peer = tcp.peer_addr()?;
     let peer = SocketAddr::new(peer.ip().to_canonical(), peer.port());
     tcp.set_nodelay(true)?;
+    accept_io(Box::new(tcp), Route::Direct { local_ip, peer }, acceptor).await
+}
+
+/// Run the host's side of the handshake over any byte stream.
+pub async fn accept_io(io: BoxIo, route: Route, acceptor: &TlsAcceptor) -> Result<Accepted> {
     let fut = async {
-        let tls = acceptor.accept(tcp).await.context("TLS handshake")?;
+        let tls = acceptor.accept(io).await.context("TLS handshake")?;
         let client_fp = peer_fingerprint(tls.get_ref().1.peer_certificates())
             .ok_or_else(|| anyhow!("client sent no certificate"))?;
         let ws = tokio_tungstenite::accept_async_with_config(tls, Some(ws_config()))
@@ -97,15 +159,14 @@ pub async fn accept(tcp: TcpStream, acceptor: &TlsAcceptor) -> Result<Accepted> 
     let (ws, client_fp) = tokio::time::timeout(HANDSHAKE_TIMEOUT, fut)
         .await
         .map_err(|_| anyhow!("handshake timed out"))??;
-    Ok(Accepted { signal: Signal { ws }, client_fp, local_ip, peer })
+    Ok(Accepted { signal: Signal { ws }, client_fp, route, invite: None })
 }
 
 /// A connected signalling connection on the client.
 pub struct Connected {
-    pub signal: Signal<tokio_rustls::client::TlsStream<TcpStream>>,
+    pub signal: Signal<tokio_rustls::client::TlsStream<BoxIo>>,
     pub host_fp: Fingerprint,
-    /// Our address on the interface that reaches the host.
-    pub local_ip: IpAddr,
+    pub route: Route,
 }
 
 /// Split `host`, `host:port`, `[v6]` or `[v6]:port`, defaulting the port.
@@ -131,28 +192,37 @@ pub fn parse_address(input: &str, default_port: u16) -> Result<(String, u16)> {
     }
 }
 
+/// Connect to a host directly.
 pub async fn connect(host: &str, port: u16, identity: &Identity) -> Result<Connected> {
-    let fut = async {
-        let tcp = TcpStream::connect((host, port))
-            .await
-            .with_context(|| format!("connecting to {host}:{port}"))?;
+    let dial = async {
+        let tcp = TcpStream::connect((host, port)).await.with_context(|| format!("connecting to {host}:{port}"))?;
         tcp.set_nodelay(true)?;
         let local_ip = tcp.local_addr()?.ip().to_canonical();
+        let peer = tcp.peer_addr()?;
+        let peer = SocketAddr::new(peer.ip().to_canonical(), peer.port());
+        Ok::<_, anyhow::Error>((tcp, Route::Direct { local_ip, peer }))
+    };
+    let (tcp, route) = tokio::time::timeout(HANDSHAKE_TIMEOUT, dial)
+        .await
+        .map_err(|_| anyhow!("timed out connecting to {host}:{port}"))??;
+    connect_io(Box::new(tcp), route, identity).await
+}
+
+/// Run the client's side of the handshake over any byte stream.
+pub async fn connect_io(io: BoxIo, route: Route, identity: &Identity) -> Result<Connected> {
+    let fut = async {
         let connector = TlsConnector::from(Arc::new(identity.client_config()?));
         // The name is not checked; the fingerprint is.
         let name = rustls::pki_types::ServerName::try_from("linuxplay.host")?.to_owned();
-        let tls = connector.connect(name, tcp).await.context("TLS handshake")?;
+        let tls = connector.connect(name, io).await.context("TLS handshake")?;
         let host_fp = peer_fingerprint(tls.get_ref().1.peer_certificates())
             .ok_or_else(|| anyhow!("host sent no certificate"))?;
-        let url = format!("wss://linuxplay.host:{port}/");
-        let (ws, _) = tokio_tungstenite::client_async_with_config(url, tls, Some(ws_config()))
+        let (ws, _) = tokio_tungstenite::client_async_with_config("wss://linuxplay.host/", tls, Some(ws_config()))
             .await
             .context("WebSocket handshake")?;
-        Ok::<_, anyhow::Error>(Connected { signal: Signal { ws }, host_fp, local_ip })
+        Ok::<_, anyhow::Error>(Connected { signal: Signal { ws }, host_fp, route })
     };
-    tokio::time::timeout(HANDSHAKE_TIMEOUT, fut)
-        .await
-        .map_err(|_| anyhow!("timed out connecting to {host}:{port}"))?
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, fut).await.map_err(|_| anyhow!("the handshake timed out"))?
 }
 
 #[cfg(test)]
@@ -162,7 +232,7 @@ mod tests {
     #[test]
     fn addresses() {
         let p = |s| parse_address(s, 47800).unwrap();
-        assert_eq!(p("192.168.8.184"), ("192.168.8.184".into(), 47800));
+        assert_eq!(p("192.168.1.30"), ("192.168.1.30".into(), 47800));
         assert_eq!(p("server:1234"), ("server".into(), 1234));
         assert_eq!(p("fe80::1"), ("fe80::1".into(), 47800));
         assert_eq!(p("[fe80::1]:99"), ("fe80::1".into(), 99));
