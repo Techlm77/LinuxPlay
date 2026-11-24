@@ -28,17 +28,21 @@ Low-latency remote desktop and game streaming for Linux, written in Rust.
 
 ## Install
 
+Download the Flatpak bundle or the AppImage from the
+[latest release](https://github.com/Techlm77/LinuxPlay/releases/latest). Each
+release lists the files' SHA-256 checksums (`sha256sum FILE` to compare).
+
 ### Flatpak
 
 ```sh
-packaging/flatpak/build.sh            # builds and installs for this user, no root
+flatpak install --user LinuxPlay-*-x86_64.flatpak
 flatpak run io.github.techlm77.LinuxPlay ADDRESS
 flatpak run --command=linuxplay-host io.github.techlm77.LinuxPlay
 ```
 
-`build.sh --bundle` also writes `LinuxPlay.flatpak`, a single file that
-installs on another machine with `flatpak install --user LinuxPlay.flatpak`.
-Now and then a bundle install leaves out the runtime's graphics drivers or
+To build it yourself instead, `packaging/flatpak/build.sh` builds and installs
+it for this user (no root); `build.sh --bundle` also writes `LinuxPlay.flatpak`,
+a single file to install on another machine. Now and then a bundle install leaves out the runtime's graphics drivers or
 codecs (seen on Linux Mint and Bazzite); the stream window then says so.
 Install them with:
 
