@@ -109,6 +109,9 @@ impl Host {
         // applied downstream, so we never encode faster than the client wants.
         let capture = self.open_capture(cfg.fps.max(1), monitor, grant.control).await?;
         let (width, height) = (capture.width, capture.height);
+        if width == 0 || height == 0 {
+            bail!("display {monitor} has no size ({width}x{height}), so it can't be streamed");
+        }
 
         // Weigh encoders, codecs, link type and resolution into one plan.
         let overrides = Overrides {

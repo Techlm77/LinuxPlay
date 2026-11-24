@@ -183,7 +183,9 @@ sudo udevadm control --reload && sudo udevadm trigger --name-match=uinput
 On Wayland, `linuxplay-host --virtual-display` (or `"virtual_display": true`
 through the API) adds "a new virtual screen" to the share dialog: the
 compositor makes a display that exists only for the stream, so a computer with
-no monitor attached can still be used.
+no monitor attached can still be used. It is 1920×1080. GNOME offers it as
+"Virtual Monitor" (tested on GNOME 51); KDE Plasma's dialog doesn't offer one
+yet and shares the real monitors instead.
 
 ### Managing a running host
 
@@ -266,31 +268,32 @@ Every row is a fresh, fully updated install in a virtual machine (no GPU, so
 software encoding and decoding), with the Flatpak installed the way the
 Install section says, a host and a client run in the desktop session, and the
 picture checked to arrive at full frame rate. On X11 the real screen was
-captured too. Tested 2026-11-23 with the current build.
+captured too. The AppImage went through the same test on the same machines.
+Tested 2026-11-23 and 2026-11-24 with the current build.
 
-| System | Desktop | Session | Result | Latency* | Screen capture (X11) | Extra steps |
-|---|---|---|---|---|---|---|
-| Arch Linux | GNOME 51.1 | Wayland | passed | 7.5 ms | – | none |
-| Arch Linux | Hyprland 0.57.2 | Wayland | passed | 7.3 ms | – | install Flatpak first |
-| Arch Linux | sway 1.12 | Wayland | passed | 7.6 ms | – | install Flatpak first |
-| Arch Linux | KDE Plasma 6.8.3 | Wayland | passed | 7.8 ms | – | none |
-| Bazzite | KDE Plasma 6.8.2 | Wayland | passed | 8.4 ms | – | none |
-| CachyOS | KDE Plasma 6.8.3 | Wayland | passed | 7.5 ms | – | install Flatpak first |
-| Debian GNU/Linux 12 (bookworm) | GNOME 43.9 | Wayland | passed | 8.5 ms | – | install Flatpak first |
-| Debian GNU/Linux 13 (trixie) | GNOME 48.7 | Wayland | passed | 8.1 ms | – | install Flatpak first |
-| EndeavourOS | KDE Plasma 6.8.3 | Wayland | passed | 7.4 ms | – | install Flatpak first |
-| Fedora Linux 45 (Forty Five) | KDE Plasma 6.8.3 | Wayland | passed | 7.8 ms | – | none |
-| Fedora Linux 45 (Workstation Edition) | GNOME 51.1 | Wayland | passed | 7.5 ms | – | none |
-| Linux Mint 22.3 | Cinnamon 6.6.9 | X11 | passed | 12.6 ms | yes | runtime parts had to be installed (see Install) |
-| Manjaro Linux | KDE Plasma 6.7.5 | Wayland | passed | 7.7 ms | – | none |
-| NixOS 26.05 (Yarara) | GNOME 50.6 | Wayland | passed | 8.0 ms | – | none |
-| Pop!_OS 24.04 LTS | COSMIC 1.11.0 | Wayland | passed | 11.4 ms | – | none |
-| SteamOS | KDE Plasma 6.7.3 | X11 | passed | 6.9 ms | yes | none |
-| Ubuntu 22.04.5 LTS | GNOME 42.9 | X11 | passed | 7.4 ms | yes | install Flatpak first |
-| Ubuntu 24.04.5 LTS | GNOME 46.0 | Wayland | passed | 8.0 ms | – | install Flatpak first |
-| Ubuntu 26.04.1 LTS | GNOME 50.1 | Wayland | passed | 7.5 ms | – | install Flatpak first |
-| Zorin OS 18.1 | GNOME 46.0 | Wayland | passed | 8.9 ms | – | none |
-| openSUSE Tumbleweed | KDE Plasma 6.8.2 | Wayland | passed | 7.8 ms | – | none |
+| System | Desktop | Session | Flatpak | Flatpak latency* | AppImage, latency* | Screen capture (X11) | Extra steps (Flatpak; the AppImage needed none) |
+|---|---|---|---|---|---|---|---|
+| Arch Linux | GNOME 51.1 | Wayland | passed | 7.5 ms | passed, 7.2 ms | – | none |
+| Arch Linux | Hyprland 0.57.2 | Wayland | passed | 7.3 ms | passed, 7.3 ms | – | install Flatpak first |
+| Arch Linux | sway 1.12 | Wayland | passed | 7.6 ms | passed, 7.4 ms | – | install Flatpak first |
+| Arch Linux | KDE Plasma 6.8.3 | Wayland | passed | 7.8 ms | passed, 7.4 ms | – | none |
+| Bazzite | KDE Plasma 6.8.2 | Wayland | passed | 8.4 ms | passed, 7.7 ms | – | none |
+| CachyOS | KDE Plasma 6.8.3 | Wayland | passed | 7.5 ms | passed, 6.8 ms | – | install Flatpak first |
+| Debian GNU/Linux 12 (bookworm) | GNOME 43.9 | Wayland | passed | 8.5 ms | use the Flatpak (glibc older than 2.39) | – | install Flatpak first |
+| Debian GNU/Linux 13 (trixie) | GNOME 48.7 | Wayland | passed | 8.1 ms | passed, 7.4 ms | – | install Flatpak first |
+| EndeavourOS | KDE Plasma 6.8.3 | Wayland | passed | 7.4 ms | passed, 7.3 ms | – | install Flatpak first |
+| Fedora Linux 45 (Forty Five) | KDE Plasma 6.8.3 | Wayland | passed | 7.8 ms | passed, 8.2 ms | – | none |
+| Fedora Linux 45 (Workstation Edition) | GNOME 51.1 | Wayland | passed | 7.5 ms | passed, 7.9 ms | – | none |
+| Linux Mint 22.3 | Cinnamon 6.6.9 | X11 | passed | 12.6 ms | passed, 10.2 ms | yes | runtime parts had to be installed (see Install) |
+| Manjaro Linux | KDE Plasma 6.7.5 | Wayland | passed | 7.7 ms | passed, 7.4 ms | – | none |
+| NixOS 26.05 (Yarara) | GNOME 50.6 | Wayland | passed | 8.0 ms | passed, 8.1 ms | – | none |
+| Pop!_OS 24.04 LTS | COSMIC 1.11.0 | Wayland | passed | 11.4 ms | passed, 12.2 ms | – | none |
+| SteamOS | KDE Plasma 6.7.3 | X11 | passed | 6.9 ms | passed, 7.4 ms | yes | none |
+| Ubuntu 22.04.5 LTS | GNOME 42.9 | X11 | passed | 7.4 ms | use the Flatpak (glibc older than 2.39) | yes | install Flatpak first |
+| Ubuntu 24.04.5 LTS | GNOME 46.0 | Wayland | passed | 8.0 ms | passed, 8.0 ms | – | install Flatpak first |
+| Ubuntu 26.04.1 LTS | GNOME 50.1 | Wayland | passed | 7.5 ms | passed, 7.5 ms | – | install Flatpak first |
+| Zorin OS 18.1 | GNOME 46.0 | Wayland | passed | 8.9 ms | passed, 7.9 ms | – | none |
+| openSUSE Tumbleweed | KDE Plasma 6.8.2 | Wayland | passed | 7.8 ms | passed, 7.7 ms | – | none |
 
 \* Capture to screen inside the VM, software H.264 on both ends; on real
 hardware it is lower (see Performance).

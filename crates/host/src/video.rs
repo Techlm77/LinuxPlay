@@ -250,6 +250,27 @@ const MIN_KBPS: u32 = 1_000;
 /// After the session drops a frame, ask for a keyframe at most this often.
 const KEYFRAME_RECOVERY_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Some captures (GNOME's virtual screens) send frames only when the
+/// picture changes, and with no duration. videorate in drop-only mode aborts
+/// the whole process on such a frame, so each one gets a duration here:
+/// three quarters of the current frame period. videorate then drops frames
+/// that come sooner than that after the last one, which keeps the live
+/// framerate cap working without halving the rate on a little jitter.
+fn give_frames_a_duration(rate: &gst::Element) {
+    let Some(pad) = rate.static_pad("sink") else { return };
+    let weak = rate.downgrade();
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+        if let Some(gst::PadProbeData::Buffer(buffer)) = &mut info.data
+            && buffer.duration().is_none()
+            && let Some(rate) = weak.upgrade()
+        {
+            let fps = rate.property::<i32>("max-rate").max(1) as u64;
+            buffer.make_mut().set_duration(gst::ClockTime::from_nseconds(750_000_000 / fps));
+        }
+        gst::PadProbeReturn::Ok
+    });
+}
+
 impl VideoPipeline {
     /// Build and start the pipeline. `source` is a gst-launch fragment that
     /// produces raw video. `on_error` is called once if the pipeline fails.
@@ -282,6 +303,7 @@ impl VideoPipeline {
         pipeline.use_clock(Some(&gst::SystemClock::obtain()));
         let encoder = pipeline.by_name("enc").context("no encoder")?;
         let rate = pipeline.by_name("rate").context("no videorate")?;
+        give_frames_a_duration(&rate);
         let sink = pipeline
             .by_name("sink")
             .and_then(|s| s.downcast::<gst_app::AppSink>().ok())
@@ -504,4 +526,40 @@ pub fn watch_bus(pipeline: &gst::Pipeline, stopped: Arc<AtomicBool>, on_error: i
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Frames with no duration on a variable-rate stream, as GNOME's virtual
+    /// screens send them, pass videorate without aborting, and the framerate
+    /// cap still holds: 60 frames a second capped at 30 keeps every other one.
+    #[test]
+    fn frames_without_a_duration_survive_videorate() {
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(
+            "appsrc name=src format=time caps=video/x-raw,format=I420,width=16,height=16,framerate=0/1 \
+             ! videorate name=rate drop-only=true max-rate=30 ! appsink name=sink sync=false",
+        )
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        give_frames_a_duration(&pipeline.by_name("rate").unwrap());
+        let src = pipeline.by_name("src").unwrap().downcast::<gst_app::AppSrc>().unwrap();
+        let sink = pipeline.by_name("sink").unwrap().downcast::<gst_app::AppSink>().unwrap();
+        pipeline.set_state(gst::State::Playing).unwrap();
+        for i in 0..20u64 {
+            let mut buffer = gst::Buffer::from_mut_slice(vec![0u8; 16 * 16 * 3 / 2]);
+            buffer.get_mut().unwrap().set_pts(gst::ClockTime::from_nseconds(i * 16_666_667));
+            src.push_buffer(buffer).unwrap();
+        }
+        src.end_of_stream().unwrap();
+        let mut frames = 0;
+        while sink.pull_sample().is_ok() {
+            frames += 1;
+        }
+        pipeline.set_state(gst::State::Null).unwrap();
+        assert_eq!(frames, 10);
+    }
 }

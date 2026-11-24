@@ -32,10 +32,16 @@ use crate::input::gamepad::{Feedback, Gamepads};
 use ashpd::desktop::clipboard::Clipboard as ClipboardPortal;
 use crate::input::{self, InputTx};
 
+/// The size of a virtual screen. The compositor makes it as large as the
+/// stream asks for when PipeWire negotiates the format.
+pub const VIRTUAL_SIZE: (u32, u32) = (1920, 1080);
+
 /// A monitor shared through the portal.
 struct PortalMonitor {
     info: MonitorInfo,
     node: u32,
+    /// The compositor reported no size (a virtual screen): ask for ours.
+    choose_size: bool,
 }
 
 /// The host-wide portal session, created once and shared by every stream.
@@ -143,7 +149,9 @@ impl PortalHost {
     ) -> Result<Arc<Self>> {
         let mut monitors = Vec::new();
         for (index, stream) in response.streams().iter().enumerate() {
-            let (width, height) = stream.size().map(|(w, h)| (w as u32, h as u32)).unwrap_or((0, 0));
+            // A virtual screen has no size until the stream negotiates one.
+            let reported = stream.size().map(|(w, h)| (w as u32, h as u32)).filter(|&(w, h)| w > 0 && h > 0);
+            let (width, height) = reported.unwrap_or(VIRTUAL_SIZE);
             let (x, y) = stream.position().unwrap_or((0, 0));
             let name = match stream.source_type() {
                 Some(SourceType::Virtual) => format!("Virtual display {}", index + 1),
@@ -160,6 +168,7 @@ impl PortalHost {
                     primary: index == 0,
                 },
                 node: stream.pipe_wire_node_id(),
+                choose_size: reported.is_none(),
             });
         }
         if monitors.is_empty() {
@@ -212,15 +221,17 @@ impl PortalHost {
             .open_pipe_wire_remote(&self.session, OpenPipeWireRemoteOptions::default())
             .await
             .context("opening the PipeWire remote")?;
+        let (width, height) = (mon.info.width, mon.info.height);
         // Cap the framerate during PipeWire negotiation: a high-refresh
         // monitor otherwise delivers (and we'd encode) far more than needed.
+        // A virtual screen takes its size from the same negotiation.
+        let size = if mon.choose_size { format!(",width={width},height={height}") } else { String::new() };
         let source = format!(
             "pipewiresrc fd={} path={} do-timestamp=true keepalive-time=1000 \
-             ! video/x-raw,max-framerate={fps}/1",
+             ! video/x-raw,max-framerate={fps}/1{size}",
             fd.as_raw_fd(),
             mon.node,
         );
-        let (width, height) = (mon.info.width, mon.info.height);
 
         let feedback = Feedback::default();
         let input = control.then(|| {
