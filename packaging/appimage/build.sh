@@ -67,7 +67,8 @@ $SUDO apt-get install -y -qq --no-install-recommends \
     gstreamer1.0-gl gstreamer1.0-pulseaudio \
     libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev \
     libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev \
-    libgles-dev libdrm-dev libgbm-dev libudev-dev libdbus-1-dev libdecor-0-plugin-1-cairo >/dev/null
+    libgles-dev libdrm-dev libgbm-dev libudev-dev libdbus-1-dev libdecor-0-plugin-1-cairo \
+    libgtk-4-dev libadwaita-1-dev librsvg2-common adwaita-icon-theme hicolor-icon-theme libglib2.0-bin >/dev/null
 
 echo "== Rust"
 if ! command -v cargo >/dev/null; then
@@ -77,10 +78,11 @@ fi
 
 echo "== LinuxPlay $VERSION"
 export CARGO_TARGET_DIR=$WORK/target
-cargo build --release --locked -p linuxplay -p linuxplay-host -F linuxplay/bundled-sdl
+cargo build --release --locked -p linuxplay -p linuxplay-host -p linuxplay-gui -F linuxplay/bundled-sdl
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib/gstreamer-1.0" "$APPDIR/usr/libexec" "$APPDIR/usr/share/linuxplay" "$OUT"
-install -m755 "$CARGO_TARGET_DIR/release/linuxplay" "$CARGO_TARGET_DIR/release/linuxplay-host" "$APPDIR/usr/bin/"
+install -m755 "$CARGO_TARGET_DIR/release/linuxplay" "$CARGO_TARGET_DIR/release/linuxplay-host" \
+    "$CARGO_TARGET_DIR/release/linuxplay-gui" "$APPDIR/usr/bin/"
 echo "$VERSION" > "$APPDIR/usr/share/linuxplay/version"
 
 echo "== GStreamer plugins"
@@ -116,6 +118,27 @@ echo "== Window decorations"
 mkdir -p "$APPDIR/usr/lib/libdecor/plugins-1"
 cp -L "$LIB/libdecor/plugins-1/libdecor-cairo.so" "$APPDIR/usr/lib/libdecor/plugins-1/"
 
+echo "== GTK"
+# The window's GTK 4 and libadwaita come with their libraries (next step);
+# these are what they load at run time: the SVG loader for icons, GTK's
+# settings schemas, and the symbolic icons the window uses, for systems whose
+# icon theme lacks them. GIO modules stay out: the system's are built for its
+# own, newer GLib (AppRun points GIO at an empty folder).
+mkdir -p "$APPDIR/usr/lib/gdk-pixbuf/loaders" "$APPDIR/usr/share/glib-2.0/schemas" \
+    "$APPDIR/usr/share/icons/hicolor/scalable/actions" "$APPDIR/usr/lib/gio/modules"
+cp -L "$LIB/gdk-pixbuf-2.0/2.10.0/loaders/libpixbufloader-svg.so" "$APPDIR/usr/lib/gdk-pixbuf/loaders/"
+GDK_PIXBUF_MODULEDIR="$APPDIR/usr/lib/gdk-pixbuf/loaders" "$LIB/gdk-pixbuf-2.0/gdk-pixbuf-query-loaders" |
+    sed "s|$APPDIR|@APPDIR@|g" > "$APPDIR/usr/lib/gdk-pixbuf/loaders.cache.in"
+cp /usr/share/glib-2.0/schemas/org.gtk.gtk4.Settings.*.gschema.xml "$APPDIR/usr/share/glib-2.0/schemas/"
+glib-compile-schemas "$APPDIR/usr/share/glib-2.0/schemas"
+cp /usr/share/icons/hicolor/index.theme "$APPDIR/usr/share/icons/hicolor/"
+for icon in $(grep -oh '"[a-z-]*-symbolic"' crates/gui/src/*.rs | tr -d '"' | sort -u); do
+    found=$(find /usr/share/icons/Adwaita -name "$icon.svg" | head -1)
+    if [ -n "$found" ]; then cp "$found" "$APPDIR/usr/share/icons/hicolor/scalable/actions/"; else echo "   (no $icon icon)"; fi
+done
+install -Dm644 packaging/io.github.techlm77.LinuxPlay.svg \
+    "$APPDIR/usr/share/icons/hicolor/scalable/apps/io.github.techlm77.LinuxPlay.svg"
+
 echo "== Libraries"
 excluded() { case $EXCLUDE in *" $1 "*) return 0 ;; esac; return 1; }
 find "$APPDIR/usr" -type f | while read -r f; do
@@ -139,7 +162,7 @@ strip --strip-unneeded "$APPDIR/usr/bin/"* 2>/dev/null || true
 echo "== AppImage"
 install -m755 packaging/appimage/AppRun "$APPDIR/AppRun"
 install -Dm644 packaging/io.github.techlm77.LinuxPlay.svg "$APPDIR/io.github.techlm77.LinuxPlay.svg"
-sed 's/^NoDisplay=true$/NoDisplay=false/' packaging/io.github.techlm77.LinuxPlay.desktop > "$APPDIR/io.github.techlm77.LinuxPlay.desktop"
+install -m644 packaging/io.github.techlm77.LinuxPlay.desktop "$APPDIR/io.github.techlm77.LinuxPlay.desktop"
 fetch() {  # url sha256 file
     curl -fsSL --retry 3 -o "$3" "$1"
     echo "$2  $3" | sha256sum -c - >/dev/null

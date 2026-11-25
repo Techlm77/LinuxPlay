@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use linuxplay_client::known_hosts::{KnownHost, KnownHosts};
 use linuxplay_host::Decision;
 use linuxplay_net::rendezvous::{Account, Server};
 use linuxplay_net::tls::{self, Identity};
@@ -194,6 +195,11 @@ impl Engine {
                 let hosting = self.hosting.lock().await;
                 done(hosting.as_ref().ok_or_else(not_hosting)?.host.revoke(&fingerprint).map(drop))
             }
+            method::HOSTS_LIST => done(paired_hosts()),
+            method::HOSTS_FORGET => {
+                let api::ById::<String> { id } = parse(params)?;
+                done(KnownHosts::load(KnownHosts::default_path()).and_then(|mut k| k.forget_matching(&id)).map(paired))
+            }
             method::CONNECT => done(self.viewers.open(&parse::<api::Connect>(params)?)),
             method::DISCONNECT => {
                 let api::ById::<u64> { id } = parse(params)?;
@@ -269,6 +275,15 @@ impl Engine {
         let Some(options) = *self.hosting_options.lock().unwrap() else { return Ok(()) };
         self.start_hosting(options).await.map(drop)
     }
+}
+
+/// The hosts this device has paired with, most recent first.
+fn paired_hosts() -> Result<Vec<api::PairedHost>> {
+    Ok(KnownHosts::load(KnownHosts::default_path())?.recent().into_iter().map(paired).collect())
+}
+
+fn paired(h: KnownHost) -> api::PairedHost {
+    api::PairedHost { address: h.address, name: h.name, last_used: h.last_used }
 }
 
 fn parse<T: DeserializeOwned>(params: Value) -> Result<T, RpcError> {

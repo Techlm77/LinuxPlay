@@ -96,7 +96,21 @@ fn connect(options: Connect) -> Result<()> {
     })
 }
 
+/// `linuxplay` on its own opens the window, `linuxplay-gui`, which is
+/// installed next to it.
+fn open_window() -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let beside = std::env::current_exe()?.with_file_name("linuxplay-gui");
+    if !beside.exists() {
+        anyhow::bail!("the LinuxPlay window (linuxplay-gui) isn't installed here; `linuxplay --help` lists the commands");
+    }
+    Err(std::process::Command::new(beside).exec().into())
+}
+
 fn main() -> Result<()> {
+    if std::env::args_os().len() == 1 {
+        return open_window();
+    }
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,zbus=error".into()))
         .with_writer(std::io::stderr)

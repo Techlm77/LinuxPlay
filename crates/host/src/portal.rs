@@ -14,6 +14,7 @@
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use ashpd::desktop::PersistMode;
@@ -35,6 +36,8 @@ use crate::input::{self, InputTx};
 /// The size of a virtual screen. The compositor makes it as large as the
 /// stream asks for when PipeWire negotiates the format.
 pub const VIRTUAL_SIZE: (u32, u32) = (1920, 1080);
+/// How long the trial run that reads a stream's real picture size may take.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A monitor shared through the portal.
 struct PortalMonitor {
@@ -233,6 +236,27 @@ impl PortalHost {
             mon.node,
         );
 
+        // The portal gives a monitor's size in the desktop's coordinates, which
+        // a scaled desktop (say 1920x1080 at 135 %) makes smaller than the
+        // pixels the compositor sends. The bitrate and the size the client is
+        // told follow the picture, so read its real size from PipeWire.
+        // Pointer positions are fractions of the picture: they keep the
+        // desktop's coordinates.
+        let picture = if mon.choose_size {
+            (width, height)
+        } else {
+            let probe = source.clone();
+            match tokio::task::spawn_blocking(move || negotiated_size(&probe)).await.ok().flatten() {
+                Some(size) => {
+                    if size != (width, height) {
+                        info!("{} is {}x{} pixels ({width}x{height} in desktop coordinates)", mon.info.name, size.0, size.1);
+                    }
+                    size
+                }
+                None => (width, height),
+            }
+        };
+
         let feedback = Feedback::default();
         let input = control.then(|| {
             let (tx, rx) = input::channel();
@@ -243,13 +267,38 @@ impl PortalHost {
 
         Ok(PortalStream {
             source,
-            width,
-            height,
+            width: picture.0,
+            height: picture.1,
             input,
             feedback,
             _keep: StreamKeep { _fd: fd, _remote: self.remote.clone(), _session: self.session.clone() },
         })
     }
+}
+
+/// The picture size a PipeWire source delivers, from a short trial run (the
+/// size is agreed before the first frame).
+fn negotiated_size(source: &str) -> Option<(u32, u32)> {
+    use gstreamer as gst;
+    use gstreamer::prelude::*;
+    let pipeline = gst::parse::launch(&format!("{source} ! fakesink name=probe sync=false")).ok()?;
+    let pipeline = pipeline.downcast::<gst::Pipeline>().ok()?;
+    let pad = pipeline.by_name("probe")?.static_pad("sink")?;
+    pipeline.set_state(gst::State::Playing).ok()?;
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let mut size = None;
+    while size.is_none() && Instant::now() < deadline {
+        size = pad.current_caps().and_then(|caps| {
+            let s = caps.structure(0)?;
+            let (w, h) = (s.get::<i32>("width").ok()?, s.get::<i32>("height").ok()?);
+            (w > 0 && h > 0).then_some((w as u32, h as u32))
+        });
+        if size.is_none() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let _ = pipeline.set_state(gst::State::Null);
+    size
 }
 
 fn save_token(token: &str) {

@@ -27,9 +27,10 @@ if [[ "${1:-}" == "uninstall" ]]; then
     exit 0
 fi
 
-# The host builds with just GStreamer; the stream window also needs SDL 3 and
-# libadwaita. On a machine meant only to be shared (a host), GTK4 may be
-# absent, so build the client optionally and install whatever succeeded.
+# The host builds with just GStreamer; the stream window also needs SDL 3, and
+# the main window GTK 4 and libadwaita. On a machine meant only to be shared
+# (a host) those may be absent, so the rest is built optionally and whatever
+# succeeded is installed.
 echo "Building the host…"
 cargo build --release -p linuxplay-host
 
@@ -43,6 +44,19 @@ else
     echo "      (Ubuntu 25.04+: libsdl3-dev; Fedora: SDL3-devel; Arch: sdl3) and re-run."
 fi
 
+gui_built=false
+if $client_built; then
+    echo "Building the window…"
+    if cargo build --release -p linuxplay-gui; then
+        gui_built=true
+    else
+        echo "Note: the window didn't build — \`linuxplay ADDRESS\` still works."
+        echo "      To include it, install GTK 4 and libadwaita's development packages"
+        echo "      (Ubuntu: libgtk-4-dev libadwaita-1-dev; Fedora: gtk4-devel libadwaita-devel;"
+        echo "      Arch: gtk4 libadwaita) and re-run."
+    fi
+fi
+
 echo "Installing to $prefix …"
 install -Dm755 target/release/linuxplay-host  "$prefix/bin/linuxplay-host"
 install -Dm644 "$pkg/$appid.Host.desktop"     "$prefix/share/applications/$appid.Host.desktop"
@@ -54,6 +68,9 @@ if $client_built; then
     install -Dm644 "$pkg/$appid.desktop"      "$prefix/share/applications/$appid.desktop"
     # A graphical session's PATH often omits ~/.local/bin, so Exec is absolute.
     sed -i "s|^Exec=linuxplay|Exec=$prefix/bin/linuxplay|" "$prefix/share/applications/$appid.desktop"
+fi
+if $gui_built; then
+    install -Dm755 target/release/linuxplay-gui "$prefix/bin/linuxplay-gui"
 fi
 
 # Refresh the desktop and icon caches so the menu entries show up at once.

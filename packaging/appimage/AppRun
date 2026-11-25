@@ -1,5 +1,6 @@
 #!/bin/sh
 # LinuxPlay AppImage entry point.
+#   LinuxPlay.AppImage                                         the window
 #   LinuxPlay.AppImage TARGET | connect … | service | api …   the stream window and engine
 #   LinuxPlay.AppImage host [options]                          share this computer
 HERE=$(dirname "$(readlink -f "$0")")
@@ -35,6 +36,15 @@ export GST_PLUGIN_PATH_1_0=
 export GST_PLUGIN_SCANNER_1_0="$HERE/usr/libexec/gst-plugin-scanner"
 export GST_REGISTRY_1_0="$CACHE/gstreamer-registry-$VERSION-pw$pipewire.bin"
 export LIBDECOR_PLUGIN_DIR="$HERE/usr/lib/libdecor/plugins-1"
+# The window's GTK: its icons and settings schemas, the bundled SVG loader
+# (its list holds this mount's path, so it is written for each run), and no
+# system GIO modules, which are built for a different GLib.
+export XDG_DATA_DIRS="$HERE/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+export GSETTINGS_SCHEMA_DIR="$HERE/usr/share/glib-2.0/schemas"
+export GIO_MODULE_DIR="$HERE/usr/lib/gio/modules"
+loaders="$CACHE/gdk-pixbuf-loaders-$VERSION.cache"
+sed "s|@APPDIR@|$HERE|g" "$HERE/usr/lib/gdk-pixbuf/loaders.cache.in" > "$loaders" 2>/dev/null &&
+    export GDK_PIXBUF_MODULE_FILE="$loaders"
 # The system's libva if it has one (its VA drivers need it), else the bundled one.
 has_libva=false
 for dir in /usr/lib/x86_64-linux-gnu /usr/lib64 /usr/lib /lib/x86_64-linux-gnu; do

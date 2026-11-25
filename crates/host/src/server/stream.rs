@@ -115,7 +115,7 @@ impl Host {
 
         // Weigh encoders, codecs, link type and resolution into one plan.
         let overrides = Overrides {
-            encoder: cfg.encoder.clone(),
+            encoder: cfg.encoder.as_deref().map(|name| video::resolve(name).to_string()),
             fps: cfg.fps,
             start_kbps: cfg.start_kbps,
             max_kbps: cfg.max_kbps,

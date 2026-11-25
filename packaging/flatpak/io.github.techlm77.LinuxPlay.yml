@@ -3,17 +3,18 @@
 # Build with packaging/flatpak/build.sh, which needs no root: it uses
 # flatpak-builder from the org.flatpak.Builder flatpak.
 #
-# The Freedesktop runtime already carries what LinuxPlay runs on: GStreamer
-# with the VA-API, Vulkan and PipeWire plugins (plus NVENC/NVDEC once the
-# matching Nvidia driver extension is installed, which Flatpak does by
-# itself), SDL 3 and the system fonts.
+# The GNOME runtime (built on Freedesktop 26.08) already carries what
+# LinuxPlay runs on: GTK 4 and libadwaita for the window, GStreamer with the
+# VA-API, Vulkan and PipeWire plugins (plus NVENC/NVDEC once the matching
+# Nvidia driver extension is installed, which Flatpak does by itself), SDL 3
+# and the system fonts.
 #
 # This build fetches crates from the network (build-args: --share=network).
 # A Flathub submission would vendor them instead (flatpak-cargo-generator).
 id: io.github.techlm77.LinuxPlay
-runtime: org.freedesktop.Platform
-runtime-version: '26.08'
-sdk: org.freedesktop.Sdk
+runtime: org.gnome.Platform
+runtime-version: '51'
+sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
 command: linuxplay
@@ -65,8 +66,9 @@ modules:
   - name: linuxplay
     buildsystem: simple
     build-commands:
-      - cargo build --release --locked -p linuxplay -p linuxplay-host
+      - cargo build --release --locked -p linuxplay -p linuxplay-host -p linuxplay-gui
       - install -Dm755 target/release/linuxplay /app/bin/linuxplay
+      - install -Dm755 target/release/linuxplay-gui /app/bin/linuxplay-gui
       - install -Dm755 target/release/linuxplay-host /app/bin/linuxplay-host
       - install -Dm644 packaging/io.github.techlm77.LinuxPlay.svg
         /app/share/icons/hicolor/scalable/apps/io.github.techlm77.LinuxPlay.svg

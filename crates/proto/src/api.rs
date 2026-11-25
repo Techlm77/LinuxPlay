@@ -30,6 +30,8 @@
 //! | `host.uninvite` | [`ById`] (text id) | `null` |
 //! | `host.trusted` | | list of [`TrustedDevice`] |
 //! | `host.revoke` | [`Revoke`] | `null` |
+//! | `hosts.list` | | list of [`PairedHost`], most recent first |
+//! | `hosts.forget` | [`ById`] (text: address or name) | the [`PairedHost`] forgotten |
 //! | `connect` | [`Connect`] | [`Connection`] |
 //! | `disconnect` | [`ById`] (number id) | `null` |
 
@@ -58,6 +60,8 @@ pub mod method {
     pub const HOST_UNINVITE: &str = "host.uninvite";
     pub const HOST_TRUSTED: &str = "host.trusted";
     pub const HOST_REVOKE: &str = "host.revoke";
+    pub const HOSTS_LIST: &str = "hosts.list";
+    pub const HOSTS_FORGET: &str = "hosts.forget";
     pub const CONNECT: &str = "connect";
     pub const DISCONNECT: &str = "disconnect";
     /// Notification sent to subscribers; its params are the new `State`.
@@ -297,6 +301,16 @@ pub struct TrustedDevice {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Revoke {
     pub fingerprint: String,
+}
+
+/// A host this device has paired with, from `hosts.list`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct PairedHost {
+    /// What to pass to `connect`.
+    pub address: String,
+    pub name: String,
+    /// Unix seconds.
+    pub last_used: u64,
 }
 
 /// Params of `connect`: open a stream window.

@@ -10,3 +10,6 @@ Terminal=false
 Categories=Network;RemoteAccess;
 Keywords=remote;desktop;share;screen;host;server;
 StartupNotify=false
+# The window's Share page does this too; this standalone host (with its tray
+# icon) is for command-line and headless setups, so it stays out of the menu.
+NoDisplay=true
