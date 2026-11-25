@@ -9,7 +9,8 @@
 #   stream CAPTURE     host + client on this machine for 14 s (CAPTURE: test, x11, or
 #                      portal, which waits STREAM_WAIT s for the share dialog to be
 #                      answered and offers a virtual display)
-#   stop               end anything `stream` left running
+#   window             open LinuxPlay's window (as the app menu would) for WINDOW_WAIT s
+#   stop               end anything `stream` or `window` left running
 set -u
 APP=io.github.techlm77.LinuxPlay
 DIR="$HOME/linuxplay-test"
@@ -65,7 +66,7 @@ host_config() {
     if [ "$KIND" = appimage ]; then echo "$HOME/.config/linuxplay/host"; else echo "$HOME/.var/app/$APP/config/linuxplay/host"; fi
 }
 stop_all() {
-    if [ "$KIND" = appimage ]; then pkill -x linuxplay-host; pkill -x linuxplay; else flatpak kill "$APP"; fi
+    if [ "$KIND" = appimage ]; then pkill -x linuxplay-gui; pkill -x linuxplay-host; pkill -x linuxplay; else flatpak kill "$APP"; fi
 } 2>/dev/null
 
 case "${1:-}" in
@@ -170,10 +171,21 @@ stream)
     kv CLIENT_PROBLEMS "$(printf '%s\n' "$clientlog" | grep -E ' WARN | ERROR |panicked' | cut -c29-220 | head -4 | tr '\n' ';')"
     kv HOST_PROBLEMS "$(printf '%s\n' "$hostlog" | grep -E ' WARN | ERROR |panicked' | grep -v 'unattended access is on\|close_notify' | cut -c29-220 | head -4 | tr '\n' ';')"
     ;;
+window)
+    import_session || { kv ERROR "no graphical session"; exit 1; }
+    stop_all
+    sleep 1
+    nohup "$(if [ "$KIND" = appimage ]; then echo "$AI"; else echo flatpak; fi)" \
+        $([ "$KIND" = appimage ] || echo run "$APP") > "$DIR/window.log" 2>&1 &
+    sleep "${WINDOW_WAIT:-10}"
+    kv WINDOW "$(pgrep -x linuxplay-gui >/dev/null && echo open || echo closed)"
+    kv ENGINE "$(pgrep -f 'linuxplay service' >/dev/null && echo running || echo 'not running')"
+    kv WINDOW_PROBLEMS "$(plain < "$DIR/window.log" | grep -E 'CRITICAL|ERROR|panicked|cannot|Failed' | grep -v -e 'accessibility bus' -e 'Gdk-WARNING.*Vulkan' | cut -c1-200 | head -4 | tr '\n' ';')"
+    ;;
 stop)
     stop_all; kv STOPPED yes
     ;;
 *)
-    echo "usage: $0 install BUNDLE | facts | stream test|x11 | stop"; exit 2
+    echo "usage: $0 install BUNDLE | facts | stream test|x11|portal | window | stop"; exit 2
     ;;
 esac

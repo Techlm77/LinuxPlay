@@ -87,6 +87,16 @@ class Run:
                    + (f" | host: {kv['HOST_PROBLEMS']}" if kv.get("HOST_PROBLEMS") else ""))
         self.V.pull(self.vm, f"{GUEST_DIR}/*.log", self.out)
 
+    def window(self):
+        """Open the main window and screenshot it once it has started."""
+        rc, kv = self.guest("window", timeout=90)
+        self.shot("window")
+        self.result["window"] = kv
+        self.check("window", kv.get("WINDOW") == "open" and kv.get("ENGINE") == "running" and not kv.get("WINDOW_PROBLEMS"),
+                   f"window {kv.get('WINDOW', '?')}, engine {kv.get('ENGINE', '?')}"
+                   + (f" | {kv['WINDOW_PROBLEMS']}" if kv.get("WINDOW_PROBLEMS") else ""))
+        self.guest("stop", timeout=30)
+
     def run(self, bundle, snapshot):
         V, G, vm, R = self.V, self.G, self.vm, self.result
         t0 = time.time()
@@ -123,6 +133,7 @@ class Run:
         if info.get("SESSION_TYPE") == "x11":
             self.check("x11_capture_plugin", facts.get("X11_CAPTURE") == "yes", "ximagesrc in the package")
             self.stream("x11")
+        self.window()
         R["uinput"] = facts.get("UINPUT", "")
         R["seconds"] = round(time.time() - t0)
 

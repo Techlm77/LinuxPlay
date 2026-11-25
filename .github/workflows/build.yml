@@ -28,16 +28,18 @@ jobs:
               apt-get update -qq;
               apt-get install -y -qq curl ca-certificates build-essential cmake pkg-config
               libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libsdl3-dev
+              libgtk-4-dev libadwaita-1-dev
           - name: Fedora 45
             image: fedora:45
             deps: >-
               dnf -y install curl gcc gcc-c++ cmake pkgconf-pkg-config
               gstreamer1-devel gstreamer1-plugins-base-devel SDL3-devel
+              gtk4-devel libadwaita-devel
           - name: Arch Linux
             image: archlinux:latest
             deps: >-
               pacman -Syu --noconfirm --needed base-devel cmake curl
-              gstreamer gst-plugins-base sdl3
+              gstreamer gst-plugins-base sdl3 gtk4 libadwaita
     steps:
       - uses: actions/checkout@v4
       - name: Build and test
@@ -62,7 +64,7 @@ jobs:
       - name: Clippy
         run: |
           docker run --rm -v "$PWD":/src:ro archlinux:latest bash -euc '
-            pacman -Syu --noconfirm --needed base-devel cmake curl gstreamer gst-plugins-base sdl3
+            pacman -Syu --noconfirm --needed base-devel cmake curl gstreamer gst-plugins-base sdl3 gtk4 libadwaita
             curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy
             . "$HOME/.cargo/env"
             cd /src
@@ -91,7 +93,7 @@ jobs:
     name: Flatpak
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
       options: --privileged
     steps:
       - uses: actions/checkout@v4

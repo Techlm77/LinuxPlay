@@ -1,0 +1,22 @@
+[package]
+name = "linuxplay-gui"
+description = "LinuxPlay's window: connect, share this computer, sign in"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "linuxplay-gui"
+path = "src/main.rs"
+
+[dependencies]
+linuxplay-proto.workspace = true
+
+# GTK 4.14 and libadwaita 1.5 (Ubuntu 24.04, the AppImage's base) are the
+# oldest versions this needs.
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
+async-channel.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true

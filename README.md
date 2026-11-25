@@ -22,9 +22,10 @@ Low-latency remote desktop and game streaming for Linux, written in Rust.
 - **Multi-monitor:** each display is offered separately and several can be
   streamed at once.
 
-> **Status:** the engine below is working and tested. The graphical front end
-> (sign-in, device list, invites) is being built separately; until it lands,
-> everything is driven from the command line.
+Open **LinuxPlay** from your app menu (or run `linuxplay`): its window
+connects to your computers, shares this one, makes invite links and signs in
+to your account. Everything it does can also be done from the command line,
+as below.
 
 ## Install
 
@@ -73,19 +74,32 @@ and the Arch family; on older systems use the Flatpak. Build it with
 ### From source
 
 Rust 1.85+ (from [rustup](https://rustup.rs)), GStreamer with its base, good,
-bad, VA-API and PipeWire plugins, and SDL 3. On Arch:
+bad, VA-API and PipeWire plugins, SDL 3, and GTK 4.14+ with libadwaita 1.5+
+for the window. On Arch:
 
 ```sh
-sudo pacman -S --needed rust base-devel cmake sdl3 pipewire \
+sudo pacman -S --needed rust base-devel cmake sdl3 gtk4 libadwaita pipewire \
     gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad \
     gst-plugin-va gst-plugin-pipewire gst-libav
 cargo build --release
 ```
 
-This builds `linuxplay` (stream window and engine), `linuxplay-host` and
-`linuxplay-rendezvous` (the account server) into `target/release/`.
+This builds `linuxplay` (stream window and engine), `linuxplay-gui` (the
+window), `linuxplay-host` and `linuxplay-rendezvous` (the account server)
+into `target/release/`.
 
 ## Usage
+
+### The window
+
+| Page | |
+|---|---|
+| **Connect** | type an address, a device's name or an invite link; your account's devices and the computers you've paired with, one click away |
+| **Share** | share this computer, with the options below; pairing PINs and connection requests pop up here (and as notifications); who is connected, invite links, trusted devices |
+| **Account** | sign in to (or create) an account on your own account server; this computer's name and fingerprint |
+
+Closing the window while this computer is shared, or a stream is open, keeps
+LinuxPlay running in the background; open it again to bring the window back.
 
 ### On your network
 
@@ -240,7 +254,7 @@ After `subscribe` the engine pushes the whole new state whenever anything
 changes (a PIN to show, a connection waiting for approval, a guest leaving),
 so a front end only has to draw the latest one. Methods: `state`, `subscribe`,
 `account.create`/`login`/`logout`/`devices`/`remove_device`,
-`host.start`/`stop`/`decide`/`disconnect`/`invite`/`uninvite`/`trusted`/`revoke`,
+`host.start`/`stop`/`decide`/`disconnect`/`invite`/`uninvite`/`trusted`/`revoke`, `hosts.list`/`forget`,
 `connect`, `disconnect`. Every type is documented in
 [`crates/proto/src/api.rs`](crates/proto/src/api.rs). Try it from a shell:
 
@@ -429,13 +443,13 @@ Notes:
 | `crates/client` | the stream window: decoding, its render thread, input capture |
 | `crates/rendezvous` | `linuxplay-rendezvous`: your own account server: accounts, device lists, invites, tunnels |
 | `crates/app` | `linuxplay`: the stream window, the engine (`service`) and its API client (`api`) |
+| `crates/gui` | `linuxplay-gui`: the window (GTK 4 + libadwaita), a front end for the engine's API |
 
 `cargo test --workspace` runs the tests, including a host and client talking
 over real sockets and the account server end to end.
 
 ## Not there yet
 
-- The graphical front end (the engine and its API are ready for it).
 - A client-side cursor (the host draws the pointer into the picture).
 
 ## License
