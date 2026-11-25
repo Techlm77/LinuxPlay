@@ -37,11 +37,15 @@ const ENCODERS: &[Encoder] = {
         Encoder { element, codec, backend }
     }
     &[
+        // GStreamer before 1.26 names its current NVENC encoders nvcuda*; its
+        // nvh26*enc are the old ones, whose presets current drivers refuse.
+        e("nvcudah264enc", H264, Nvenc),
         e("nvh264enc", H264, Nvenc),
         e("vah264enc", H264, Va),
         e("vah264lpenc", H264, Va),
         e("x264enc", H264, Software),
         e("openh264enc", H264, Software),
+        e("nvcudah265enc", H265, Nvenc),
         e("nvh265enc", H265, Nvenc),
         e("vah265enc", H265, Va),
         e("vah265lpenc", H265, Va),
@@ -59,7 +63,28 @@ fn has(factory: &str) -> bool {
 
 /// Encoders whose GStreamer element is installed and usable on this machine.
 pub fn available() -> Vec<Encoder> {
-    ENCODERS.iter().copied().filter(|e| has(e.element)).collect()
+    ENCODERS.iter().copied().filter(|e| has(e.element) && !superseded(e.element)).collect()
+}
+
+/// The old NVENC element, where GStreamer also has the current one.
+fn superseded(element: &str) -> bool {
+    current_nvenc(element).is_some_and(has)
+}
+
+/// The current NVENC element standing in for an old name, on GStreamer
+/// before 1.26: `nvh265enc` → `nvcudah265enc`.
+fn current_nvenc(element: &str) -> Option<&'static str> {
+    match element {
+        "nvh264enc" => Some("nvcudah264enc"),
+        "nvh265enc" => Some("nvcudah265enc"),
+        _ => None,
+    }
+}
+
+/// An encoder asked for by name: an old NVENC name means its current twin
+/// where the old element would be refused.
+pub fn resolve(element: &str) -> &str {
+    current_nvenc(element).filter(|_| superseded(element)).unwrap_or(element)
 }
 
 /// The conversion in front of the encoder, chosen so the colour conversion
