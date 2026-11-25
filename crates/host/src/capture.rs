@@ -43,6 +43,10 @@ impl CaptureKind {
 /// its size, and where to send input. Dropping it ends the capture.
 pub struct Capture {
     pub source: String,
+    /// The same capture handing over GPU buffers (DMA-BUF) instead of
+    /// pictures in memory, where the source can: the start of a zero-copy
+    /// pipeline (see [`crate::video::zero_copy_works`]).
+    pub gpu_source: Option<String>,
     pub width: u32,
     pub height: u32,
     /// Where to send input; `None` for a view-only session.
@@ -78,6 +82,7 @@ pub fn open_x11(fps: u32, mon: &MonitorInfo, control: bool) -> Result<Capture> {
     info!("capturing X11 monitor {} ({}x{} at {},{})", mon.name, mon.width, mon.height, mon.x, mon.y);
     Ok(Capture {
         source,
+        gpu_source: None,
         width: mon.width,
         height: mon.height,
         input,
@@ -153,6 +158,7 @@ pub fn open_test(
     let feedback = Feedback::default();
     Capture {
         source,
+        gpu_source: None,
         width: mon.width,
         height: mon.height,
         input: control.then(|| input::spawn(input::Recorder(log), feedback.clone())),
@@ -165,6 +171,7 @@ pub fn open_test(
 pub fn from_portal(stream: PortalStream) -> Capture {
     Capture {
         source: stream.source,
+        gpu_source: Some(stream.gpu_source),
         width: stream.width,
         height: stream.height,
         input: stream.input,

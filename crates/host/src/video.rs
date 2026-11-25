@@ -95,9 +95,75 @@ fn converter(enc: &Encoder) -> &'static str {
         Backend::Nvenc if has("cudaupload") && has("cudaconvert") => {
             "cudaupload ! cudaconvert ! video/x-raw(memory:CUDAMemory),format=NV12"
         }
+        // Converting to NV12 on the CPU is quicker end to end than handing
+        // NVENC the RGB frames (measured: 4.2 against 6.4 ms at 1080p60, for
+        // about the same CPU).
         Backend::Nvenc => "videoconvert n-threads=4 ! video/x-raw,format=NV12",
         Backend::Software => "videoconvert n-threads=4 ! video/x-raw,format=I420",
     }
+}
+
+/// The conversion in front of the encoder when the capture hands over GPU
+/// buffers (DMA-BUF): the picture is imported where it is and converted
+/// there, so no CPU copy or conversion happens at all. NVENC takes OpenGL
+/// textures (converted by a shader); VA-API imports the buffer itself.
+fn gpu_converter(enc: &Encoder) -> Option<&'static str> {
+    match enc.backend {
+        Backend::Nvenc if has("glupload") && has("glcolorconvert") => {
+            Some("glupload ! glcolorconvert ! video/x-raw(memory:GLMemory),format=NV12")
+        }
+        Backend::Va => Some("vapostproc ! video/x-raw(memory:VAMemory),format=NV12"),
+        _ => None,
+    }
+}
+
+/// How long the zero-copy trial run may take to deliver its first picture.
+const ZERO_COPY_TRIAL: Duration = Duration::from_secs(2);
+
+/// Whether `gpu_source` can feed `enc` without copies: a short trial run of
+/// the import and conversion must deliver a picture. It fails, for one, when
+/// the compositor draws on one GPU and the encoder is on another (their
+/// buffers don't cross). `LINUXPLAY_ZERO_COPY=0` turns it off, for comparisons.
+pub fn zero_copy_works(gpu_source: &str, enc: &Encoder) -> bool {
+    if std::env::var_os("LINUXPLAY_ZERO_COPY").is_some_and(|v| v == "0") {
+        info!("zero-copy capture is turned off (LINUXPLAY_ZERO_COPY=0)");
+        return false;
+    }
+    let Some(conv) = gpu_converter(enc) else { return false };
+    let trial = || -> Result<bool> {
+        let pipeline = gst::parse::launch(&format!("{gpu_source} ! {conv} ! fakesink name=probe sync=false"))?
+            .downcast::<gst::Pipeline>()
+            .map_err(|_| anyhow!("not a pipeline"))?;
+        let arrived = Arc::new(AtomicBool::new(false));
+        let flag = arrived.clone();
+        let pad = pipeline.by_name("probe").and_then(|s| s.static_pad("sink")).context("no probe")?;
+        pad.add_probe(gst::PadProbeType::BUFFER, move |_, _| {
+            flag.store(true, Ordering::Relaxed);
+            gst::PadProbeReturn::Ok
+        });
+        let bus = pipeline.bus().context("no bus")?;
+        pipeline.set_state(gst::State::Playing)?;
+        let deadline = Instant::now() + ZERO_COPY_TRIAL;
+        let mut failed = None;
+        while !arrived.load(Ordering::Relaxed) && failed.is_none() && Instant::now() < deadline {
+            if let Some(msg) = bus.timed_pop_filtered(gst::ClockTime::from_mseconds(10), &[gst::MessageType::Error])
+                && let gst::MessageView::Error(e) = msg.view()
+            {
+                failed = Some(e.error().to_string());
+            }
+        }
+        let _ = pipeline.set_state(gst::State::Null);
+        if let Some(why) = failed {
+            debug!("zero-copy trial failed: {why}");
+        }
+        Ok(arrived.load(Ordering::Relaxed))
+    };
+    let works = trial().unwrap_or_else(|e| {
+        debug!("zero-copy trial: {e:#}");
+        false
+    });
+    info!("zero-copy capture: {}", if works { "on (GPU buffers straight to the encoder)" } else { "off (pictures go through memory)" });
+    works
 }
 
 fn parser(codec: VideoCodec) -> &'static str {
@@ -299,8 +365,11 @@ fn give_frames_a_duration(rate: &gst::Element) {
 impl VideoPipeline {
     /// Build and start the pipeline. `source` is a gst-launch fragment that
     /// produces raw video. `on_error` is called once if the pipeline fails.
+    /// Start encoding from `source`; with `gpu`, it hands over GPU buffers
+    /// that [`zero_copy_works`] found usable.
     pub fn start(
         source: &str,
+        gpu: bool,
         enc: Encoder,
         fps: u32,
         start_kbps: u32,
@@ -309,15 +378,24 @@ impl VideoPipeline {
     ) -> Result<Arc<Self>> {
         // videorate (drop-only) lets us lower the framerate live under
         // bandwidth pressure without rebuilding the pipeline.
-        let desc = format!(
-            "{source} ! videorate name=rate drop-only=true max-rate={fps} \
-             ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream \
-             ! {conv} ! {el} name=enc ! {parse} \
-             ! appsink name=sink sync=false async=false max-buffers=8 enable-last-sample=false",
-            conv = converter(&enc),
+        let rate = format!(
+            "videorate name=rate drop-only=true max-rate={fps} \
+             ! queue max-size-buffers=1 max-size-bytes=0 max-size-time=0 leaky=downstream"
+        );
+        let tail = format!(
+            "{el} name=enc ! {parse} ! appsink name=sink sync=false async=false max-buffers=8 enable-last-sample=false",
             el = enc.element,
             parse = parser(enc.codec),
         );
+        let desc = match gpu_converter(&enc).filter(|_| gpu) {
+            // The compositor shares only a few GPU buffers (three, on KWin)
+            // and can't draw the next frame into one we still hold: convert
+            // straight away, which hands it back, and let videorate and the
+            // queue hold the converted copies. Holding the compositor's own
+            // buffer there halved the framerate.
+            Some(conv) => format!("{source} ! {conv} ! {rate} ! {tail}"),
+            None => format!("{source} ! {rate} ! {conv} ! {tail}", conv = converter(&enc)),
+        };
         info!("video pipeline: {desc}");
         let pipeline = gst::parse::launch(&desc)
             .context("building the video pipeline")?

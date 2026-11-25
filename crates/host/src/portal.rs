@@ -78,6 +78,8 @@ pub struct PortalOptions {
 /// One running screen-cast stream for a single monitor.
 pub struct PortalStream {
     pub source: String,
+    /// The same stream handing over GPU buffers (DMA-BUF).
+    pub gpu_source: String,
     pub width: u32,
     pub height: u32,
     /// `None` for a view-only session: no input task runs at all.
@@ -229,12 +231,9 @@ impl PortalHost {
         // monitor otherwise delivers (and we'd encode) far more than needed.
         // A virtual screen takes its size from the same negotiation.
         let size = if mon.choose_size { format!(",width={width},height={height}") } else { String::new() };
-        let source = format!(
-            "pipewiresrc fd={} path={} do-timestamp=true keepalive-time=1000 \
-             ! video/x-raw,max-framerate={fps}/1{size}",
-            fd.as_raw_fd(),
-            mon.node,
-        );
+        let pipewire = format!("pipewiresrc fd={} path={} do-timestamp=true keepalive-time=1000", fd.as_raw_fd(), mon.node);
+        let source = format!("{pipewire} ! video/x-raw,max-framerate={fps}/1{size}");
+        let gpu_source = format!("{pipewire} ! video/x-raw(memory:DMABuf),max-framerate={fps}/1{size}");
 
         // The portal gives a monitor's size in the desktop's coordinates, which
         // a scaled desktop (say 1920x1080 at 135 %) makes smaller than the
@@ -267,6 +266,7 @@ impl PortalHost {
 
         Ok(PortalStream {
             source,
+            gpu_source,
             width: picture.0,
             height: picture.1,
             input,
