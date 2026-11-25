@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/proto", "crates/net", "crates/media", "crates/host", "crates/client", "crates/rendezvous", "crates/app", "crates/gui"]
 
 [workspace.package]
-version = "2.0.0"
+version = "2.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 authors = ["Techlm77"]

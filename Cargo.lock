@@ -2044,7 +2044,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "linuxplay"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2064,7 +2064,7 @@ dependencies = [
 
 [[package]]
 name = "linuxplay-client"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2091,7 +2091,7 @@ dependencies = [
 
 [[package]]
 name = "linuxplay-gui"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "async-channel",
  "gtk4",
@@ -2104,7 +2104,7 @@ dependencies = [
 
 [[package]]
 name = "linuxplay-host"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "ashpd",
@@ -2134,7 +2134,7 @@ dependencies = [
 
 [[package]]
 name = "linuxplay-media"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "gstreamer",
  "libc",
@@ -2144,7 +2144,7 @@ dependencies = [
 
 [[package]]
 name = "linuxplay-net"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2172,7 +2172,7 @@ dependencies = [
 
 [[package]]
 name = "linuxplay-proto"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "postcard",
  "serde",
@@ -2181,7 +2181,7 @@ dependencies = [
 
 [[package]]
 name = "linuxplay-rendezvous"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "argon2",
