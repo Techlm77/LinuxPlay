@@ -144,7 +144,14 @@ impl Host {
         let (ev_tx, mut ev_rx) = mpsc::channel::<SessionEvent>(STREAM_EVENT_QUEUE);
         let (end_tx, mut end_rx) = mpsc::unbounded_channel::<StreamEnd>();
         let on_error = |tx: mpsc::UnboundedSender<StreamEnd>| move |e: String| drop(tx.send(StreamEnd::Failed(e)));
-        let video = VideoPipeline::start(&capture.source, enc, plan.fps, plan.start_kbps, plan.max_kbps, on_error(end_tx.clone()))?;
+        // GPU buffers straight to the encoder where that works; pictures
+        // through memory otherwise.
+        let gpu = match capture.gpu_source.clone() {
+            Some(src) => tokio::task::spawn_blocking(move || video::zero_copy_works(&src, &enc)).await.unwrap_or(false),
+            None => false,
+        };
+        let source = if gpu { capture.gpu_source.as_deref().unwrap_or(&capture.source) } else { &capture.source };
+        let video = VideoPipeline::start(source, gpu, enc, plan.fps, plan.start_kbps, plan.max_kbps, on_error(end_tx.clone()))?;
         let audio = if give_audio {
             AudioPipeline::start(on_error(end_tx.clone()))
                 .inspect_err(|e| warn!("no audio: {e:#}"))

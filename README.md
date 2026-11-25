@@ -285,6 +285,21 @@ Decoding takes about 0.3 ms and presenting 0.1 to 0.2 ms; the rest is the
 network. These use a generated test picture (`linuxplay-host --capture test
 --test-size 1920x1080`), so they exclude the compositor's own capture delay.
 
+**Real screen capture, zero copy.** On Wayland the compositor hands LinuxPlay
+its frames as GPU buffers, which go straight to the encoder: OpenGL converts
+them for NVENC, VA-API imports them itself. No frame passes through the CPU.
+Streaming a moving full-screen picture from KDE Plasma on an RTX 5060 Ti at
+1080p 60 fps (H.265, about 22 Mbit/s, wired LAN):
+
+| | CPU (host) | CPU (compositor) | Capture to screen |
+|---|---|---|---|
+| Zero copy | 6 % of a core | 3 % | 3.0 ms |
+| Through memory (before 2.2) | 28 % | 8 % | 4.0 ms |
+
+When the buffers can't reach the encoder (say the desktop is drawn on one GPU
+and encoded on another), a short trial run notices and LinuxPlay uses the
+memory path. `LINUXPLAY_ZERO_COPY=0` forces that path, for comparisons.
+
 ## Tested on
 
 Every row is a fresh, fully updated install in a virtual machine (no GPU, so
